@@ -1,9 +1,10 @@
 //! Protocole réseau partagé (FlatBuffers). Le code est généré par flatc dans OUT_DIR.
-#![allow(clippy::all, unused_imports)]
 
-include!(concat!(env!("OUT_DIR"), "/protocol_generated.rs"));
-
-pub use cyberpunk_rp::protocol::*;
+#[allow(clippy::all, unused_imports)]
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/protocol_generated.rs"));
+}
+pub use generated::cyberpunk_rp::protocol::*;
 
 #[cfg(test)]
 mod tests {

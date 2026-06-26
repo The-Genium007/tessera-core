@@ -9,7 +9,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 protocol = { path = "../protocol" }
-flatbuffers = "25"
+flatbuffers = "=25.12.19"
 
 [lib]
 path = "src/lib.rs"

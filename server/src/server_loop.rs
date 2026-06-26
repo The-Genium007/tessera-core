@@ -7,7 +7,7 @@ use flatbuffers::FlatBufferBuilder;
 use protocol::*;
 
 pub struct Server {
-    pub world: World,
+    world: World,
 }
 
 impl Server {
@@ -37,24 +37,29 @@ impl Server {
         let Ok(env) = flatbuffers::root::<ClientEnvelope>(data) else {
             return;
         };
-        if env.msg_type() == ClientMsg::PositionUpdate {
-            if let Some(pu) = env.msg_as_position_update() {
-                if let Some(p) = pu.position() {
-                    self.world.set_pose(
-                        from,
-                        Pose {
-                            x: p.x(),
-                            y: p.y(),
-                            z: p.z(),
-                            yaw: pu.yaw(),
-                        },
-                    );
+        match env.msg_type() {
+            ClientMsg::Join => { /* TODO(Phase-1): stocker le display_name */ }
+            ClientMsg::PositionUpdate => {
+                if let Some(pu) = env.msg_as_position_update() {
+                    if let Some(p) = pu.position() {
+                        self.world.set_pose(
+                            from,
+                            Pose {
+                                x: p.x(),
+                                y: p.y(),
+                                z: p.z(),
+                                yaw: pu.yaw(),
+                            },
+                        );
+                    }
                 }
             }
+            _ => {}
         }
     }
 
     fn encode_snapshot_for(&self, viewer: ClientId) -> Vec<u8> {
+        // TODO(perf, Phase 2): réutiliser un FlatBufferBuilder par tick (reset()) au lieu d'en allouer un par joueur.
         let mut b = FlatBufferBuilder::new();
         let states: Vec<_> = self
             .world
@@ -150,5 +155,13 @@ mod tests {
         let p = players.get(0);
         assert_eq!(p.id(), 1);
         assert_eq!(p.position().unwrap().x(), 5.0);
+
+        let sent_to_1 = t.take_sent(1);
+        assert_eq!(sent_to_1.len(), 1, "un snapshot envoyé au client 1");
+        let env1 = flatbuffers::root::<ServerEnvelope>(&sent_to_1[0]).unwrap();
+        let snap1 = env1.msg_as_snapshot().unwrap();
+        let players1 = snap1.players().unwrap();
+        assert_eq!(players1.len(), 1);
+        assert_eq!(players1.get(0).id(), 2); // client 1 voit client 2
     }
 }
