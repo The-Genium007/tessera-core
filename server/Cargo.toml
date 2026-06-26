@@ -8,6 +8,8 @@ license.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+protocol = { path = "../protocol" }
+flatbuffers = "25"
 
 [lib]
 path = "src/lib.rs"

@@ -1,5 +1,6 @@
 //! Squelette du serveur autoritaire. Constantes de simulation (voir spec §6).
 
+pub mod server_loop;
 pub mod transport;
 pub mod world;
 
