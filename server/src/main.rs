@@ -1,11 +1,64 @@
-//! Point d'entrée du serveur (squelette Phase 0-A : log + affiche le tick rate).
+//! Point d'entrée du serveur : boucle de tick à fréquence fixe.
+//!
+//! Sans la feature `gns`, le serveur tourne à vide (aucun transport réseau réel n'est branché).
+//! Avec `--features gns`, passer une adresse en argument pour activer GnsTransport :
+//!   `cargo run -p server --features gns -- 127.0.0.1:27020`
+
+use std::time::{Duration, Instant};
 
 fn main() {
     tracing_subscriber::fmt::init();
     let hz = server::default_tick_rate_hz();
+    let period = Duration::from_secs_f64(1.0 / hz as f64);
     tracing::info!(
         tick_rate_hz = hz,
-        "Cyberpunk RP server — squelette Phase 0-A"
+        "Cyberpunk RP server — démarrage boucle de tick"
     );
-    println!("Cyberpunk RP server (squelette) — tick rate cible : {hz} Hz");
+
+    let mut srv = server::server_loop::Server::new();
+
+    // Transport : en 0-C, le transport réseau réel (GNS) est derrière la feature `gns`.
+    // Sans elle, on tourne à vide pour valider la cadence de tick.
+    #[cfg(feature = "gns")]
+    {
+        use server::gns_transport::GnsTransport;
+        use std::net::SocketAddr;
+
+        // Lire l'adresse d'écoute en argument, ou utiliser un défaut.
+        let addr_str = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "127.0.0.1:27020".to_string());
+        let sock_addr: SocketAddr = addr_str
+            .parse()
+            .expect("adresse invalide (ex: 127.0.0.1:27020)");
+
+        tracing::info!(addr = %sock_addr, "GnsTransport — écoute activée");
+        let mut transport = GnsTransport::listen(sock_addr.ip(), sock_addr.port())
+            .expect("GnsTransport::listen failed");
+
+        loop {
+            let start = Instant::now();
+            srv.tick(&mut transport);
+            let elapsed = start.elapsed();
+            if let Some(rem) = period.checked_sub(elapsed) {
+                std::thread::sleep(rem);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "gns"))]
+    {
+        tracing::warn!(
+            "mode sans transport réseau — compiler avec --features gns pour activer GnsTransport"
+        );
+        loop {
+            let start = Instant::now();
+            // srv.tick(&mut transport);  // activé quand un Transport concret est fourni
+            let _ = &mut srv;
+            let elapsed = start.elapsed();
+            if let Some(rem) = period.checked_sub(elapsed) {
+                std::thread::sleep(rem);
+            }
+        }
+    }
 }
