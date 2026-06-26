@@ -1,0 +1,17 @@
+namespace cyberpunk_rp.protocol;
+
+struct Vec3 { x:float; y:float; z:float; }
+
+table Join { display_name:string; }
+table PositionUpdate { position:Vec3; yaw:float; }
+
+table PlayerState { id:ulong; position:Vec3; yaw:float; }
+table Snapshot { tick:ulong; players:[PlayerState]; }
+
+union ClientMsg { Join, PositionUpdate }
+union ServerMsg { Snapshot }
+
+table ClientEnvelope { msg:ClientMsg; }
+table ServerEnvelope { msg:ServerMsg; }
+
+root_type ClientEnvelope;
