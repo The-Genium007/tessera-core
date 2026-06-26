@@ -4,42 +4,34 @@
 //! Build : cf. `docs/architecture/0003-gns-binding.md` pour les prérequis système (cmake,
 //! protobuf@21, openssl@3).
 //!
-//! # Note ADR vs réalité
-//! L'ADR 0003 documente le mapping `conn.0 as u64`, mais dans la crate `game-networking-sockets`
-//! 0.2.0 le champ interne de `GnsConnection` est privé. Le mapping est donc réalisé via
-//! `std::mem::transmute::<GnsConnection, u32>` qui est sûr car `GnsConnection` est
-//! `#[repr(transparent)]` sur un `u32` (`HSteamNetConnection`).
+//! # Mapping GnsConnection → ClientId
+//! `GnsConnection` est `Copy + Hash + Eq` ; on l'utilise directement comme clé de HashMap.
+//! Le transport assigne son PROPRE `ClientId` monotone (`next_id`, démarré à 1) à chaque
+//! connexion acceptée — pas de transmute, pas d'accès à un champ privé.
 
 use crate::transport::{ClientId, Transport, TransportEvent};
 use gns::{
     sys::ESteamNetworkingConnectionState, GnsConnection, GnsGlobal, GnsSocket, IsServer,
-    MessageSlot, SendFlags,
+    MessageSlot, SendFlags, SendOutcome,
 };
 use std::{collections::HashMap, net::IpAddr};
-
-/// Extrait la valeur `u32` brute d'un `GnsConnection` et la convertit en `ClientId`.
-///
-/// `GnsConnection` est `#[repr(transparent)]` sur `HSteamNetConnection` (= `u32`),
-/// donc ce transmute est défini par le comportement (`repr(transparent)` garantit
-/// la même représentation mémoire que le type enveloppé).
-#[inline]
-fn conn_to_client_id(conn: GnsConnection) -> ClientId {
-    // SAFETY: GnsConnection est repr(transparent) sur HSteamNetConnection (u32).
-    unsafe { std::mem::transmute::<GnsConnection, u32>(conn) as ClientId }
-}
 
 /// Transport réseau basé sur GameNetworkingSockets (GNS).
 ///
 /// Écoute sur une adresse IP/port donnée, accepte les connexions entrantes,
 /// et expose les événements via le trait `Transport`.
 ///
-/// Le mapping `GnsConnection → ClientId` est `conn.0 as u64`
-/// (voir ADR 0003 §mapping).
+/// Chaque connexion acceptée se voit attribuer un `ClientId` monotone propre au transport ;
+/// deux maps (`id_to_conn` / `conn_to_id`) assurent la correspondance dans les deux sens.
 pub struct GnsTransport {
     global: &'static GnsGlobal,
     socket: GnsSocket<IsServer>,
-    /// Connexions actuellement acceptées : ClientId → GnsConnection.
-    clients: HashMap<ClientId, GnsConnection>,
+    /// Prochain `ClientId` à attribuer (démarré à 1 ; 0 réservé/inutilisé).
+    next_id: ClientId,
+    /// ClientId → GnsConnection (pour `send`).
+    id_to_conn: HashMap<ClientId, GnsConnection>,
+    /// GnsConnection → ClientId (pour `poll` : messages et déconnexions).
+    conn_to_id: HashMap<GnsConnection, ClientId>,
     /// Buffer de réception réutilisé à chaque appel à `poll`.
     recv_buf: Box<[MessageSlot]>,
 }
@@ -57,7 +49,9 @@ impl GnsTransport {
         Ok(Self {
             global,
             socket,
-            clients: HashMap::new(),
+            next_id: 1,
+            id_to_conn: HashMap::new(),
+            conn_to_id: HashMap::new(),
             recv_buf,
         })
     }
@@ -84,8 +78,10 @@ impl Transport for GnsTransport {
                 ) => {
                     let conn = event.connection();
                     if self.socket.accept(conn).is_ok() {
-                        let client_id = conn_to_client_id(conn);
-                        self.clients.insert(client_id, conn);
+                        let client_id = self.next_id;
+                        self.next_id += 1;
+                        self.id_to_conn.insert(client_id, conn);
+                        self.conn_to_id.insert(conn, client_id);
                         events.push(TransportEvent::Connected(client_id));
                     }
                 }
@@ -97,10 +93,13 @@ impl Transport for GnsTransport {
                     | ESteamNetworkingConnectionState::k_ESteamNetworkingConnectionState_ProblemDetectedLocally,
                 ) => {
                     let conn = event.connection();
-                    let client_id = conn_to_client_id(conn);
-                    self.clients.remove(&client_id);
                     let _ = self.socket.close_connection(conn, 0, None, false);
-                    events.push(TransportEvent::Disconnected(client_id));
+                    // N'émettre Disconnected que si la connexion était bien connue
+                    // (évite un faux event pour une connexion jamais acceptée).
+                    if let Some(client_id) = self.conn_to_id.remove(&conn) {
+                        self.id_to_conn.remove(&client_id);
+                        events.push(TransportEvent::Disconnected(client_id));
+                    }
                 }
 
                 _ => {}
@@ -110,11 +109,12 @@ impl Transport for GnsTransport {
         // 3. Messages entrants (ADR 0003 §c-iii) — variante zero-allocation avec buffer réutilisé.
         if let Ok(msgs) = self.socket.receive_messages_into(&mut self.recv_buf) {
             for msg in msgs {
-                let client_id = conn_to_client_id(msg.connection());
-                events.push(TransportEvent::Message {
-                    from: client_id,
-                    data: msg.payload().to_vec(),
-                });
+                if let Some(&client_id) = self.conn_to_id.get(&msg.connection()) {
+                    events.push(TransportEvent::Message {
+                        from: client_id,
+                        data: msg.payload().to_vec(),
+                    });
+                }
             }
         }
 
@@ -123,12 +123,23 @@ impl Transport for GnsTransport {
 
     /// Envoie `data` de façon fiable à `to`. Sans effet si `to` n'est pas connecté.
     fn send(&mut self, to: ClientId, data: &[u8]) {
-        if let Some(&conn) = self.clients.get(&to) {
+        if let Some(&conn) = self.id_to_conn.get(&to) {
             let msg =
                 self.global
                     .utils()
                     .allocate_message(conn, SendFlags::RELIABLE, data.to_vec());
-            self.socket.send_messages(std::iter::once(msg));
+            let outcomes = self.socket.send_messages(std::iter::once(msg));
+            for outcome in outcomes {
+                match outcome {
+                    SendOutcome::Failed(result, _) => {
+                        tracing::warn!(client_id = to, ?result, "GNS send failed");
+                    }
+                    SendOutcome::Skipped(_) => {
+                        tracing::warn!(client_id = to, "GNS send skipped (earlier batch failure)");
+                    }
+                    SendOutcome::Sent(_) => {}
+                }
+            }
         }
     }
 }
