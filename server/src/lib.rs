@@ -1,6 +1,7 @@
 //! Squelette du serveur autoritaire. Constantes de simulation (voir spec §6).
 
 pub mod transport;
+pub mod world;
 
 /// Fréquence de tick par défaut de la simulation, en Hz (spec §6 : 20–60 ticks/s).
 pub fn default_tick_rate_hz() -> u32 {
