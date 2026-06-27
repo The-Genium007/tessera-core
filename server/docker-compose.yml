@@ -1,0 +1,33 @@
+# docker-compose.yml — serveur de jeu TesseraSynth (Rust + GameNetworkingSockets).
+#
+# ⚠️ DIFFÉRENT du site web : le jeu parle en **UDP**, pas en HTTP. On NE passe donc PAS par
+# le tunnel Cloudflare. On **publie directement un port UDP public** (27020) que les jeux
+# moddés des joueurs viennent contacter. Ce port doit être ouvert sur le pare-feu du serveur.
+#
+# Deux façons de l'utiliser (voir server/README.md) :
+#   A) Dokploy construit l'image depuis le dépôt (section `build:` ci-dessous).
+#   B) Dokploy tire une image déjà construite par le cloud (remplacer `build:` par `image:`).
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "27020:27020/udp" # port de jeu UDP — à ouvrir sur le pare-feu du serveur
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
