@@ -18,7 +18,7 @@ include(FetchContent)
 FetchContent_Declare(
     RED4ext.SDK
     GIT_REPOSITORY https://github.com/WopsS/RED4ext.SDK.git
-    GIT_TAG        v1.0.0   # API v1, contemporain du loader RED4ext 1.30.0 (jeu 2.31)
+    GIT_TAG        1.0.0    # API v1, contemporain du loader RED4ext 1.30.0 (jeu 2.31)
 )
 FetchContent_MakeAvailable(RED4ext.SDK)
 
