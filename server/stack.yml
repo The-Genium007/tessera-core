@@ -1,29 +1,18 @@
-# stack.yml — serveur de jeu TesseraSynth pour Docker Swarm (Dokploy en mode Swarm).
+# stack.yml — serveur de jeu TesseraSynth, déployé par Dokploy (via `docker compose up`).
 #
-# En Swarm, `docker stack deploy` NE COMPILE PAS : on utilise une image déjà construite,
-# publiée par le cloud sur GHCR. UDP publié en `mode: host` (port direct sur le nœud, vraies
-# IP des joueurs — recommandé pour un serveur de jeu). Port 27020/udp à ouvrir sur le pare-feu.
-
-version: "3.8"
+# On utilise une image DÉJÀ construite, publiée par le cloud sur GHCR (pas de build ici).
+# ⚠️ L'image doit être PUBLIQUE sur GHCR, sinon le pull échoue en "unauthorized".
+# Port 27020/udp publié directement (le jeu parle en UDP) — à ouvrir sur le pare-feu du VPS.
 
 services:
   server:
     image: ghcr.io/the-genium007/tessera-server:latest
+    restart: unless-stopped
     environment:
       RUST_LOG: info
     ports:
-      - target: 27020
-        published: 27020
-        protocol: udp
-        mode: host
+      - "27020:27020/udp"
     deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-      update_config:
-        order: start-first
-        failure_action: rollback
       resources:
         limits:
           cpus: "1.0"
