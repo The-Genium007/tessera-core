@@ -1,0 +1,15 @@
+namespace cyberpunk_rp.internal;
+
+enum EventKind : byte { Connected, Disconnected, Message }
+
+// Gateway → Shard : un événement transport client, relayé tel quel.
+// payload = octets opaques du ClientEnvelope client (Join/PositionUpdate), vide si Connected/Disconnected.
+table ClientEvent { kind:EventKind; client_id:ulong; payload:[ubyte]; }
+
+// Shard → Gateway : octets à envoyer à un client (un ServerEnvelope/Snapshot opaque).
+table ServerSend { client_id:ulong; payload:[ubyte]; }
+
+union InternalMsg { ClientEvent, ServerSend }
+table InternalEnvelope { msg:InternalMsg; }
+
+root_type InternalEnvelope;

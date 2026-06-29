@@ -6,6 +6,14 @@ mod generated {
 }
 pub use generated::cyberpunk_rp::protocol::*;
 
+#[allow(clippy::all, unused_imports)]
+mod generated_internal {
+    include!(concat!(env!("OUT_DIR"), "/internal_generated.rs"));
+}
+pub mod internal {
+    pub use super::generated_internal::cyberpunk_rp::internal::*;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,5 +48,29 @@ mod tests {
         assert_eq!(pu.yaw(), 0.5);
         let p = pu.position().unwrap();
         assert_eq!((p.x(), p.y(), p.z()), (1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn internal_client_event_round_trip() {
+        use crate::internal::*;
+        use flatbuffers::FlatBufferBuilder;
+        let mut b = FlatBufferBuilder::new();
+        let payload = b.create_vector(&[1u8, 2, 3]);
+        let ce = ClientEvent::create(
+            &mut b,
+            &ClientEventArgs { kind: EventKind::Message, client_id: 42, payload: Some(payload) },
+        );
+        let env = InternalEnvelope::create(
+            &mut b,
+            &InternalEnvelopeArgs { msg_type: InternalMsg::ClientEvent, msg: Some(ce.as_union_value()) },
+        );
+        b.finish(env, None);
+        let bytes = b.finished_data().to_vec();
+
+        let env = flatbuffers::root::<InternalEnvelope>(&bytes).unwrap();
+        let ce = env.msg_as_client_event().unwrap();
+        assert_eq!(ce.kind(), EventKind::Message);
+        assert_eq!(ce.client_id(), 42);
+        assert_eq!(ce.payload().unwrap().bytes(), &[1, 2, 3]);
     }
 }
