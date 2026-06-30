@@ -14,6 +14,89 @@ pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
     Some((p.x(), p.y(), p.z()))
 }
 
+use crate::internal_net::event_to_client_event_frame;
+use crate::transport::{ClientId, TransportEvent};
+use std::collections::HashMap;
+
+/// Action décidée par l'assigneur pour un événement client.
+#[derive(Debug)]
+pub enum AssignAction {
+    /// Événement bufferisé (client pas encore assigné, pas de position).
+    Buffered,
+    /// Une position est arrivée pour un client non assigné → le caller doit interroger le Router
+    /// avec (x,y,z) puis appeler `assign(client_id, shard)`.
+    NeedRoute {
+        client_id: ClientId,
+        x: f32,
+        y: f32,
+        z: f32,
+    },
+    /// Frames `ClientEvent` à écrire au shard indiqué.
+    Forward { shard: String, frames: Vec<Vec<u8>> },
+}
+
+/// Suit l'état de chaque client : non assigné (buffer) → assigné à un shard.
+#[derive(Default)]
+pub struct ShardAssigner {
+    assigned: HashMap<ClientId, String>,
+    buffer: HashMap<ClientId, Vec<TransportEvent>>,
+}
+
+impl ShardAssigner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn client_of(ev: &TransportEvent) -> ClientId {
+        match ev {
+            TransportEvent::Connected(id) | TransportEvent::Disconnected(id) => *id,
+            TransportEvent::Message { from, .. } => *from,
+        }
+    }
+
+    pub fn feed(&mut self, ev: TransportEvent) -> AssignAction {
+        let id = Self::client_of(&ev);
+
+        // Déjà assigné → on relaie directement vers son shard.
+        if let Some(shard) = self.assigned.get(&id) {
+            return AssignAction::Forward {
+                shard: shard.clone(),
+                frames: vec![event_to_client_event_frame(&ev)],
+            };
+        }
+
+        // Non assigné : si c'est une position, on bufferise ET on demande un routage.
+        if let TransportEvent::Message { from, data } = &ev {
+            if let Some((x, y, z)) = extract_position(data) {
+                let from = *from;
+                self.buffer.entry(id).or_default().push(ev);
+                return AssignAction::NeedRoute {
+                    client_id: from,
+                    x,
+                    y,
+                    z,
+                };
+            }
+        }
+
+        // Sinon (Connected/Join/autre) : on bufferise et on attend.
+        self.buffer.entry(id).or_default().push(ev);
+        AssignAction::Buffered
+    }
+
+    pub fn assign(&mut self, client_id: ClientId, shard: String) -> AssignAction {
+        self.assigned.insert(client_id, shard.clone());
+        let pending = self.buffer.remove(&client_id).unwrap_or_default();
+        let frames = pending.iter().map(event_to_client_event_frame).collect();
+        AssignAction::Forward { shard, frames }
+    }
+
+    pub fn forget(&mut self, client_id: ClientId) {
+        self.assigned.remove(&client_id);
+        self.buffer.remove(&client_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +152,72 @@ mod tests {
         );
         assert_eq!(extract_position(&client_join()), None);
         assert_eq!(extract_position(&[0, 1, 2]), None); // garbage → None
+    }
+
+    use crate::framing::FrameReader;
+    use crate::internal_net::decode_client_event;
+    use crate::transport::TransportEvent;
+
+    #[test]
+    fn buffers_until_first_position_then_flushes_on_assign() {
+        let mut a = ShardAssigner::new();
+        // Connecté + Join : bufferisés, rien à router encore.
+        assert!(matches!(
+            a.feed(TransportEvent::Connected(1)),
+            AssignAction::Buffered
+        ));
+        assert!(matches!(
+            a.feed(TransportEvent::Message {
+                from: 1,
+                data: client_join()
+            }),
+            AssignAction::Buffered
+        ));
+        // 1re position : besoin de router (et l'événement est bufferisé).
+        match a.feed(TransportEvent::Message {
+            from: 1,
+            data: client_position(500.0, 0.0, 0.0),
+        }) {
+            AssignAction::NeedRoute { client_id, x, .. } => {
+                assert_eq!(client_id, 1);
+                assert_eq!(x, 500.0);
+            }
+            other => panic!("attendu NeedRoute, eu {other:?}"),
+        }
+        // Le caller a interrogé le Router → shard "A". assign flushe les 3 événements framés.
+        let act = a.assign(1, "A".to_string());
+        let AssignAction::Forward { shard, frames } = act else {
+            panic!("attendu Forward")
+        };
+        assert_eq!(shard, "A");
+        assert_eq!(frames.len(), 3); // Connected + Join + Position
+                                     // Le 1er frame est un ClientEvent décodable = Connected(1).
+        let mut r = FrameReader::new();
+        r.push(&frames[0]);
+        assert_eq!(
+            decode_client_event(&r.next_frame().unwrap()),
+            Some(TransportEvent::Connected(1))
+        );
+    }
+
+    #[test]
+    fn assigned_client_forwards_directly_to_its_shard() {
+        let mut a = ShardAssigner::new();
+        a.feed(TransportEvent::Message {
+            from: 2,
+            data: client_position(2000.0, 0.0, 0.0),
+        }); // NeedRoute
+        a.assign(2, "B".to_string());
+        // Désormais assigné : un nouvel événement part direct vers B.
+        match a.feed(TransportEvent::Message {
+            from: 2,
+            data: vec![1, 2, 3],
+        }) {
+            AssignAction::Forward { shard, frames } => {
+                assert_eq!(shard, "B");
+                assert_eq!(frames.len(), 1);
+            }
+            other => panic!("attendu Forward, eu {other:?}"),
+        }
     }
 }
