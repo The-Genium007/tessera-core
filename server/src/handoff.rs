@@ -99,6 +99,33 @@ impl ShardTopology {
     }
 }
 
+/// Rang d'un client. En M4 c'est un stub (défaut `Player`) ; l'authentification réelle viendra
+/// plus tard. Le rang module la largeur de la zone tampon.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Rank {
+    Player,
+    Moderator,
+    GameMaster,
+}
+
+/// Rayon de zone tampon selon le rang. Valeurs en dur en M4, destinées au fichier serveur (M6).
+#[derive(Debug, Clone, Copy)]
+pub struct RadiusPolicy {
+    pub base: f32,
+    pub moderator: f32,
+    pub game_master: f32,
+}
+
+impl RadiusPolicy {
+    pub fn radius_for(&self, rank: Rank) -> f32 {
+        match rank {
+            Rank::Player => self.base,
+            Rank::Moderator => self.moderator,
+            Rank::GameMaster => self.game_master,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +236,17 @@ mod tests {
         let edge = quad_shards().locate(-2.0, -50.0, 5.0);
         assert_eq!(edge.authoritative, "SW");
         assert_eq!(edge.overlaps, vec!["SE".to_string()]);
+    }
+
+    #[test]
+    fn radius_policy_widens_for_staff() {
+        let pol = RadiusPolicy {
+            base: 25.0,
+            moderator: 50.0,
+            game_master: 75.0,
+        };
+        assert_eq!(pol.radius_for(Rank::Player), 25.0);
+        assert_eq!(pol.radius_for(Rank::Moderator), 50.0);
+        assert_eq!(pol.radius_for(Rank::GameMaster), 75.0);
     }
 }
