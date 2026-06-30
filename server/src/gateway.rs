@@ -21,6 +21,72 @@ pub fn apply_shard_frame_to_client<T: Transport>(body: &[u8], client: &mut T) {
     }
 }
 
+/// Point d'entrée du Gateway : interroge le Router pour obtenir l'adresse du Shard, ouvre
+/// l'écoute GNS publique pour les clients, puis relaie en boucle à 20 Hz entre le client GNS
+/// et le Shard TCP interne.
+#[cfg(feature = "gns")]
+pub async fn gateway_main(listen_addr: &str, router_addr: &str) -> std::io::Result<()> {
+    use crate::framing::FrameReader;
+    use crate::gns_transport::GnsTransport;
+    use crate::internal_net::{decode_route_reply, encode_route_request};
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    // 1) Demander au Router l'adresse du shard (M2 : position factice, un seul shard).
+    let mut router = TcpStream::connect(router_addr).await?;
+    router.write_all(&encode_route_request(0, 0.0, 0.0, 0.0)).await?;
+    let mut rbuf = [0u8; 1024];
+    let mut rreader = FrameReader::new();
+    let shard_addr = loop {
+        let n = router.read(&mut rbuf).await?;
+        if n == 0 {
+            return Err(std::io::Error::other("router fermé"));
+        }
+        rreader.push(&rbuf[..n]);
+        if let Some(body) = rreader.next_frame() {
+            if let Some(addr) = decode_route_reply(&body) {
+                break addr;
+            }
+        }
+    };
+    tracing::info!("Gateway : shard attribué = {shard_addr}");
+
+    // 2) Connexion TCP au Shard.
+    let mut shard = TcpStream::connect(&shard_addr).await?;
+
+    // 3) Transport GNS côté client.
+    let sock: SocketAddr = listen_addr.parse().expect("adresse GNS invalide");
+    let mut client = GnsTransport::listen(sock.ip(), sock.port())
+        .expect("GnsTransport::listen failed");
+    tracing::info!("Gateway : écoute GNS sur {listen_addr}, relai vers le shard {shard_addr}");
+
+    // 4) Boucle de relai à 20 Hz : client GNS ⇄ shard TCP.
+    let mut sreader = FrameReader::new();
+    let mut sbuf = [0u8; 8192];
+    let mut ticker = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            read = shard.read(&mut sbuf) => {
+                let n = match read { Ok(0) | Err(_) => break, Ok(n) => n };
+                sreader.push(&sbuf[..n]);
+                while let Some(body) = sreader.next_frame() {
+                    apply_shard_frame_to_client(&body, &mut client);
+                }
+            }
+            _ = ticker.tick() => {
+                for frame in drain_client_to_shard(&mut client) {
+                    if shard.write_all(&frame).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
