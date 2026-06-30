@@ -2,6 +2,7 @@
 
 pub mod framing;
 pub mod internal_net;
+pub mod router;
 pub mod server_loop;
 pub mod shard;
 pub mod transport;
