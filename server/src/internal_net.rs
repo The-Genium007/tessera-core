@@ -1,5 +1,5 @@
 //! Transport interne : (dé)sérialise les messages internes et présente un `Transport`
-//! au Shard. Le Gateway alimente `feed(frame)` et consomme `take_outbound()`.
+//! au Shard. Le Gateway alimente `feed(octets bruts)` et consomme `take_outbound()`.
 
 use crate::framing::{encode_frame, FrameReader};
 use crate::transport::{ClientId, Transport, TransportEvent};
@@ -43,8 +43,12 @@ pub fn decode_client_event(body: &[u8]) -> Option<TransportEvent> {
 }
 
 /// Transport branché sur le lien interne TCP. Le Shard l'utilise via `Server::tick`.
+/// `feed` reçoit les octets BRUTS du socket (frames length-préfixés, éventuellement
+/// partiels) ; le `FrameReader` interne est persistant → un frame coupé entre deux
+/// appels `feed` est correctement réassemblé.
 #[derive(Default)]
 pub struct InternalTransport {
+    reader: FrameReader,
     inbound: VecDeque<TransportEvent>,
     outbound: Vec<Vec<u8>>, // frames ServerSend prêts pour le socket
 }
@@ -54,11 +58,11 @@ impl InternalTransport {
         Self::default()
     }
 
-    /// Le Gateway pousse un frame `ClientEvent` (framé, avec préfixe longueur) reçu du socket.
-    pub fn feed(&mut self, frame: &[u8]) {
-        let mut r = FrameReader::new();
-        r.push(frame);
-        while let Some(body) = r.next_frame() {
+    /// Pousse les octets bruts reçus du socket (0, 1 ou plusieurs frames, et/ou un
+    /// frame partiel conservé pour le prochain appel).
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.reader.push(bytes);
+        while let Some(body) = self.reader.next_frame() {
             if let Some(ev) = decode_client_event(&body) {
                 self.inbound.push_back(ev);
             }
@@ -124,5 +128,19 @@ mod tests {
         assert_eq!(ss.client_id(), 1);
         assert_eq!(ss.payload().unwrap().bytes(), &[9, 9]);
         assert!(t.take_outbound().is_empty(), "take_outbound doit vider");
+    }
+
+    #[test]
+    fn feed_reassembles_a_frame_split_across_two_calls() {
+        let mut t = InternalTransport::new();
+        let framed = encode_client_event(EventKind::Message, 7, &[1, 2, 3]);
+        let mid = framed.len() / 2;
+        // Le frame arrive en deux morceaux (lecture TCP partielle).
+        t.feed(&framed[..mid]);
+        assert!(t.poll().is_empty(), "frame incomplet : aucun event encore");
+        t.feed(&framed[mid..]);
+        let evs = t.poll();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0], TransportEvent::Message { from: 7, data: vec![1, 2, 3] });
     }
 }
