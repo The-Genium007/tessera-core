@@ -8,6 +8,7 @@ pub mod internal_net;
 pub mod router;
 pub mod server_loop;
 pub mod shard;
+pub mod snapshot_merge;
 pub mod transport;
 pub mod world;
 
