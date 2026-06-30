@@ -3,11 +3,14 @@
 pub mod framing;
 pub mod internal_net;
 pub mod server_loop;
+pub mod shard;
 pub mod transport;
 pub mod world;
 
 #[cfg(feature = "gns")]
 pub mod gns_transport;
+
+pub use shard::shard_main;
 
 /// Fréquence de tick par défaut de la simulation, en Hz (spec §6 : 20–60 ticks/s).
 pub fn default_tick_rate_hz() -> u32 {
