@@ -2,6 +2,7 @@
 
 pub mod framing;
 pub mod gateway;
+pub mod gateway_routing;
 pub mod internal_net;
 pub mod router;
 pub mod server_loop;
