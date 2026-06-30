@@ -6,7 +6,7 @@ use crate::transport::{ClientId, Transport, TransportEvent};
 use flatbuffers::FlatBufferBuilder;
 use protocol::internal::{
     ClientEvent, ClientEventArgs, EventKind, InternalEnvelope, InternalEnvelopeArgs, InternalMsg,
-    ServerSend, ServerSendArgs,
+    RouteReply, RouteReplyArgs, RouteRequest, RouteRequestArgs, ServerSend, ServerSendArgs,
 };
 use std::collections::VecDeque;
 
@@ -40,6 +40,60 @@ pub fn decode_client_event(body: &[u8]) -> Option<TransportEvent> {
         }
         _ => None,
     }
+}
+
+/// Traduit un `TransportEvent` (côté client) en `ClientEvent` framé (Gateway → Shard).
+pub fn event_to_client_event_frame(ev: &TransportEvent) -> Vec<u8> {
+    match ev {
+        TransportEvent::Connected(id) => encode_client_event(EventKind::Connected, *id, &[]),
+        TransportEvent::Disconnected(id) => encode_client_event(EventKind::Disconnected, *id, &[]),
+        TransportEvent::Message { from, data } => encode_client_event(EventKind::Message, *from, data),
+    }
+}
+
+/// Décode le corps déframé d'un `ServerSend` (Shard → Gateway) en (client, payload).
+pub fn decode_server_send(body: &[u8]) -> Option<(ClientId, Vec<u8>)> {
+    let env = flatbuffers::root::<InternalEnvelope>(body).ok()?;
+    let ss = env.msg_as_server_send()?;
+    let payload = ss.payload().map(|p| p.bytes().to_vec()).unwrap_or_default();
+    Some((ss.client_id(), payload))
+}
+
+/// `RouteRequest` framé (Gateway → Router).
+pub fn encode_route_request(client_id: u64, x: f32, y: f32, z: f32) -> Vec<u8> {
+    let mut b = FlatBufferBuilder::new();
+    let rr = RouteRequest::create(&mut b, &RouteRequestArgs { client_id, x, y, z });
+    let env = InternalEnvelope::create(
+        &mut b,
+        &InternalEnvelopeArgs { msg_type: InternalMsg::RouteRequest, msg: Some(rr.as_union_value()) },
+    );
+    b.finish(env, None);
+    encode_frame(b.finished_data())
+}
+
+pub fn decode_route_request(body: &[u8]) -> Option<(u64, f32, f32, f32)> {
+    let env = flatbuffers::root::<InternalEnvelope>(body).ok()?;
+    let rr = env.msg_as_route_request()?;
+    Some((rr.client_id(), rr.x(), rr.y(), rr.z()))
+}
+
+/// `RouteReply` framé (Router → Gateway).
+pub fn encode_route_reply(shard_addr: &str) -> Vec<u8> {
+    let mut b = FlatBufferBuilder::new();
+    let addr = b.create_string(shard_addr);
+    let rr = RouteReply::create(&mut b, &RouteReplyArgs { shard_addr: Some(addr) });
+    let env = InternalEnvelope::create(
+        &mut b,
+        &InternalEnvelopeArgs { msg_type: InternalMsg::RouteReply, msg: Some(rr.as_union_value()) },
+    );
+    b.finish(env, None);
+    encode_frame(b.finished_data())
+}
+
+pub fn decode_route_reply(body: &[u8]) -> Option<String> {
+    let env = flatbuffers::root::<InternalEnvelope>(body).ok()?;
+    let rr = env.msg_as_route_reply()?;
+    Some(rr.shard_addr()?.to_string())
 }
 
 /// Transport branché sur le lien interne TCP. Le Shard l'utilise via `Server::tick`.
@@ -142,5 +196,46 @@ mod tests {
         let evs = t.poll();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0], TransportEvent::Message { from: 7, data: vec![1, 2, 3] });
+    }
+
+    #[test]
+    fn event_to_client_event_frame_round_trips_via_decode() {
+        use crate::framing::FrameReader;
+        // Message
+        let framed = event_to_client_event_frame(&TransportEvent::Message { from: 3, data: vec![8, 9] });
+        let mut r = FrameReader::new();
+        r.push(&framed);
+        let body = r.next_frame().unwrap();
+        assert_eq!(decode_client_event(&body), Some(TransportEvent::Message { from: 3, data: vec![8, 9] }));
+        // Connected
+        let framed = event_to_client_event_frame(&TransportEvent::Connected(7));
+        let mut r = FrameReader::new();
+        r.push(&framed);
+        assert_eq!(decode_client_event(&r.next_frame().unwrap()), Some(TransportEvent::Connected(7)));
+    }
+
+    #[test]
+    fn decode_server_send_extracts_client_and_payload() {
+        let mut t = InternalTransport::new();
+        t.send(5, &[1, 2, 3]); // produit un ServerSend framé dans outbound
+        let framed = t.take_outbound().remove(0);
+        let mut r = crate::framing::FrameReader::new();
+        r.push(&framed);
+        let body = r.next_frame().unwrap();
+        assert_eq!(decode_server_send(&body), Some((5, vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn route_request_and_reply_round_trip() {
+        use crate::framing::FrameReader;
+        let framed = encode_route_request(11, 1.0, 2.0, 3.0);
+        let mut r = FrameReader::new();
+        r.push(&framed);
+        assert_eq!(decode_route_request(&r.next_frame().unwrap()), Some((11, 1.0, 2.0, 3.0)));
+
+        let framed = encode_route_reply("127.0.0.1:27030");
+        let mut r = FrameReader::new();
+        r.push(&framed);
+        assert_eq!(decode_route_reply(&r.next_frame().unwrap()), Some("127.0.0.1:27030".to_string()));
     }
 }

@@ -9,7 +9,10 @@ table ClientEvent { kind:EventKind; client_id:ulong; payload:[ubyte]; }
 // Shard → Gateway : octets à envoyer à un client (un ServerEnvelope/Snapshot opaque).
 table ServerSend { client_id:ulong; payload:[ubyte]; }
 
-union InternalMsg { ClientEvent, ServerSend }
+table RouteRequest { client_id:ulong; x:float; y:float; z:float; }
+table RouteReply { shard_addr:string; }
+
+union InternalMsg { ClientEvent, ServerSend, RouteRequest, RouteReply }
 table InternalEnvelope { msg:InternalMsg; }
 
 root_type InternalEnvelope;
