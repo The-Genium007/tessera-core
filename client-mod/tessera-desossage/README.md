@@ -9,7 +9,7 @@ vanilla : le serveur Tessera est autoritaire et **repeuple** ensuite. Indépenda
 ## Le seul endroit à toucher : la config
 
 Tout est piloté par `DesossageConfig.Default()` dans
-[`DesossageConfig.reds`](r6/scripts/Tessera/desossage/DesossageConfig.reds). **Un champ par
+[`DesossageConfig.reds`](overlay/r6/scripts/Tessera/desossage/DesossageConfig.reds). **Un champ par
 système**, chacun une `DesossageEntry { active, density }`. Défaut = **tout coupé** (monde vide).
 
 - **Rallumer un système** : passer `active: true` (+ une `density`), ex. réintroduire des
