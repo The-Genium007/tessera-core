@@ -14,6 +14,16 @@ pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
     Some((p.x(), p.y(), p.z()))
 }
 
+/// Décode un `ClientEnvelope` client ; si c'est un `Join`, renvoie son `display_name`.
+pub fn extract_join_name(client_payload: &[u8]) -> Option<String> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::Join {
+        return None;
+    }
+    let join = env.msg_as_join()?;
+    join.display_name().map(|s| s.to_string())
+}
+
 use crate::internal_net::event_to_client_event_frame;
 use crate::transport::{ClientId, TransportEvent};
 use std::collections::HashMap;
@@ -152,6 +162,13 @@ mod tests {
         );
         assert_eq!(extract_position(&client_join()), None);
         assert_eq!(extract_position(&[0, 1, 2]), None); // garbage → None
+    }
+
+    #[test]
+    fn extract_join_name_reads_display_name() {
+        assert_eq!(extract_join_name(&client_join()), Some("v".to_string()));
+        assert_eq!(extract_join_name(&client_position(1.0, 2.0, 3.0)), None); // pas un Join
+        assert_eq!(extract_join_name(&[9, 9, 9]), None); // garbage
     }
 
     use crate::framing::FrameReader;

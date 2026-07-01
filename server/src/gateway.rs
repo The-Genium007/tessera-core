@@ -31,12 +31,15 @@ pub async fn gateway_main(
     listen_addr: &str,
     topology: crate::handoff::ShardTopology,
     radius: crate::handoff::RadiusPolicy,
+    mut store: crate::persistence::FileStore,
+    spawn: [f32; 3],
 ) -> std::io::Result<()> {
     use crate::framing::FrameReader;
-    use crate::gateway_routing::extract_position;
+    use crate::gateway_routing::{extract_join_name, extract_position};
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
     use crate::internal_net::decode_server_send;
+    use crate::persistence::{resolve_spawn, PlayerRecord, PlayerStore};
     use crate::snapshot_merge::merge_snapshots;
     use crate::transport::{Transport, TransportEvent};
     use std::collections::HashMap;
@@ -56,6 +59,10 @@ pub async fn gateway_main(
     let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
     // Rang par client (stub M4 : tout le monde Player ; surchargeable quand l'auth existera).
     let ranks: HashMap<u64, Rank> = HashMap::new();
+    // Persistance : clé (display_name), dernière position, et résidence chargée — par client.
+    let mut keys: HashMap<u64, String> = HashMap::new();
+    let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
+    let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
 
     // Connecte un shard si nécessaire et lui écrit des frames.
     async fn write_to_shard(
@@ -122,21 +129,48 @@ pub async fn gateway_main(
             };
             let is_disconnect = matches!(ev, TransportEvent::Disconnected(_));
 
-            // Si c'est une position, calculer le placement via la topologie + rayon selon le rang.
-            let placement = if let TransportEvent::Message { data, .. } = &ev {
-                extract_position(data).map(|(x, y, _z)| {
+            // Décoder ce que porte un message client : Join → identité + résolution de spawn ;
+            // PositionUpdate → placement (topologie + rang) et mémorisation de la dernière position.
+            let mut placement = None;
+            if let TransportEvent::Message { data, .. } = &ev {
+                if let Some(name) = extract_join_name(data) {
+                    if !name.is_empty() {
+                        let record = store.load(&name);
+                        let (pos, source) = resolve_spawn(record.as_ref(), spawn);
+                        tracing::info!(
+                            "Connexion de {name} : placement décidé {pos:?} (source: {source:?})"
+                        );
+                        residence.insert(cid, record.and_then(|r| r.residence));
+                        last_pos.insert(cid, pos); // départ tant qu'aucune position réelle
+                        keys.insert(cid, name);
+                    }
+                } else if let Some((x, y, z)) = extract_position(data) {
+                    last_pos.insert(cid, [x, y, z]);
                     let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
-                    topology.locate(x, y, r)
-                })
-            } else {
-                None
-            };
+                    placement = Some(topology.locate(x, y, r));
+                }
+            }
 
             for LoadAction::Forward { shard, frames } in loader.feed(ev, placement) {
                 let _ = write_to_shard(&mut shards, &shard, &frames).await;
             }
 
             if is_disconnect {
+                // Sauver la dernière position connue avant d'oublier le client.
+                if let Some(name) = keys.remove(&cid) {
+                    if let Some(pos) = last_pos.get(&cid).copied() {
+                        store.save(
+                            &name,
+                            PlayerRecord {
+                                last_position: pos,
+                                residence: residence.get(&cid).copied().flatten(),
+                            },
+                        );
+                        tracing::info!("Sauvegarde de {name} à {pos:?}");
+                    }
+                }
+                last_pos.remove(&cid);
+                residence.remove(&cid);
                 loader.forget(cid);
                 latest.remove(&cid);
             } else if let Some(per_shard) = latest.get_mut(&cid) {
