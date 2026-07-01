@@ -21,15 +21,23 @@ pub fn apply_shard_frame_to_client<T: Transport>(body: &[u8], client: &mut T) {
     }
 }
 
-/// Point d'entrée du Gateway (M3, multi-shard) : ouvre l'écoute GNS publique, et pour chaque
-/// client interroge le Router selon sa 1re position afin de l'assigner au bon shard, puis relaie
-/// ce client ⇄ son shard. Plusieurs shards peuvent être connectés simultanément (un par zone).
+/// Point d'entrée du Gateway (M4, handoff) : ouvre l'écoute GNS publique et, pour chaque client,
+/// calcule à chaque position — via la `ShardTopology` locale + le rayon selon le rang — l'ensemble
+/// de shards où le charger (autoritaire + zones tampon). Il diffuse les événements du client à tous
+/// ses shards chargés, et **fusionne** les snapshots reçus de ces shards en un seul avant de les
+/// renvoyer au client. Le double-chargement près d'une frontière élimine les saccades au transfert.
 #[cfg(feature = "gns")]
-pub async fn gateway_main(listen_addr: &str, router_addr: &str) -> std::io::Result<()> {
+pub async fn gateway_main(
+    listen_addr: &str,
+    topology: crate::handoff::ShardTopology,
+    radius: crate::handoff::RadiusPolicy,
+) -> std::io::Result<()> {
     use crate::framing::FrameReader;
-    use crate::gateway_routing::{AssignAction, ShardAssigner};
+    use crate::gateway_routing::extract_position;
     use crate::gns_transport::GnsTransport;
-    use crate::internal_net::{decode_route_reply, encode_route_request};
+    use crate::handoff::{LoadAction, Rank, ShardLoader};
+    use crate::internal_net::decode_server_send;
+    use crate::snapshot_merge::merge_snapshots;
     use crate::transport::{Transport, TransportEvent};
     use std::collections::HashMap;
     use std::net::SocketAddr;
@@ -43,42 +51,13 @@ pub async fn gateway_main(listen_addr: &str, router_addr: &str) -> std::io::Resu
         reader: FrameReader,
     }
     let mut shards: HashMap<String, ShardLink> = HashMap::new();
-    let mut assigner = ShardAssigner::new();
+    let mut loader = ShardLoader::new();
+    // Dernier snapshot reçu de chaque shard, par client : latest[client][shard_addr] = payload.
+    let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+    // Rang par client (stub M4 : tout le monde Player ; surchargeable quand l'auth existera).
+    let ranks: HashMap<u64, Rank> = HashMap::new();
 
-    // Connexion persistante au Router (requête/réponse par position).
-    let mut router = TcpStream::connect(router_addr).await?;
-    let mut router_reader = FrameReader::new();
-
-    // Interroge le Router avec une position et bloque jusqu'à la réponse. M3 : volontairement
-    // sans timeout (boucle séquentielle ; le Router est local et fiable). Si le Router ne répond
-    // pas, la boucle gèle pour tous les clients — à durcir en M4 (timeout + retry ou select!).
-    async fn ask_router(
-        router: &mut TcpStream,
-        reader: &mut FrameReader,
-        client_id: u64,
-        x: f32,
-        y: f32,
-        z: f32,
-    ) -> std::io::Result<String> {
-        router
-            .write_all(&encode_route_request(client_id, x, y, z))
-            .await?;
-        let mut buf = [0u8; 1024];
-        loop {
-            let n = router.read(&mut buf).await?;
-            if n == 0 {
-                return Err(std::io::Error::other("router fermé"));
-            }
-            reader.push(&buf[..n]);
-            if let Some(body) = reader.next_frame() {
-                if let Some(addr) = decode_route_reply(&body) {
-                    return Ok(addr);
-                }
-            }
-        }
-    }
-
-    // Écrit des frames vers le shard donné (le connecte si nécessaire).
+    // Connecte un shard si nécessaire et lui écrit des frames.
     async fn write_to_shard(
         shards: &mut HashMap<String, ShardLink>,
         shard_addr: &str,
@@ -104,15 +83,17 @@ pub async fn gateway_main(listen_addr: &str, router_addr: &str) -> std::io::Resu
     let sock: SocketAddr = listen_addr.parse().expect("adresse GNS invalide");
     let mut client =
         GnsTransport::listen(sock.ip(), sock.port()).expect("GnsTransport::listen failed");
-    tracing::info!("Gateway multi-shard : écoute GNS sur {listen_addr}, router {router_addr}");
+    tracing::info!(
+        "Gateway handoff : écoute GNS sur {listen_addr} ({} shards)",
+        topology.shards.len()
+    );
 
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
     let mut sbuf = [0u8; 8192];
     loop {
-        // 1) Lire tous les shards connectés (snapshots → clients).
+        // 1) Lire chaque shard connecté : on mémorise le DERNIER snapshot par (client, shard).
         let addrs: Vec<String> = shards.keys().cloned().collect();
         for addr in addrs {
-            // Lecture non bloquante : on tente un read court sur chaque shard.
             if let Ok(Ok(n)) = tokio::time::timeout(
                 Duration::from_millis(1),
                 shards.get_mut(&addr).unwrap().sock.read(&mut sbuf),
@@ -125,12 +106,14 @@ pub async fn gateway_main(listen_addr: &str, router_addr: &str) -> std::io::Resu
                 let link = shards.get_mut(&addr).unwrap();
                 link.reader.push(&sbuf[..n]);
                 while let Some(body) = link.reader.next_frame() {
-                    apply_shard_frame_to_client(&body, &mut client);
+                    if let Some((cid, payload)) = decode_server_send(&body) {
+                        latest.entry(cid).or_default().insert(addr.clone(), payload);
+                    }
                 }
             }
         }
 
-        // 2) Tick : poll GNS et router chaque événement client via l'assigneur.
+        // 2) Tick : événements clients → placement → charge/décharge/relai.
         ticker.tick().await;
         for ev in client.poll() {
             let cid = match &ev {
@@ -138,29 +121,36 @@ pub async fn gateway_main(listen_addr: &str, router_addr: &str) -> std::io::Resu
                 TransportEvent::Message { from, .. } => *from,
             };
             let is_disconnect = matches!(ev, TransportEvent::Disconnected(_));
-            // Traitement séquentiel : la 1re position d'un client est routée et assignée avant
-            // l'événement suivant, donc jamais deux `NeedRoute` en vol pour le même client.
-            match assigner.feed(ev) {
-                AssignAction::Buffered => {}
-                AssignAction::Forward { shard, frames } => {
-                    let _ = write_to_shard(&mut shards, &shard, &frames).await;
-                }
-                AssignAction::NeedRoute { client_id, x, y, z } => {
-                    if let Ok(shard) =
-                        ask_router(&mut router, &mut router_reader, client_id, x, y, z).await
-                    {
-                        if let AssignAction::Forward { shard, frames } =
-                            assigner.assign(client_id, shard)
-                        {
-                            let _ = write_to_shard(&mut shards, &shard, &frames).await;
-                        }
-                    }
-                }
+
+            // Si c'est une position, calculer le placement via la topologie + rayon selon le rang.
+            let placement = if let TransportEvent::Message { data, .. } = &ev {
+                extract_position(data).map(|(x, y, _z)| {
+                    let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
+                    topology.locate(x, y, r)
+                })
+            } else {
+                None
+            };
+
+            for LoadAction::Forward { shard, frames } in loader.feed(ev, placement) {
+                let _ = write_to_shard(&mut shards, &shard, &frames).await;
             }
-            // Libère l'état local à la déconnexion (après que `feed` ait relayé le Disconnected
-            // au shard si le client était assigné) — sinon le buffer du client fuirait.
+
             if is_disconnect {
-                assigner.forget(cid);
+                loader.forget(cid);
+                latest.remove(&cid);
+            } else if let Some(per_shard) = latest.get_mut(&cid) {
+                // Élaguer les snapshots des shards qui ne sont plus chargés pour ce client.
+                let loaded = loader.loaded_shards(cid);
+                per_shard.retain(|s, _| loaded.contains(s));
+            }
+        }
+
+        // 3) Pour chaque client, fusionner les derniers snapshots de ses shards chargés → envoi.
+        for (cid, per_shard) in latest.iter() {
+            let snaps: Vec<Vec<u8>> = per_shard.values().cloned().collect();
+            if let Some(merged) = merge_snapshots(&snaps) {
+                client.send(*cid, &merged);
             }
         }
     }
@@ -177,16 +167,30 @@ mod tests {
     fn drains_client_events_into_shard_frames() {
         let mut client = InMemoryTransport::new();
         client.inject(TransportEvent::Connected(1));
-        client.inject(TransportEvent::Message { from: 1, data: vec![4, 2] });
+        client.inject(TransportEvent::Message {
+            from: 1,
+            data: vec![4, 2],
+        });
 
         let frames = drain_client_to_shard(&mut client);
         assert_eq!(frames.len(), 2);
 
         // Chaque frame est un ClientEvent décodable.
         let mut r = FrameReader::new();
-        for f in &frames { r.push(f); }
-        assert_eq!(decode_client_event(&r.next_frame().unwrap()), Some(TransportEvent::Connected(1)));
-        assert_eq!(decode_client_event(&r.next_frame().unwrap()), Some(TransportEvent::Message { from: 1, data: vec![4, 2] }));
+        for f in &frames {
+            r.push(f);
+        }
+        assert_eq!(
+            decode_client_event(&r.next_frame().unwrap()),
+            Some(TransportEvent::Connected(1))
+        );
+        assert_eq!(
+            decode_client_event(&r.next_frame().unwrap()),
+            Some(TransportEvent::Message {
+                from: 1,
+                data: vec![4, 2]
+            })
+        );
     }
 
     #[test]
