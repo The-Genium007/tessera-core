@@ -7,8 +7,10 @@ public func Tessera_ApplyFastTravel(game: GameInstance, e: ref<DesossageEntry>) 
   if e.active {
     return;
   }
-  // PIN IN-GAME : désactiver FastTravelSystem + rendre les kiosques/dataterms inactifs.
-  FTLog(s"[Tessera/Desossage] (stub) voyage rapide → coupé (kiosques inactifs)");
+  // Helper natif du FastTravelSystem : verrouille le voyage rapide (kiosques/dataterms inactifs).
+  // Cf. fastTravelSystem.swift (ManageFastTravelLock(enable, reason, game, opt statusEffectID)).
+  FastTravelSystem.ManageFastTravelLock(false, n"tessera_desossage", game);
+  FTLog(s"[Tessera/Desossage] voyage rapide → coupé (ManageFastTravelLock false)");
 }
 
 public func Tessera_ApplyVendors(game: GameInstance, e: ref<DesossageEntry>) -> Void {

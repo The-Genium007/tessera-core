@@ -1,15 +1,16 @@
 module Tessera.Desossage
 
 // Leviers ordre public : police / système de recherche (wanted/MaxTac) + sécurité ambiante.
-// STUB : journalise l'intention. Corps réel (PreventionSystem, devices sécurité) à pincer en jeu.
+// Symboles 2.31 confirmés via source décompilée (core/systems/preventionSystem.swift).
 
 public func Tessera_ApplyPolice(game: GameInstance, e: ref<DesossageEntry>) -> Void {
   if e.active {
-    FTLog(s"[Tessera/Desossage] (stub) police active — non coupée");
     return;
   }
-  // PIN IN-GAME : désactiver PreventionSystem (heat 0, pas de spawns NCPD/MaxTac).
-  FTLog(s"[Tessera/Desossage] (stub) police/prévention → coupée");
+  // Le PreventionSystem lit le fact `prevention_quest_disabled` (== 1 → il se désactive :
+  // pas de heat/NCPD/MaxTac). Cf. preventionSystem.swift (GetFact("prevention_quest_disabled")).
+  GameInstance.GetQuestsSystem(game).SetFact(n"prevention_quest_disabled", 1);
+  FTLog(s"[Tessera/Desossage] police/prévention → coupée (prevention_quest_disabled=1)");
 }
 
 public func Tessera_ApplyAmbientSecurity(game: GameInstance, e: ref<DesossageEntry>) -> Void {
