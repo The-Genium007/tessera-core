@@ -91,6 +91,8 @@ pub enum ManifestError {
     DanglingReference(String),
     TreeNotConnected(String),
     NoRootShardOrSplit,
+    DefaultEntryCount(usize),
+    NoSpawnPointForDefaultEntry,
 }
 
 impl std::fmt::Display for ManifestError {
@@ -107,6 +109,13 @@ impl std::fmt::Display for ManifestError {
                 write!(f, "id non atteint depuis root ou référencé plus d'une fois: {id}")
             }
             Self::NoRootShardOrSplit => write!(f, "topologie vide : aucun shard ni split"),
+            Self::DefaultEntryCount(n) => write!(
+                f,
+                "il doit y avoir exactement un shard default_entry=true (trouvé {n})"
+            ),
+            Self::NoSpawnPointForDefaultEntry => {
+                write!(f, "le shard default_entry doit avoir au moins un spawn_point")
+            }
         }
     }
 }
@@ -183,6 +192,97 @@ fn validate_topology_structure(topo: &TopologyConfig) -> Result<(), ManifestErro
         if !visited.contains(*id) {
             return Err(ManifestError::TreeNotConnected(id.to_string()));
         }
+    }
+    Ok(())
+}
+
+pub fn flatten_topology(
+    topo: &TopologyConfig,
+) -> Result<Vec<crate::handoff::ShardZone>, ManifestError> {
+    use crate::handoff::{Aabb, ShardZone};
+
+    let mut split_by_id: HashMap<&str, &SplitConfig> = HashMap::new();
+    let mut shard_by_id: HashMap<&str, &ShardConfig> = HashMap::new();
+    for s in &topo.splits {
+        split_by_id.insert(&s.id, s);
+    }
+    for s in &topo.shards {
+        shard_by_id.insert(&s.id, s);
+    }
+
+    let whole = Aabb {
+        min_x: f32::NEG_INFINITY,
+        max_x: f32::INFINITY,
+        min_y: f32::NEG_INFINITY,
+        max_y: f32::INFINITY,
+    };
+
+    if split_by_id.is_empty() {
+        let shard = topo.shards.first().ok_or(ManifestError::NoRootShardOrSplit)?;
+        return Ok(vec![ShardZone {
+            addr: shard.listen_addr.clone(),
+            zone: whole,
+        }]);
+    }
+
+    fn walk(
+        id: &str,
+        bounds: crate::handoff::Aabb,
+        split_by_id: &HashMap<&str, &SplitConfig>,
+        shard_by_id: &HashMap<&str, &ShardConfig>,
+        zones: &mut Vec<crate::handoff::ShardZone>,
+    ) -> Result<(), ManifestError> {
+        use crate::handoff::{Aabb, ShardZone};
+        if let Some(split) = split_by_id.get(id) {
+            let (left_bounds, right_bounds) = match split.axis {
+                Axis::X => (
+                    Aabb {
+                        max_x: split.at,
+                        ..bounds
+                    },
+                    Aabb {
+                        min_x: split.at,
+                        ..bounds
+                    },
+                ),
+                Axis::Y => (
+                    Aabb {
+                        max_y: split.at,
+                        ..bounds
+                    },
+                    Aabb {
+                        min_y: split.at,
+                        ..bounds
+                    },
+                ),
+            };
+            walk(&split.left, left_bounds, split_by_id, shard_by_id, zones)?;
+            walk(&split.right, right_bounds, split_by_id, shard_by_id, zones)?;
+            Ok(())
+        } else if let Some(shard) = shard_by_id.get(id) {
+            zones.push(ShardZone {
+                addr: shard.listen_addr.clone(),
+                zone: bounds,
+            });
+            Ok(())
+        } else {
+            Err(ManifestError::DanglingReference(id.to_string()))
+        }
+    }
+
+    let mut zones = Vec::new();
+    walk("root", whole, &split_by_id, &shard_by_id, &mut zones)?;
+    Ok(zones)
+}
+
+#[allow(dead_code)]
+fn validate_default_entry(topo: &TopologyConfig) -> Result<(), ManifestError> {
+    let defaults: Vec<&ShardConfig> = topo.shards.iter().filter(|s| s.default_entry).collect();
+    if defaults.len() != 1 {
+        return Err(ManifestError::DefaultEntryCount(defaults.len()));
+    }
+    if defaults[0].spawn_points.is_empty() {
+        return Err(ManifestError::NoSpawnPointForDefaultEntry);
     }
     Ok(())
 }
@@ -340,5 +440,128 @@ mod tests {
             }],
         };
         assert_eq!(validate_topology_structure(&topo), Ok(()));
+    }
+
+    #[test]
+    fn flattens_two_shard_tree_to_expected_aabbs() {
+        let zones = flatten_topology(&two_shard_topology()).unwrap();
+        assert_eq!(zones.len(), 2);
+        let a = zones.iter().find(|z| z.addr == "127.0.0.1:27030").unwrap();
+        assert_eq!(a.zone.min_x, f32::NEG_INFINITY);
+        assert_eq!(a.zone.max_x, 1000.0);
+        assert_eq!(a.zone.min_y, f32::NEG_INFINITY);
+        assert_eq!(a.zone.max_y, f32::INFINITY);
+        let b = zones.iter().find(|z| z.addr == "127.0.0.1:27031").unwrap();
+        assert_eq!(b.zone.min_x, 1000.0);
+        assert_eq!(b.zone.max_x, f32::INFINITY);
+    }
+
+    #[test]
+    fn merging_four_shard_tree_matches_two_shard_tree() {
+        let four = TopologyConfig {
+            active_preset: "4-shards".into(),
+            splits: vec![
+                SplitConfig {
+                    id: "root".into(),
+                    axis: Axis::X,
+                    at: 1000.0,
+                    left: "split-a".into(),
+                    right: "split-b".into(),
+                },
+                SplitConfig {
+                    id: "split-a".into(),
+                    axis: Axis::Y,
+                    at: 0.0,
+                    left: "shard-a1".into(),
+                    right: "shard-a2".into(),
+                },
+                SplitConfig {
+                    id: "split-b".into(),
+                    axis: Axis::Y,
+                    at: 0.0,
+                    left: "shard-b1".into(),
+                    right: "shard-b2".into(),
+                },
+            ],
+            shards: vec![
+                ShardConfig {
+                    id: "shard-a1".into(),
+                    listen_addr: "a1".into(),
+                    default_entry: true,
+                    spawn_points: vec![[0.0, 0.0, 0.0]],
+                },
+                ShardConfig {
+                    id: "shard-a2".into(),
+                    listen_addr: "a2".into(),
+                    default_entry: false,
+                    spawn_points: vec![],
+                },
+                ShardConfig {
+                    id: "shard-b1".into(),
+                    listen_addr: "b1".into(),
+                    default_entry: false,
+                    spawn_points: vec![],
+                },
+                ShardConfig {
+                    id: "shard-b2".into(),
+                    listen_addr: "b2".into(),
+                    default_entry: false,
+                    spawn_points: vec![],
+                },
+            ],
+        };
+        let zones = flatten_topology(&four).unwrap();
+        let a1 = zones.iter().find(|z| z.addr == "a1").unwrap();
+        let a2 = zones.iter().find(|z| z.addr == "a2").unwrap();
+        let b1 = zones.iter().find(|z| z.addr == "b1").unwrap();
+        let b2 = zones.iter().find(|z| z.addr == "b2").unwrap();
+
+        assert_eq!(a1.zone.min_x, f32::NEG_INFINITY);
+        assert_eq!(a1.zone.max_x, 1000.0);
+        assert_eq!(a2.zone.min_x, f32::NEG_INFINITY);
+        assert_eq!(a2.zone.max_x, 1000.0);
+        assert_eq!(a1.zone.min_y, f32::NEG_INFINITY);
+        assert_eq!(a1.zone.max_y, 0.0);
+        assert_eq!(a2.zone.min_y, 0.0);
+        assert_eq!(a2.zone.max_y, f32::INFINITY);
+
+        assert_eq!(b1.zone.min_x, 1000.0);
+        assert_eq!(b1.zone.max_x, f32::INFINITY);
+        assert_eq!(b2.zone.min_x, 1000.0);
+        assert_eq!(b2.zone.max_x, f32::INFINITY);
+
+        let two = flatten_topology(&two_shard_topology()).unwrap();
+        let shard_a = two.iter().find(|z| z.addr == "127.0.0.1:27030").unwrap();
+        assert_eq!(a1.zone.min_x, shard_a.zone.min_x);
+        assert_eq!(a1.zone.max_x, shard_a.zone.max_x);
+        assert_eq!(a1.zone.min_y, shard_a.zone.min_y);
+        assert_eq!(a2.zone.max_y, shard_a.zone.max_y);
+    }
+
+    #[test]
+    fn validates_exactly_one_default_entry() {
+        let mut topo = two_shard_topology();
+        topo.shards[1].default_entry = true;
+        assert_eq!(
+            validate_default_entry(&topo),
+            Err(ManifestError::DefaultEntryCount(2))
+        );
+
+        topo.shards[0].default_entry = false;
+        topo.shards[1].default_entry = false;
+        assert_eq!(
+            validate_default_entry(&topo),
+            Err(ManifestError::DefaultEntryCount(0))
+        );
+    }
+
+    #[test]
+    fn rejects_default_entry_with_no_spawn_point() {
+        let mut topo = two_shard_topology();
+        topo.shards[0].spawn_points = vec![];
+        assert_eq!(
+            validate_default_entry(&topo),
+            Err(ManifestError::NoSpawnPointForDefaultEntry)
+        );
     }
 }
