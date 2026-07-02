@@ -26,6 +26,8 @@ pub fn verifying_key_from_b64(pub_b64: &str) -> Result<VerifyingKey, String> {
     VerifyingKey::from_bytes(&key).map_err(|e| format!("pubkey ed25519 invalide: {e}"))
 }
 
+#[allow(dead_code)]
+// Derives and documents the pubkey-derivation half of the signing contract; used only by tests.
 pub fn public_b64(key: &SigningKey) -> String {
     B64.encode(key.verifying_key().to_bytes())
 }
