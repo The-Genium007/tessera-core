@@ -33,6 +33,7 @@ pub struct Runtime {
     pub gateway: GatewayConfig,
     pub topology: TopologyConfig,
     pub radius: RadiusConfig,
+    pub aoi: AoiConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,6 +83,11 @@ pub struct RadiusConfig {
     pub game_master: f32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AoiConfig {
+    pub visibility_radius: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ManifestError {
     UnsupportedFormatVersion(u32),
@@ -94,6 +100,7 @@ pub enum ManifestError {
     DefaultEntryCount(usize),
     NoSpawnPointForDefaultEntry,
     RadiusOutOfOrder,
+    NegativeAoiRadius,
     InvalidAddress(String, String),
 }
 
@@ -131,6 +138,9 @@ impl std::fmt::Display for ManifestError {
                 f,
                 "runtime.radius doit vérifier base <= moderator <= game_master"
             ),
+            Self::NegativeAoiRadius => {
+                write!(f, "runtime.aoi.visibility_radius doit être >= 0")
+            }
             Self::InvalidAddress(field, value) => {
                 write!(f, "{field} n'est pas une adresse valide: {value}")
             }
@@ -312,6 +322,14 @@ fn validate_radius(r: &RadiusConfig) -> Result<(), ManifestError> {
     }
 }
 
+fn validate_aoi(a: &AoiConfig) -> Result<(), ManifestError> {
+    if a.visibility_radius < 0.0 {
+        Err(ManifestError::NegativeAoiRadius)
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_addr(field: &str, value: &str) -> Result<(), ManifestError> {
     value
         .parse::<std::net::SocketAddr>()
@@ -325,6 +343,7 @@ fn validate(m: &Manifest) -> Result<(), ManifestError> {
     flatten_topology(&m.runtime.topology)?;
     validate_default_entry(&m.runtime.topology)?;
     validate_radius(&m.runtime.radius)?;
+    validate_aoi(&m.runtime.aoi)?;
     validate_addr(
         "runtime.gateway.listen_addr",
         &m.runtime.gateway.listen_addr,
@@ -372,6 +391,10 @@ pub fn to_runtime(
         .first()
         .ok_or(ManifestError::NoSpawnPointForDefaultEntry)?;
     Ok((topology, radius, spawn, m.runtime.store_path.clone()))
+}
+
+pub fn shard_aoi_radius(m: &Manifest) -> f32 {
+    m.runtime.aoi.visibility_radius
 }
 
 pub fn parse_and_validate(toml_str: &str) -> Result<Manifest, String> {
@@ -426,6 +449,9 @@ mod tests {
         base = 25.0
         moderator = 50.0
         game_master = 75.0
+
+        [runtime.aoi]
+        visibility_radius = 100.0
     "#;
 
     #[test]
@@ -679,6 +705,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_validates_aoi_radius() {
+        let m = parse_and_validate(MINIMAL_TOML).expect("should validate");
+        assert_eq!(m.runtime.aoi.visibility_radius, 100.0);
+    }
+
+    #[test]
+    fn rejects_negative_aoi_radius() {
+        let toml_str =
+            MINIMAL_TOML.replace("visibility_radius = 100.0", "visibility_radius = -1.0");
+        let err = parse_and_validate(&toml_str).unwrap_err();
+        assert!(err.contains("visibility_radius"));
+    }
+
+    #[test]
+    fn shard_aoi_radius_returns_configured_value() {
+        let m = parse_and_validate(MINIMAL_TOML).expect("should validate");
+        assert_eq!(shard_aoi_radius(&m), 100.0);
+    }
+
+    #[test]
     fn rejects_invalid_advertise_addr() {
         let toml_str = MINIMAL_TOML.replace(
             r#"advertise_addr = "51.38.189.234:27020""#,
@@ -738,6 +784,9 @@ mod tests {
         base = 25.0
         moderator = 50.0
         game_master = 75.0
+
+        [runtime.aoi]
+        visibility_radius = 100.0
         "#
         .to_string()
     }

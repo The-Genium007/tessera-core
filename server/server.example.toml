@@ -46,3 +46,6 @@ spawn_points = []
 base = 25.0
 moderator = 50.0
 game_master = 75.0
+
+[runtime.aoi]
+visibility_radius = 100.0
