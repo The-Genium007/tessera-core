@@ -1,22 +1,20 @@
 # syntax=docker/dockerfile:1
-# Serveur autoritaire TesseraSynth — Rust + GameNetworkingSockets (UDP fiable).
-# Build multi-stage. CONTEXTE DE BUILD = racine du dépôt (le build a besoin du workspace :
-# Cargo.toml/Cargo.lock + protocol/ + server/ + tools/ pour résoudre le workspace).
+# Image runtime unique TesseraSynth : Gateway (GNS) + Shard (TCP interne) + directory (CLI).
+# Build multi-stage. CONTEXTE DE BUILD = racine du dépôt.
 #
 #   docker build -f server/Dockerfile -t tessera-server .
 
 # ---------- étape build ----------
 FROM rust:1-bookworm AS build
 
-# Dépendances natives de GNS : cmake + protobuf 3.21 (bookworm) + openssl + clang.
-# (protobuf >= 4 casse le build GNS — bookworm fournit 3.21.x, parfait. Voir ADR 0003.)
+# Dépendances natives de GNS : cmake + protobuf 3.21 (bookworm) + openssl + clang. Voir ADR 0003.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake pkg-config clang git libssl-dev \
         protobuf-compiler libprotobuf-dev \
         curl unzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# flatc EXACTEMENT à la version du crate flatbuffers (25.12.19), sinon code généré incompatible.
+# flatc EXACTEMENT à la version du crate flatbuffers (25.12.19).
 RUN curl -fsSL -o /tmp/flatc.zip \
       https://github.com/google/flatbuffers/releases/download/v25.12.19/Linux.flatc.binary.g++-13.zip \
     && unzip -o /tmp/flatc.zip -d /usr/local/bin \
@@ -26,19 +24,26 @@ RUN curl -fsSL -o /tmp/flatc.zip \
 
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p server --features gns
+
+# Gateway seul a besoin de la feature `gns` (seul binaire qui lie GNS/protobuf au runtime).
+RUN cargo build --release --features gns -p server --bin gateway
+# Shard et directory n'en ont pas besoin — builds séparés (invocations distinctes) pour ne pas
+# leur imposer la feature activée par la ligne ci-dessus.
+RUN cargo build --release -p server --bin shard
+RUN cargo build --release -p directory
 
 # ---------- étape runtime ----------
 FROM debian:bookworm-slim AS runtime
-# libprotobuf32 : GNS lie protobuf 3.21 dynamiquement (libprotobuf.so.32). libssl3 : openssl.
+# libprotobuf32 : GNS (gateway) lie protobuf 3.21 dynamiquement. libssl3 : openssl (gateway).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 libprotobuf32 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/server /usr/local/bin/tessera-server
+
+COPY --from=build /src/target/release/gateway /usr/local/bin/tessera-gateway
+COPY --from=build /src/target/release/shard /usr/local/bin/tessera-shard
+COPY --from=build /src/target/release/tessera-directory /usr/local/bin/tessera-directory
 
 ENV RUST_LOG=info
-# Port de jeu (UDP) — les clients moddés s'y connectent.
+# Port de jeu (UDP), utilisé uniquement par le service gateway.
 EXPOSE 27020/udp
-# Écoute sur toutes les interfaces pour accepter les clients externes.
-ENTRYPOINT ["tessera-server"]
-CMD ["0.0.0.0:27020"]
+# Pas d'ENTRYPOINT/CMD fixe : docker-compose choisit le binaire par service via `command:`.
