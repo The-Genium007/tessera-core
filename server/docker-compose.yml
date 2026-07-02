@@ -23,6 +23,7 @@ services:
       - tessera-players:/data
     environment:
       RUST_LOG: ${RUST_LOG:-info}
+      TESSERA_GATEWAY_METRICS_ADDR: "0.0.0.0:9100"
     depends_on:
       - shard-a
       - shard-b
