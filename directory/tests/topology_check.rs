@@ -6,10 +6,15 @@ fn bin_path() -> &'static str {
 
 #[test]
 fn check_accepts_valid_example_manifest() {
-    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../server/server.example.toml");
+    let manifest_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/server.example.toml");
     let out = Command::new(bin_path())
-        .args(["topology", "check", "--manifest", manifest_path.to_str().unwrap()])
+        .args([
+            "topology",
+            "check",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(out.status.success(), "{:?}", out);
@@ -27,7 +32,12 @@ fn check_rejects_manifest_with_dangling_reference() {
     std::fs::write(&bad_manifest, bad).unwrap();
 
     let out = Command::new(bin_path())
-        .args(["topology", "check", "--manifest", bad_manifest.to_str().unwrap()])
+        .args([
+            "topology",
+            "check",
+            "--manifest",
+            bad_manifest.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());

@@ -6,8 +6,8 @@ fn bin_path() -> &'static str {
 
 #[test]
 fn render_produces_non_empty_svg() {
-    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../server/server.example.toml");
+    let manifest_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/server.example.toml");
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("zones.svg");
 

@@ -58,11 +58,18 @@ mod tests {
         let payload = b.create_vector(&[1u8, 2, 3]);
         let ce = ClientEvent::create(
             &mut b,
-            &ClientEventArgs { kind: EventKind::Message, client_id: 42, payload: Some(payload) },
+            &ClientEventArgs {
+                kind: EventKind::Message,
+                client_id: 42,
+                payload: Some(payload),
+            },
         );
         let env = InternalEnvelope::create(
             &mut b,
-            &InternalEnvelopeArgs { msg_type: InternalMsg::ClientEvent, msg: Some(ce.as_union_value()) },
+            &InternalEnvelopeArgs {
+                msg_type: InternalMsg::ClientEvent,
+                msg: Some(ce.as_union_value()),
+            },
         );
         b.finish(env, None);
         let bytes = b.finished_data().to_vec();

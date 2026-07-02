@@ -101,14 +101,20 @@ impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedFormatVersion(v) => {
-                write!(f, "format_version {v} non supportée (seule 1 est supportée)")
+                write!(
+                    f,
+                    "format_version {v} non supportée (seule 1 est supportée)"
+                )
             }
             Self::EmptyField(name) => write!(f, "champ {name} vide"),
             Self::InvalidMaxPlayers => write!(f, "identity.max_players doit être > 0"),
             Self::DuplicateId(id) => write!(f, "id dupliqué dans la topologie: {id}"),
             Self::DanglingReference(id) => write!(f, "référence vers un id inconnu: {id}"),
             Self::TreeNotConnected(id) => {
-                write!(f, "id non atteint depuis root ou référencé plus d'une fois: {id}")
+                write!(
+                    f,
+                    "id non atteint depuis root ou référencé plus d'une fois: {id}"
+                )
             }
             Self::NoRootShardOrSplit => write!(f, "topologie vide : aucun shard ni split"),
             Self::DefaultEntryCount(n) => write!(
@@ -116,7 +122,10 @@ impl std::fmt::Display for ManifestError {
                 "il doit y avoir exactement un shard default_entry=true (trouvé {n})"
             ),
             Self::NoSpawnPointForDefaultEntry => {
-                write!(f, "le shard default_entry doit avoir au moins un spawn_point")
+                write!(
+                    f,
+                    "le shard default_entry doit avoir au moins un spawn_point"
+                )
             }
             Self::RadiusOutOfOrder => write!(
                 f,
@@ -224,7 +233,10 @@ pub fn flatten_topology(
     };
 
     if split_by_id.is_empty() {
-        let shard = topo.shards.first().ok_or(ManifestError::NoRootShardOrSplit)?;
+        let shard = topo
+            .shards
+            .first()
+            .ok_or(ManifestError::NoRootShardOrSplit)?;
         return Ok(vec![ShardZone {
             addr: shard.listen_addr.clone(),
             zone: whole,
@@ -313,13 +325,19 @@ fn validate(m: &Manifest) -> Result<(), ManifestError> {
     flatten_topology(&m.runtime.topology)?;
     validate_default_entry(&m.runtime.topology)?;
     validate_radius(&m.runtime.radius)?;
-    validate_addr("runtime.gateway.listen_addr", &m.runtime.gateway.listen_addr)?;
+    validate_addr(
+        "runtime.gateway.listen_addr",
+        &m.runtime.gateway.listen_addr,
+    )?;
     validate_addr(
         "runtime.gateway.advertise_addr",
         &m.runtime.gateway.advertise_addr,
     )?;
     for s in &m.runtime.topology.shards {
-        validate_addr(&format!("runtime.topology.shards[{}].listen_addr", s.id), &s.listen_addr)?;
+        validate_addr(
+            &format!("runtime.topology.shards[{}].listen_addr", s.id),
+            &s.listen_addr,
+        )?;
     }
     Ok(())
 }
@@ -433,7 +451,10 @@ mod tests {
     fn rejects_empty_id() {
         let toml_str = MINIMAL_TOML.replace(r#"id = "tessera-dev-01""#, r#"id = """#);
         let m: Manifest = toml::from_str(&toml_str).unwrap();
-        assert_eq!(validate_scalars(&m), Err(ManifestError::EmptyField("identity.id")));
+        assert_eq!(
+            validate_scalars(&m),
+            Err(ManifestError::EmptyField("identity.id"))
+        );
     }
 
     #[test]
@@ -659,8 +680,10 @@ mod tests {
 
     #[test]
     fn rejects_invalid_advertise_addr() {
-        let toml_str =
-            MINIMAL_TOML.replace(r#"advertise_addr = "51.38.189.234:27020""#, r#"advertise_addr = "not-an-addr""#);
+        let toml_str = MINIMAL_TOML.replace(
+            r#"advertise_addr = "51.38.189.234:27020""#,
+            r#"advertise_addr = "not-an-addr""#,
+        );
         let err = parse_and_validate(&toml_str).unwrap_err();
         assert!(err.contains("advertise_addr"));
     }
@@ -715,7 +738,8 @@ mod tests {
         base = 25.0
         moderator = 50.0
         game_master = 75.0
-        "#.to_string()
+        "#
+        .to_string()
     }
 
     #[test]

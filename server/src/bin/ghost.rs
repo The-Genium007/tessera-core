@@ -14,7 +14,9 @@ fn main() {
 #[cfg(feature = "gns")]
 fn main() {
     use flatbuffers::FlatBufferBuilder;
-    use gns::{sys::ESteamNetworkingConnectionState as State, GnsGlobal, GnsSocket, IsClient, SendFlags};
+    use gns::{
+        sys::ESteamNetworkingConnectionState as State, GnsGlobal, GnsSocket, IsClient, SendFlags,
+    };
     use protocol::*;
     use std::net::Ipv4Addr;
     use std::str::FromStr;
@@ -63,10 +65,18 @@ fn main() {
         if connected && !join_sent {
             let mut b = FlatBufferBuilder::new();
             let name = b.create_string("Fantome-Tessera");
-            let join = Join::create(&mut b, &JoinArgs { display_name: Some(name) });
+            let join = Join::create(
+                &mut b,
+                &JoinArgs {
+                    display_name: Some(name),
+                },
+            );
             let env = ClientEnvelope::create(
                 &mut b,
-                &ClientEnvelopeArgs { msg_type: ClientMsg::Join, msg: Some(join.as_union_value()) },
+                &ClientEnvelopeArgs {
+                    msg_type: ClientMsg::Join,
+                    msg: Some(join.as_union_value()),
+                },
             );
             b.finish(env, None);
             let msg = g.utils().allocate_message(
@@ -88,7 +98,13 @@ fn main() {
 
             let mut b = FlatBufferBuilder::new();
             let pos = Vec3::new(x, cy, cz);
-            let pu = PositionUpdate::create(&mut b, &PositionUpdateArgs { position: Some(&pos), yaw });
+            let pu = PositionUpdate::create(
+                &mut b,
+                &PositionUpdateArgs {
+                    position: Some(&pos),
+                    yaw,
+                },
+            );
             let env = ClientEnvelope::create(
                 &mut b,
                 &ClientEnvelopeArgs {

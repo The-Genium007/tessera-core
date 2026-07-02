@@ -17,12 +17,13 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(1);
         });
 
-    let manifest = server::manifest::load(std::path::Path::new(manifest_path)).unwrap_or_else(|e| {
-        eprintln!("manifeste invalide ({manifest_path}): {e}");
-        std::process::exit(1);
-    });
-    let (topology, radius, spawn, store_path) =
-        server::manifest::to_runtime(&manifest).unwrap_or_else(|e| {
+    let manifest =
+        server::manifest::load(std::path::Path::new(manifest_path)).unwrap_or_else(|e| {
+            eprintln!("manifeste invalide ({manifest_path}): {e}");
+            std::process::exit(1);
+        });
+    let (topology, radius, spawn, store_path) = server::manifest::to_runtime(&manifest)
+        .unwrap_or_else(|e| {
             eprintln!("manifeste invalide ({manifest_path}): {e}");
             std::process::exit(1);
         });

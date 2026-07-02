@@ -16,11 +16,18 @@ pub fn encode_client_event(kind: EventKind, client_id: u64, payload: &[u8]) -> V
     let pl = b.create_vector(payload);
     let ce = ClientEvent::create(
         &mut b,
-        &ClientEventArgs { kind, client_id, payload: Some(pl) },
+        &ClientEventArgs {
+            kind,
+            client_id,
+            payload: Some(pl),
+        },
     );
     let env = InternalEnvelope::create(
         &mut b,
-        &InternalEnvelopeArgs { msg_type: InternalMsg::ClientEvent, msg: Some(ce.as_union_value()) },
+        &InternalEnvelopeArgs {
+            msg_type: InternalMsg::ClientEvent,
+            msg: Some(ce.as_union_value()),
+        },
     );
     b.finish(env, None);
     encode_frame(b.finished_data())
@@ -47,7 +54,9 @@ pub fn event_to_client_event_frame(ev: &TransportEvent) -> Vec<u8> {
     match ev {
         TransportEvent::Connected(id) => encode_client_event(EventKind::Connected, *id, &[]),
         TransportEvent::Disconnected(id) => encode_client_event(EventKind::Disconnected, *id, &[]),
-        TransportEvent::Message { from, data } => encode_client_event(EventKind::Message, *from, data),
+        TransportEvent::Message { from, data } => {
+            encode_client_event(EventKind::Message, *from, data)
+        }
     }
 }
 
@@ -65,7 +74,10 @@ pub fn encode_route_request(client_id: u64, x: f32, y: f32, z: f32) -> Vec<u8> {
     let rr = RouteRequest::create(&mut b, &RouteRequestArgs { client_id, x, y, z });
     let env = InternalEnvelope::create(
         &mut b,
-        &InternalEnvelopeArgs { msg_type: InternalMsg::RouteRequest, msg: Some(rr.as_union_value()) },
+        &InternalEnvelopeArgs {
+            msg_type: InternalMsg::RouteRequest,
+            msg: Some(rr.as_union_value()),
+        },
     );
     b.finish(env, None);
     encode_frame(b.finished_data())
@@ -81,10 +93,18 @@ pub fn decode_route_request(body: &[u8]) -> Option<(u64, f32, f32, f32)> {
 pub fn encode_route_reply(shard_addr: &str) -> Vec<u8> {
     let mut b = FlatBufferBuilder::new();
     let addr = b.create_string(shard_addr);
-    let rr = RouteReply::create(&mut b, &RouteReplyArgs { shard_addr: Some(addr) });
+    let rr = RouteReply::create(
+        &mut b,
+        &RouteReplyArgs {
+            shard_addr: Some(addr),
+        },
+    );
     let env = InternalEnvelope::create(
         &mut b,
-        &InternalEnvelopeArgs { msg_type: InternalMsg::RouteReply, msg: Some(rr.as_union_value()) },
+        &InternalEnvelopeArgs {
+            msg_type: InternalMsg::RouteReply,
+            msg: Some(rr.as_union_value()),
+        },
     );
     b.finish(env, None);
     encode_frame(b.finished_data())
@@ -137,10 +157,19 @@ impl Transport for InternalTransport {
     fn send(&mut self, to: ClientId, data: &[u8]) {
         let mut b = FlatBufferBuilder::new();
         let pl = b.create_vector(data);
-        let ss = ServerSend::create(&mut b, &ServerSendArgs { client_id: to, payload: Some(pl) });
+        let ss = ServerSend::create(
+            &mut b,
+            &ServerSendArgs {
+                client_id: to,
+                payload: Some(pl),
+            },
+        );
         let env = InternalEnvelope::create(
             &mut b,
-            &InternalEnvelopeArgs { msg_type: InternalMsg::ServerSend, msg: Some(ss.as_union_value()) },
+            &InternalEnvelopeArgs {
+                msg_type: InternalMsg::ServerSend,
+                msg: Some(ss.as_union_value()),
+            },
         );
         b.finish(env, None);
         self.outbound.push(encode_frame(b.finished_data()));
@@ -150,8 +179,8 @@ impl Transport for InternalTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{Transport, TransportEvent};
     use crate::framing::FrameReader;
+    use crate::transport::{Transport, TransportEvent};
     use protocol::internal::EventKind;
 
     #[test]
@@ -165,7 +194,13 @@ mod tests {
         let evs = t.poll();
         assert_eq!(evs.len(), 2);
         assert_eq!(evs[0], TransportEvent::Connected(1));
-        assert_eq!(evs[1], TransportEvent::Message { from: 1, data: vec![7, 7] });
+        assert_eq!(
+            evs[1],
+            TransportEvent::Message {
+                from: 1,
+                data: vec![7, 7]
+            }
+        );
         assert!(t.poll().is_empty(), "poll doit vider la file");
 
         // Le Shard envoie un snapshot [9,9] au client 1.
@@ -195,23 +230,41 @@ mod tests {
         t.feed(&framed[mid..]);
         let evs = t.poll();
         assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0], TransportEvent::Message { from: 7, data: vec![1, 2, 3] });
+        assert_eq!(
+            evs[0],
+            TransportEvent::Message {
+                from: 7,
+                data: vec![1, 2, 3]
+            }
+        );
     }
 
     #[test]
     fn event_to_client_event_frame_round_trips_via_decode() {
         use crate::framing::FrameReader;
         // Message
-        let framed = event_to_client_event_frame(&TransportEvent::Message { from: 3, data: vec![8, 9] });
+        let framed = event_to_client_event_frame(&TransportEvent::Message {
+            from: 3,
+            data: vec![8, 9],
+        });
         let mut r = FrameReader::new();
         r.push(&framed);
         let body = r.next_frame().unwrap();
-        assert_eq!(decode_client_event(&body), Some(TransportEvent::Message { from: 3, data: vec![8, 9] }));
+        assert_eq!(
+            decode_client_event(&body),
+            Some(TransportEvent::Message {
+                from: 3,
+                data: vec![8, 9]
+            })
+        );
         // Connected
         let framed = event_to_client_event_frame(&TransportEvent::Connected(7));
         let mut r = FrameReader::new();
         r.push(&framed);
-        assert_eq!(decode_client_event(&r.next_frame().unwrap()), Some(TransportEvent::Connected(7)));
+        assert_eq!(
+            decode_client_event(&r.next_frame().unwrap()),
+            Some(TransportEvent::Connected(7))
+        );
     }
 
     #[test]
@@ -231,11 +284,17 @@ mod tests {
         let framed = encode_route_request(11, 1.0, 2.0, 3.0);
         let mut r = FrameReader::new();
         r.push(&framed);
-        assert_eq!(decode_route_request(&r.next_frame().unwrap()), Some((11, 1.0, 2.0, 3.0)));
+        assert_eq!(
+            decode_route_request(&r.next_frame().unwrap()),
+            Some((11, 1.0, 2.0, 3.0))
+        );
 
         let framed = encode_route_reply("127.0.0.1:27030");
         let mut r = FrameReader::new();
         r.push(&framed);
-        assert_eq!(decode_route_reply(&r.next_frame().unwrap()), Some("127.0.0.1:27030".to_string()));
+        assert_eq!(
+            decode_route_reply(&r.next_frame().unwrap()),
+            Some("127.0.0.1:27030".to_string())
+        );
     }
 }
