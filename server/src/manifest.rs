@@ -72,6 +72,8 @@ impl std::fmt::Display for ManifestError {
     }
 }
 
+#[allow(dead_code)]
+// Wired into server::manifest::validate() in Task 4 of the M6 plan.
 fn validate_scalars(m: &Manifest) -> Result<(), ManifestError> {
     if m.format_version != 1 {
         return Err(ManifestError::UnsupportedFormatVersion(m.format_version));
