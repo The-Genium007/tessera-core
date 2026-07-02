@@ -132,15 +132,20 @@ impl InternalTransport {
         Self::default()
     }
 
-    /// Pousse les octets bruts reçus du socket (0, 1 ou plusieurs frames, et/ou un
-    /// frame partiel conservé pour le prochain appel).
-    pub fn feed(&mut self, bytes: &[u8]) {
+    /// Pousse les octets bruts reçus du socket. Renvoie `false` si le frame en cours annonce
+    /// une longueur au-delà de `framing::MAX_FRAME_LEN` — l'appelant doit alors fermer la
+    /// connexion plutôt que de continuer à lire (frame malveillant/buggé, jamais complet).
+    pub fn feed(&mut self, bytes: &[u8]) -> bool {
         self.reader.push(bytes);
+        if self.reader.declared_len_exceeds(crate::framing::MAX_FRAME_LEN) {
+            return false;
+        }
         while let Some(body) = self.reader.next_frame() {
             if let Some(ev) = decode_client_event(&body) {
                 self.inbound.push_back(ev);
             }
         }
+        true
     }
 
     /// Récupère (et vide) les frames sortants à écrire sur le socket.

@@ -25,7 +25,10 @@ pub async fn shard_main(addr: &str, aoi_radius: f32) -> std::io::Result<()> {
                 // Lecture des frames du Gateway (events clients).
                 read = sock.read(&mut buf) => {
                     let n = match read { Ok(0) | Err(_) => break, Ok(n) => n };
-                    transport.feed(&buf[..n]);
+                    if !transport.feed(&buf[..n]) {
+                        tracing::warn!("frame surdimensionné reçu du Gateway — connexion fermée");
+                        break;
+                    }
                 }
                 // Tick de simulation 20 Hz.
                 _ = ticker.tick() => {

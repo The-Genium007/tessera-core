@@ -71,6 +71,10 @@ pub async fn read_from_shards(
             Ok(Ok(0)) => dead.push(addr), // EOF : le shard a fermé la connexion
             Ok(Ok(n)) => {
                 link.reader.push(&sbuf[..n]);
+                if link.reader.declared_len_exceeds(crate::framing::MAX_FRAME_LEN) {
+                    dead.push(addr);
+                    continue;
+                }
                 while let Some(body) = link.reader.next_frame() {
                     if let Some((cid, payload)) = decode_server_send(&body) {
                         latest.entry(cid).or_default().insert(addr.clone(), payload);
