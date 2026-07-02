@@ -9,6 +9,12 @@ module Tessera.Desossage
 // Ne persiste pas entre les rechargements de session (repart de DesossageConfig.Default() à
 // chaque OnGameAttached) — pratique pour itérer en jeu, pas pour un réglage permanent (ça reste
 // DesossageConfig.reds + rebuild pour ça).
+//
+// Bug corrigé (échec de compilation dev12→dev13) : `name == "police"` sur des String échoue en
+// compilation (NO_MATCHING_OVERLOAD — l'opérateur == n'a pas de surcharge String malgré ce que
+// dit la doc communautaire). Remplacé par StrCmp(a, b) == 0, vérifié contre deux mods réels qui
+// compilent (TDUniverse/Cyberverse — le dépôt dont notre netcode est forké — et
+// psiberx/cp2077-equipment-ex).
 // ─────────────────────────────────────────────────────────────────────────────
 
 @addMethod(PlayerPuppet)
@@ -20,7 +26,7 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
   }
   let c = sys.GetConfig();
 
-  if name == "dayNightCycleScale" {
+  if StrCmp(name, "dayNightCycleScale") == 0 {
     c.dayNightCycleScale = density;
     FTLog(s"[Tessera/Desossage] SetLever dayNightCycleScale → \(density)");
     sys.Apply(this.GetGame());
@@ -28,20 +34,20 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
   }
 
   let e: ref<DesossageEntry>;
-  if name == "pedestrians" { e = c.pedestrians; }
-  else if name == "traffic" { e = c.traffic; }
-  else if name == "vendors" { e = c.vendors; }
-  else if name == "transit" { e = c.transit; }
-  else if name == "police" { e = c.police; }
-  else if name == "ambientSecurity" { e = c.ambientSecurity; }
-  else if name == "ncpdHustles" { e = c.ncpdHustles; }
-  else if name == "randomEncounters" { e = c.randomEncounters; }
-  else if name == "cyberpsychos" { e = c.cyberpsychos; }
-  else if name == "fastTravel" { e = c.fastTravel; }
-  else if name == "vendingDevices" { e = c.vendingDevices; }
-  else if name == "worldInteractables" { e = c.worldInteractables; }
-  else if name == "questTriggers" { e = c.questTriggers; }
-  else if name == "tutorials" { e = c.tutorials; }
+  if StrCmp(name, "pedestrians") == 0 { e = c.pedestrians; }
+  else if StrCmp(name, "traffic") == 0 { e = c.traffic; }
+  else if StrCmp(name, "vendors") == 0 { e = c.vendors; }
+  else if StrCmp(name, "transit") == 0 { e = c.transit; }
+  else if StrCmp(name, "police") == 0 { e = c.police; }
+  else if StrCmp(name, "ambientSecurity") == 0 { e = c.ambientSecurity; }
+  else if StrCmp(name, "ncpdHustles") == 0 { e = c.ncpdHustles; }
+  else if StrCmp(name, "randomEncounters") == 0 { e = c.randomEncounters; }
+  else if StrCmp(name, "cyberpsychos") == 0 { e = c.cyberpsychos; }
+  else if StrCmp(name, "fastTravel") == 0 { e = c.fastTravel; }
+  else if StrCmp(name, "vendingDevices") == 0 { e = c.vendingDevices; }
+  else if StrCmp(name, "worldInteractables") == 0 { e = c.worldInteractables; }
+  else if StrCmp(name, "questTriggers") == 0 { e = c.questTriggers; }
+  else if StrCmp(name, "tutorials") == 0 { e = c.tutorials; }
   else {
     FTLog(s"[Tessera/Desossage] SetLever: nom de levier inconnu \"\(name)\"");
     return;
