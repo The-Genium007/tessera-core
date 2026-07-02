@@ -170,12 +170,21 @@ pub async fn gateway_main(
     );
 
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
+    let mut last_autosave = std::time::Instant::now();
+    let autosave_interval = Duration::from_secs(30);
     loop {
         // 1) Lire chaque shard connecté (évacue et laisse reconnecter les connexions mortes).
         read_from_shards(&mut shards, &mut latest).await;
 
-        // 2) Tick : événements clients → placement → charge/décharge/relai.
-        ticker.tick().await;
+        // 2) Tick, avec une course contre le signal d'arrêt propre (SIGTERM/SIGINT).
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = shutdown_signal() => {
+                save_all_known(&mut store, &keys, &last_pos, &residence);
+                tracing::info!("Arrêt propre : positions sauvegardées, extinction du Gateway");
+                return Ok(());
+            }
+        }
         for ev in client.poll() {
             let cid = match &ev {
                 TransportEvent::Connected(id) | TransportEvent::Disconnected(id) => *id,
@@ -259,6 +268,31 @@ pub async fn gateway_main(
                 client.send(*cid, &merged);
             }
         }
+
+        // 4) Autosave périodique — ne dépend pas d'une déconnexion propre.
+        if last_autosave.elapsed() >= autosave_interval {
+            save_all_known(&mut store, &keys, &last_pos, &residence);
+            last_autosave = std::time::Instant::now();
+        }
+    }
+}
+
+/// Attend un signal d'arrêt propre : SIGINT (Ctrl+C) partout, plus SIGTERM (docker stop) sous
+/// Unix. Utilisé uniquement depuis `gateway_main`, qui est déjà gns-gated.
+#[cfg(feature = "gns")]
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
