@@ -7,6 +7,7 @@ pub mod gateway_routing;
 pub mod handoff;
 pub mod internal_net;
 pub mod manifest;
+pub mod metrics;
 pub mod persistence;
 pub mod server_loop;
 pub mod shard;
