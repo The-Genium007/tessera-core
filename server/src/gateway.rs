@@ -134,6 +134,9 @@ pub async fn gateway_main(
     // Persistance : clé (display_name), dernière position, et résidence chargée — par client.
     let mut keys: HashMap<u64, String> = HashMap::new();
     let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
+    // Horodatage de la dernière PositionUpdate ACCEPTÉE par client (absent tant qu'aucune
+    // position n'a encore été acceptée depuis le Join — sert de garde anti-triche).
+    let mut last_pos_at: HashMap<u64, std::time::Instant> = HashMap::new();
     let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
 
     let sock: SocketAddr = listen_addr.parse().expect("adresse GNS invalide");
@@ -174,7 +177,24 @@ pub async fn gateway_main(
                         keys.insert(cid, name);
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
+                    let now = std::time::Instant::now();
+                    let plausible =
+                        match (last_pos.get(&cid).copied(), last_pos_at.get(&cid).copied()) {
+                            (Some(prev), Some(at)) => crate::anticheat::is_plausible_move(
+                                prev,
+                                [x, y, z],
+                                now.duration_since(at),
+                                crate::anticheat::MAX_PLAYER_SPEED_MPS,
+                            ),
+                            // Pas encore de référence temporelle (1re position après Join) : accepté.
+                            _ => true,
+                        };
+                    if !plausible {
+                        tracing::warn!(client = cid, "PositionUpdate rejeté (vitesse implausible)");
+                        continue;
+                    }
                     last_pos.insert(cid, [x, y, z]);
+                    last_pos_at.insert(cid, now);
                     let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
                     placement = Some(topology.locate(x, y, r));
                 }
@@ -199,6 +219,7 @@ pub async fn gateway_main(
                     }
                 }
                 last_pos.remove(&cid);
+                last_pos_at.remove(&cid);
                 residence.remove(&cid);
                 loader.forget(cid);
                 latest.remove(&cid);
