@@ -84,10 +84,10 @@ mod tests {
             "ping": 0,
             "tags": ["dev", "test"],
             "status": "online",
-            "description": "Serveur de développement TesseraSynth (Rust autoritaire, GameNetworkingSockets).",
+            "description": "Serveur de développement TesseraSynth (serveur Rust autoritaire, GameNetworkingSockets). Tranche verticale 0-D.",
             "discordUrl": "",
             "websiteUrl": "https://tesserasynth.net",
-            "requiredModset": "0.1.0-dev6",
+            "requiredModset": "0.1.0-dev10",
             "voiceRequired": false,
             "launchArgs": [
                 "--cyberverse-server-address=51.38.189.234",
