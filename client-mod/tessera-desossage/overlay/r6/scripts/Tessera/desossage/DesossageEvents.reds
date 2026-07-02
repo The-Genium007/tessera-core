@@ -11,12 +11,18 @@ public func Tessera_ApplyEncounterCategory(game: GameInstance, kind: CName, e: r
   FTLog(s"[Tessera/Desossage] (stub) rencontres \(kind) → densité \(factor)");
 }
 
+// Couvre le volet « appels fixers » de questTriggers (symbole réel, confirmé via le dump RTTI
+// du jeu — GameInstance.GetPhoneManager -> questPhoneManager.ApplyPhoneCallRestriction(Bool)).
+// Best-effort : bloque les appels entrants (donc les gigs/side-quests poussés par téléphone),
+// mais PAS les déclencheurs de proximité ni les donneurs de quête in-world — ceux-là restent
+// des PIN IN-GAME (aucun symbole vérifié trouvé côté déclencheurs de zone/PNJ).
 public func Tessera_ApplyQuestTriggers(game: GameInstance, e: ref<DesossageEntry>) -> Void {
+  GameInstance.GetPhoneManager(game).ApplyPhoneCallRestriction(!e.active);
   if e.active {
-    return;
+    FTLog(s"[Tessera/Desossage] déclencheurs de quêtes → appels fixers réactivés");
+  } else {
+    FTLog(s"[Tessera/Desossage] déclencheurs de quêtes → appels fixers bloqués (ApplyPhoneCallRestriction)");
   }
-  // PIN IN-GAME : bloquer les déclencheurs/donneurs de quêtes + appels fixers (pas d'effacement de contenu).
-  FTLog(s"[Tessera/Desossage] (stub) déclencheurs de quêtes → bloqués");
 }
 
 public func Tessera_ApplyTutorials(game: GameInstance, e: ref<DesossageEntry>) -> Void {

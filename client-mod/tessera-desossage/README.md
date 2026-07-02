@@ -29,10 +29,23 @@ système**, chacun une `DesossageEntry { active, density }`. Défaut = **tout co
 | `DesossageDevices.reds` | voyage rapide (kiosques) / vendeurs / distributeurs / interactables |
 | `DesossageEvents.reds` | rencontres (par type) / quêtes / tutoriels |
 | `DesossageWorld.reds` | échelle du cycle jour/nuit |
+| `DesossageConsole.reds` | bascule un levier en jeu via la console CET, sans rebuild (voir « Tester ») |
 
-> **État actuel : squelette.** L'ossature (config + applicateur + déclenchement) est complète et
-> **compile telle quelle** ; les corps de leviers sont des **stubs qui journalisent** leur intention.
-> Les appels réels aux systèmes du jeu (marqués `PIN IN-GAME`) se pincent **en jeu**, lot par lot.
+> **État (2026-07-02) :** leviers **réels** — police (`PreventionSystem.OnAttach`, confirmé en jeu :
+> plus d'étoiles), voyage rapide (`ManageFastTravelLock`), déclencheurs de quêtes/appels fixers
+> (`questPhoneManager.ApplyPhoneCallRestriction`, partiel — bloque les appels, pas les
+> déclencheurs de zone/PNJ). **Stubs documentés** (symbole réel trouvé via dump RTTI du jeu, mais
+> usage pas assez sûr pour coder à l'aveugle après l'incident du 2026-07-02 — voir commentaires
+> dans chaque fichier) — piétons (`gameCommunitySystem.EnableDynamicCrowdNullArea`), cycle
+> jour/nuit (`gameTimeSystem.SetTimeDilation` existe mais affecte aussi le joueur, mauvaise
+> sémantique). **Stubs sans piste** — trafic, transit, vendeurs, dispositifs, sécurité ambiante,
+> hustles NCPD, rencontres aléatoires, cyberpsychos, tutoriels : aucune recherche communautaire
+> n'a trouvé de symbole vérifiable ; à creuser en jeu, pas en devinant.
+>
+> **Leçon du jour :** un symbole plausible mais non vérifié (`CanPreventionReactToInput`, jamais
+> confirmé) a cassé le jeu entier (crash au lancement, plusieurs cycles de réinstallation
+> Windows). Toute future implémentation doit citer une source réelle (mod publié, dump RTTI —
+> `nativedb.red4ext.com` / `github.com/WopsS/RED4ext.NativeDB`) — sinon rester en stub.
 
 ## Où ça se déploie
 
@@ -48,3 +61,17 @@ confirmé). redscript (dépendance toolchain) compile les `.reds` au lancement.
    - lignes `[Tessera/Desossage] système attaché`, `application des leviers…`, puis les stubs.
 3. (Après pinning des leviers) observer : rues vides, pas de police/vendeurs/kiosques/quêtes ; et
    **smoke-test du bouton** : `pedestrians = DesossageEntry.New(true, 0.3)` → piétons clairsemés.
+
+## Itérer sans rebuild : console CET
+
+`DesossageConsole.reds` expose `Tessera_SetLever` sur le joueur, appelable depuis la console CET
+(`~` par défaut) une fois en jeu, session chargée :
+
+```lua
+Game.GetPlayer():Tessera_SetLever("police", true, 0.0)
+Game.GetPlayer():Tessera_SetLever("pedestrians", true, 0.3)
+Game.GetPlayer():Tessera_SetLever("dayNightCycleScale", true, 2.0)
+```
+
+Ne persiste pas entre rechargements (repart de `DesossageConfig.Default()`) — pour un réglage
+permanent, toujours éditer `DesossageConfig.reds` + rebuild.
