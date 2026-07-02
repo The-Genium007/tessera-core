@@ -93,6 +93,8 @@ pub enum ManifestError {
     NoRootShardOrSplit,
     DefaultEntryCount(usize),
     NoSpawnPointForDefaultEntry,
+    RadiusOutOfOrder,
+    InvalidAddress(String, String),
 }
 
 impl std::fmt::Display for ManifestError {
@@ -116,12 +118,17 @@ impl std::fmt::Display for ManifestError {
             Self::NoSpawnPointForDefaultEntry => {
                 write!(f, "le shard default_entry doit avoir au moins un spawn_point")
             }
+            Self::RadiusOutOfOrder => write!(
+                f,
+                "runtime.radius doit vérifier base <= moderator <= game_master"
+            ),
+            Self::InvalidAddress(field, value) => {
+                write!(f, "{field} n'est pas une adresse valide: {value}")
+            }
         }
     }
 }
 
-#[allow(dead_code)]
-// Wired into server::manifest::validate() in Task 4 of the M6 plan.
 fn validate_scalars(m: &Manifest) -> Result<(), ManifestError> {
     if m.format_version != 1 {
         return Err(ManifestError::UnsupportedFormatVersion(m.format_version));
@@ -138,7 +145,6 @@ fn validate_scalars(m: &Manifest) -> Result<(), ManifestError> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn validate_topology_structure(topo: &TopologyConfig) -> Result<(), ManifestError> {
     let mut split_by_id: HashMap<&str, &SplitConfig> = HashMap::new();
     let mut shard_by_id: HashMap<&str, &ShardConfig> = HashMap::new();
@@ -275,7 +281,6 @@ pub fn flatten_topology(
     Ok(zones)
 }
 
-#[allow(dead_code)]
 fn validate_default_entry(topo: &TopologyConfig) -> Result<(), ManifestError> {
     let defaults: Vec<&ShardConfig> = topo.shards.iter().filter(|s| s.default_entry).collect();
     if defaults.len() != 1 {
@@ -285,6 +290,81 @@ fn validate_default_entry(topo: &TopologyConfig) -> Result<(), ManifestError> {
         return Err(ManifestError::NoSpawnPointForDefaultEntry);
     }
     Ok(())
+}
+
+fn validate_radius(r: &RadiusConfig) -> Result<(), ManifestError> {
+    if r.base <= r.moderator && r.moderator <= r.game_master {
+        Ok(())
+    } else {
+        Err(ManifestError::RadiusOutOfOrder)
+    }
+}
+
+fn validate_addr(field: &str, value: &str) -> Result<(), ManifestError> {
+    value
+        .parse::<std::net::SocketAddr>()
+        .map(|_| ())
+        .map_err(|_| ManifestError::InvalidAddress(field.to_string(), value.to_string()))
+}
+
+fn validate(m: &Manifest) -> Result<(), ManifestError> {
+    validate_scalars(m)?;
+    validate_topology_structure(&m.runtime.topology)?;
+    flatten_topology(&m.runtime.topology)?;
+    validate_default_entry(&m.runtime.topology)?;
+    validate_radius(&m.runtime.radius)?;
+    validate_addr("runtime.gateway.listen_addr", &m.runtime.gateway.listen_addr)?;
+    validate_addr(
+        "runtime.gateway.advertise_addr",
+        &m.runtime.gateway.advertise_addr,
+    )?;
+    for s in &m.runtime.topology.shards {
+        validate_addr(&format!("runtime.topology.shards[{}].listen_addr", s.id), &s.listen_addr)?;
+    }
+    Ok(())
+}
+
+pub fn to_runtime(
+    m: &Manifest,
+) -> Result<
+    (
+        crate::handoff::ShardTopology,
+        crate::handoff::RadiusPolicy,
+        [f32; 3],
+        String,
+    ),
+    ManifestError,
+> {
+    let zones = flatten_topology(&m.runtime.topology)?;
+    let topology = crate::handoff::ShardTopology { shards: zones };
+    let radius = crate::handoff::RadiusPolicy {
+        base: m.runtime.radius.base,
+        moderator: m.runtime.radius.moderator,
+        game_master: m.runtime.radius.game_master,
+    };
+    let default_shard = m
+        .runtime
+        .topology
+        .shards
+        .iter()
+        .find(|s| s.default_entry)
+        .ok_or(ManifestError::DefaultEntryCount(0))?;
+    let spawn = *default_shard
+        .spawn_points
+        .first()
+        .ok_or(ManifestError::NoSpawnPointForDefaultEntry)?;
+    Ok((topology, radius, spawn, m.runtime.store_path.clone()))
+}
+
+pub fn parse_and_validate(toml_str: &str) -> Result<Manifest, String> {
+    let m: Manifest = toml::from_str(toml_str).map_err(|e| e.to_string())?;
+    validate(&m).map_err(|e| e.to_string())?;
+    Ok(m)
+}
+
+pub fn load(path: &std::path::Path) -> Result<Manifest, String> {
+    let s = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    parse_and_validate(&s)
 }
 
 #[cfg(test)]
@@ -316,8 +396,13 @@ mod tests {
         advertise_addr = "51.38.189.234:27020"
 
         [runtime.topology]
-        active_preset = "2-shards"
-        shards = []
+        active_preset = "1-shard"
+
+        [[runtime.topology.shards]]
+        id = "shard-a"
+        listen_addr = "127.0.0.1:27030"
+        default_entry = true
+        spawn_points = [[0.0, 0.0, 0.0]]
 
         [runtime.radius]
         base = 25.0
@@ -563,5 +648,96 @@ mod tests {
             validate_default_entry(&topo),
             Err(ManifestError::NoSpawnPointForDefaultEntry)
         );
+    }
+
+    #[test]
+    fn rejects_radius_out_of_order() {
+        let toml_str = MINIMAL_TOML.replace("game_master = 75.0", "game_master = 10.0");
+        let err = parse_and_validate(&toml_str).unwrap_err();
+        assert!(err.contains("radius"));
+    }
+
+    #[test]
+    fn rejects_invalid_advertise_addr() {
+        let toml_str =
+            MINIMAL_TOML.replace(r#"advertise_addr = "51.38.189.234:27020""#, r#"advertise_addr = "not-an-addr""#);
+        let err = parse_and_validate(&toml_str).unwrap_err();
+        assert!(err.contains("advertise_addr"));
+    }
+
+    fn full_two_shard_toml() -> String {
+        r#"
+        format_version = 1
+
+        [identity]
+        id = "tessera-dev-01"
+        name = "Tessera Dev"
+        description = "desc"
+        region = "EU"
+        language = "FR"
+        max_players = 16
+        tags = ["dev"]
+        discord_url = ""
+        website_url = ""
+        required_modset = "0.1.0"
+        voice_required = false
+
+        [runtime]
+        whitelist = false
+        store_path = "players.json"
+
+        [runtime.gateway]
+        listen_addr = "0.0.0.0:27020"
+        advertise_addr = "51.38.189.234:27020"
+
+        [runtime.topology]
+        active_preset = "2-shards"
+
+        [[runtime.topology.splits]]
+        id = "root"
+        axis = "x"
+        at = 1000.0
+        left = "shard-a"
+        right = "shard-b"
+
+        [[runtime.topology.shards]]
+        id = "shard-a"
+        listen_addr = "127.0.0.1:27030"
+        default_entry = true
+        spawn_points = [[2387.0, -1295.0, 63.0]]
+
+        [[runtime.topology.shards]]
+        id = "shard-b"
+        listen_addr = "127.0.0.1:27031"
+        spawn_points = []
+
+        [runtime.radius]
+        base = 25.0
+        moderator = 50.0
+        game_master = 75.0
+        "#.to_string()
+    }
+
+    #[test]
+    fn parses_and_validates_full_two_shard_manifest() {
+        let m = parse_and_validate(&full_two_shard_toml()).expect("should validate");
+        let (topology, radius, spawn, store_path) = to_runtime(&m).expect("should translate");
+        assert_eq!(topology.shards.len(), 2);
+        assert_eq!(radius.base, 25.0);
+        assert_eq!(spawn, [2387.0, -1295.0, 63.0]);
+        assert_eq!(store_path, "players.json");
+    }
+
+    #[test]
+    fn load_reports_missing_file_clearly() {
+        let err = load(std::path::Path::new("/nonexistent/server.toml")).unwrap_err();
+        assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn loads_checked_in_example_manifest() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("server.example.toml");
+        let m = load(&path).expect("example manifest should be valid");
+        assert_eq!(m.identity.id, "tessera-dev-01");
     }
 }

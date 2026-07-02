@@ -1,0 +1,48 @@
+format_version = 1
+
+[identity]
+id = "tessera-dev-01"
+name = "Tessera Dev — Night City"
+description = "Serveur de développement TesseraSynth (Rust autoritaire, GameNetworkingSockets)."
+region = "EU"
+language = "FR"
+max_players = 16
+tags = ["dev", "test"]
+discord_url = ""
+website_url = "https://tesserasynth.net"
+required_modset = "0.1.0-dev6"
+voice_required = false
+
+[runtime]
+whitelist = false
+store_path = "players.json"
+
+[runtime.gateway]
+listen_addr = "0.0.0.0:27020"
+advertise_addr = "51.38.189.234:27020"
+
+[runtime.topology]
+active_preset = "2-shards"
+
+[[runtime.topology.splits]]
+id = "root"
+axis = "x"
+at = 1000.0
+left = "shard-a"
+right = "shard-b"
+
+[[runtime.topology.shards]]
+id = "shard-a"
+listen_addr = "127.0.0.1:27030"
+default_entry = true
+spawn_points = [[2387.0, -1295.0, 63.0]]
+
+[[runtime.topology.shards]]
+id = "shard-b"
+listen_addr = "127.0.0.1:27031"
+spawn_points = []
+
+[runtime.radius]
+base = 25.0
+moderator = 50.0
+game_master = 75.0
