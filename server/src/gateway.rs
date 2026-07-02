@@ -95,6 +95,28 @@ pub fn drain_client_to_shard<T: Transport>(client: &mut T) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Sauve la position actuelle de tous les clients connus par nom (rejoints via `keys`) — utilisé
+/// à la fois par l'autosave périodique et le flush d'arrêt propre. Un client sans position
+/// connue (jamais reçu de `PositionUpdate` depuis son `Join`) n'est pas sauvé.
+pub fn save_all_known(
+    store: &mut impl crate::persistence::PlayerStore,
+    keys: &HashMap<u64, String>,
+    last_pos: &HashMap<u64, [f32; 3]>,
+    residence: &HashMap<u64, Option<[f32; 3]>>,
+) {
+    for (cid, name) in keys.iter() {
+        if let Some(pos) = last_pos.get(cid).copied() {
+            store.save(
+                name,
+                crate::persistence::PlayerRecord {
+                    last_position: pos,
+                    residence: residence.get(cid).copied().flatten(),
+                },
+            );
+        }
+    }
+}
+
 /// Décode un corps `ServerSend` (déjà déframé) reçu du Shard et l'envoie au bon client.
 pub fn apply_shard_frame_to_client<T: Transport>(body: &[u8], client: &mut T) {
     if let Some((client_id, payload)) = decode_server_send(body) {
@@ -341,5 +363,34 @@ mod tests {
             .expect("la reconnexion automatique doit réussir");
         assert!(shards.contains_key(&addr));
         accept2.await.unwrap();
+    }
+
+    #[test]
+    fn save_all_known_saves_every_client_with_a_known_position() {
+        use crate::persistence::{MemoryStore, PlayerRecord, PlayerStore};
+
+        let mut store = MemoryStore::new();
+        let mut keys = HashMap::new();
+        keys.insert(1u64, "Alice".to_string());
+        keys.insert(2u64, "Bob".to_string());
+        let mut last_pos = HashMap::new();
+        last_pos.insert(1u64, [10.0, 20.0, 30.0]);
+        // Bob n'a jamais bougé depuis le Join : pas de position connue, pas sauvé.
+        let residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
+
+        save_all_known(&mut store, &keys, &last_pos, &residence);
+
+        assert_eq!(
+            store.load("Alice"),
+            Some(PlayerRecord {
+                last_position: [10.0, 20.0, 30.0],
+                residence: None,
+            })
+        );
+        assert_eq!(
+            store.load("Bob"),
+            None,
+            "un client sans position connue ne doit pas être sauvé"
+        );
     }
 }
