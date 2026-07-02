@@ -2,6 +2,7 @@
 //! config runtime privée (topologie/spawn/rayons/store) consommée au boot du Gateway.
 
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
@@ -40,10 +41,38 @@ pub struct GatewayConfig {
     pub advertise_addr: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TopologyConfig {
-    #[serde(default)]
     pub active_preset: String,
+    #[serde(default)]
+    pub splits: Vec<SplitConfig>,
+    pub shards: Vec<ShardConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SplitConfig {
+    pub id: String,
+    pub axis: Axis,
+    pub at: f32,
+    pub left: String,
+    pub right: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Axis {
+    X,
+    Y,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShardConfig {
+    pub id: String,
+    pub listen_addr: String,
+    #[serde(default)]
+    pub default_entry: bool,
+    #[serde(default)]
+    pub spawn_points: Vec<[f32; 3]>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +87,10 @@ pub enum ManifestError {
     UnsupportedFormatVersion(u32),
     EmptyField(&'static str),
     InvalidMaxPlayers,
+    DuplicateId(String),
+    DanglingReference(String),
+    TreeNotConnected(String),
+    NoRootShardOrSplit,
 }
 
 impl std::fmt::Display for ManifestError {
@@ -68,6 +101,12 @@ impl std::fmt::Display for ManifestError {
             }
             Self::EmptyField(name) => write!(f, "champ {name} vide"),
             Self::InvalidMaxPlayers => write!(f, "identity.max_players doit être > 0"),
+            Self::DuplicateId(id) => write!(f, "id dupliqué dans la topologie: {id}"),
+            Self::DanglingReference(id) => write!(f, "référence vers un id inconnu: {id}"),
+            Self::TreeNotConnected(id) => {
+                write!(f, "id non atteint depuis root ou référencé plus d'une fois: {id}")
+            }
+            Self::NoRootShardOrSplit => write!(f, "topologie vide : aucun shard ni split"),
         }
     }
 }
@@ -86,6 +125,64 @@ fn validate_scalars(m: &Manifest) -> Result<(), ManifestError> {
     }
     if m.identity.max_players == 0 {
         return Err(ManifestError::InvalidMaxPlayers);
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn validate_topology_structure(topo: &TopologyConfig) -> Result<(), ManifestError> {
+    let mut split_by_id: HashMap<&str, &SplitConfig> = HashMap::new();
+    let mut shard_by_id: HashMap<&str, &ShardConfig> = HashMap::new();
+
+    for s in &topo.splits {
+        if split_by_id.insert(&s.id, s).is_some() {
+            return Err(ManifestError::DuplicateId(s.id.clone()));
+        }
+    }
+    for s in &topo.shards {
+        if shard_by_id.contains_key(s.id.as_str()) || split_by_id.contains_key(s.id.as_str()) {
+            return Err(ManifestError::DuplicateId(s.id.clone()));
+        }
+        shard_by_id.insert(&s.id, s);
+    }
+
+    if split_by_id.is_empty() && shard_by_id.is_empty() {
+        return Err(ManifestError::NoRootShardOrSplit);
+    }
+
+    if split_by_id.is_empty() {
+        if shard_by_id.len() != 1 {
+            return Err(ManifestError::NoRootShardOrSplit);
+        }
+        return Ok(());
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    fn walk(
+        id: &str,
+        split_by_id: &HashMap<&str, &SplitConfig>,
+        shard_by_id: &HashMap<&str, &ShardConfig>,
+        visited: &mut HashSet<String>,
+    ) -> Result<(), ManifestError> {
+        if !visited.insert(id.to_string()) {
+            return Err(ManifestError::TreeNotConnected(id.to_string()));
+        }
+        if let Some(split) = split_by_id.get(id) {
+            walk(&split.left, split_by_id, shard_by_id, visited)?;
+            walk(&split.right, split_by_id, shard_by_id, visited)?;
+            Ok(())
+        } else if shard_by_id.contains_key(id) {
+            Ok(())
+        } else {
+            Err(ManifestError::DanglingReference(id.to_string()))
+        }
+    }
+    walk("root", &split_by_id, &shard_by_id, &mut visited)?;
+
+    for id in split_by_id.keys().chain(shard_by_id.keys()) {
+        if !visited.contains(*id) {
+            return Err(ManifestError::TreeNotConnected(id.to_string()));
+        }
     }
     Ok(())
 }
@@ -120,6 +217,7 @@ mod tests {
 
         [runtime.topology]
         active_preset = "2-shards"
+        shards = []
 
         [runtime.radius]
         base = 25.0
@@ -158,5 +256,89 @@ mod tests {
         let toml_str = MINIMAL_TOML.replace("max_players = 16", "max_players = 0");
         let m: Manifest = toml::from_str(&toml_str).unwrap();
         assert_eq!(validate_scalars(&m), Err(ManifestError::InvalidMaxPlayers));
+    }
+
+    fn two_shard_topology() -> TopologyConfig {
+        TopologyConfig {
+            active_preset: "2-shards".into(),
+            splits: vec![SplitConfig {
+                id: "root".into(),
+                axis: Axis::X,
+                at: 1000.0,
+                left: "shard-a".into(),
+                right: "shard-b".into(),
+            }],
+            shards: vec![
+                ShardConfig {
+                    id: "shard-a".into(),
+                    listen_addr: "127.0.0.1:27030".into(),
+                    default_entry: true,
+                    spawn_points: vec![[2387.0, -1295.0, 63.0]],
+                },
+                ShardConfig {
+                    id: "shard-b".into(),
+                    listen_addr: "127.0.0.1:27031".into(),
+                    default_entry: false,
+                    spawn_points: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn valid_two_shard_tree_passes_structural_validation() {
+        assert_eq!(validate_topology_structure(&two_shard_topology()), Ok(()));
+    }
+
+    #[test]
+    fn rejects_dangling_reference() {
+        let mut topo = two_shard_topology();
+        topo.splits[0].right = "shard-ghost".into();
+        assert_eq!(
+            validate_topology_structure(&topo),
+            Err(ManifestError::DanglingReference("shard-ghost".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_id() {
+        let mut topo = two_shard_topology();
+        topo.shards[1].id = "shard-a".into();
+        assert_eq!(
+            validate_topology_structure(&topo),
+            Err(ManifestError::DuplicateId("shard-a".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_node_referenced_twice() {
+        let mut topo = two_shard_topology();
+        topo.splits.push(SplitConfig {
+            id: "extra".into(),
+            axis: Axis::Y,
+            at: 0.0,
+            left: "shard-a".into(),
+            right: "shard-b".into(),
+        });
+        topo.splits[0].right = "extra".into();
+        assert!(matches!(
+            validate_topology_structure(&topo),
+            Err(ManifestError::TreeNotConnected(_))
+        ));
+    }
+
+    #[test]
+    fn single_shard_topology_with_no_splits_is_valid() {
+        let topo = TopologyConfig {
+            active_preset: "1-shard".into(),
+            splits: vec![],
+            shards: vec![ShardConfig {
+                id: "shard-a".into(),
+                listen_addr: "127.0.0.1:27030".into(),
+                default_entry: true,
+                spawn_points: vec![[0.0, 0.0, 0.0]],
+            }],
+        };
+        assert_eq!(validate_topology_structure(&topo), Ok(()));
     }
 }
