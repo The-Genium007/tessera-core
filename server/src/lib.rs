@@ -7,7 +7,6 @@ pub mod handoff;
 pub mod internal_net;
 pub mod manifest;
 pub mod persistence;
-pub mod router;
 pub mod server_loop;
 pub mod shard;
 pub mod snapshot_merge;
