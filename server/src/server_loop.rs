@@ -8,12 +8,14 @@ use protocol::*;
 
 pub struct Server {
     world: World,
+    aoi_radius: f32,
 }
 
 impl Server {
-    pub fn new() -> Self {
+    pub fn new(aoi_radius: f32) -> Self {
         Self {
             world: World::new(),
+            aoi_radius,
         }
     }
 
@@ -27,8 +29,10 @@ impl Server {
             }
         }
         self.world.advance_tick();
+        let mut b = FlatBufferBuilder::new();
         for id in self.world.player_ids() {
-            let bytes = self.encode_snapshot_for(id);
+            b.reset();
+            let bytes = self.encode_snapshot_for(id, &mut b);
             transport.send(id, &bytes);
         }
     }
@@ -58,17 +62,15 @@ impl Server {
         }
     }
 
-    fn encode_snapshot_for(&self, viewer: ClientId) -> Vec<u8> {
-        // TODO(perf, Phase 2): réutiliser un FlatBufferBuilder par tick (reset()) au lieu d'en allouer un par joueur.
-        let mut b = FlatBufferBuilder::new();
+    fn encode_snapshot_for(&self, viewer: ClientId, b: &mut FlatBufferBuilder) -> Vec<u8> {
         let states: Vec<_> = self
             .world
-            .snapshot_for(viewer)
+            .snapshot_for(viewer, self.aoi_radius)
             .into_iter()
             .map(|(id, pose)| {
                 let pos = Vec3::new(pose.x, pose.y, pose.z);
                 PlayerState::create(
-                    &mut b,
+                    b,
                     &PlayerStateArgs {
                         id,
                         position: Some(&pos),
@@ -79,14 +81,14 @@ impl Server {
             .collect();
         let players = b.create_vector(&states);
         let snap = Snapshot::create(
-            &mut b,
+            b,
             &SnapshotArgs {
                 tick: self.world.tick(),
                 players: Some(players),
             },
         );
         let env = ServerEnvelope::create(
-            &mut b,
+            b,
             &ServerEnvelopeArgs {
                 msg_type: ServerMsg::Snapshot,
                 msg: Some(snap.as_union_value()),
@@ -94,12 +96,6 @@ impl Server {
         );
         b.finish(env, None);
         b.finished_data().to_vec()
-    }
-}
-
-impl Default for Server {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -131,7 +127,7 @@ mod tests {
 
     #[test]
     fn two_clients_see_each_other_move() {
-        let mut server = Server::new();
+        let mut server = Server::new(1000.0);
         let mut t = InMemoryTransport::new();
 
         // Deux clients se connectent.
@@ -163,5 +159,31 @@ mod tests {
         let players1 = snap1.players().unwrap();
         assert_eq!(players1.len(), 1);
         assert_eq!(players1.get(0).id(), 2); // client 1 voit client 2
+    }
+
+    #[test]
+    fn players_far_apart_do_not_see_each_other() {
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position(500.0, 0.0, 0.0, 0.0),
+        });
+
+        server.tick(&mut t);
+
+        let sent_to_2 = t.take_sent(2);
+        assert_eq!(sent_to_2.len(), 1);
+        let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2[0]).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let players = snap.players().unwrap();
+        assert_eq!(
+            players.len(),
+            0,
+            "client 1 est à 500 unités, hors du rayon de 50 — ne doit pas apparaître"
+        );
     }
 }

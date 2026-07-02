@@ -15,7 +15,9 @@ fn main() {
         "Cyberpunk RP server — démarrage boucle de tick"
     );
 
-    let mut srv = server::server_loop::Server::new();
+    // Binaire monolithique historique (pré-Gateway/Shard) — rayon AoI en dur, son sort réel
+    // (suppression ou conteneurisation) est traité au chantier B.
+    let mut srv = server::server_loop::Server::new(100.0);
 
     // Transport : en 0-C, le transport réseau réel (GNS) est derrière la feature `gns`.
     // Sans elle, on tourne à vide pour valider la cadence de tick.
