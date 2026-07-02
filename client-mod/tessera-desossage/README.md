@@ -32,15 +32,25 @@ système**, chacun une `DesossageEntry { active, density }`. Défaut = **tout co
 | `DesossageConsole.reds` | bascule un levier en jeu via la console CET, sans rebuild (voir « Tester ») |
 
 > **État (2026-07-02) :** leviers **réels** — police (`PreventionSystem.OnAttach`, confirmé en jeu :
-> plus d'étoiles), voyage rapide (`ManageFastTravelLock`), déclencheurs de quêtes/appels fixers
-> (`questPhoneManager.ApplyPhoneCallRestriction`, partiel — bloque les appels, pas les
-> déclencheurs de zone/PNJ). **Stubs documentés** (symbole réel trouvé via dump RTTI du jeu, mais
-> usage pas assez sûr pour coder à l'aveugle après l'incident du 2026-07-02 — voir commentaires
-> dans chaque fichier) — piétons (`gameCommunitySystem.EnableDynamicCrowdNullArea`), cycle
-> jour/nuit (`gameTimeSystem.SetTimeDilation` existe mais affecte aussi le joueur, mauvaise
-> sémantique). **Stubs sans piste** — trafic, transit, vendeurs, dispositifs, sécurité ambiante,
-> hustles NCPD, rencontres aléatoires, cyberpsychos, tutoriels : aucune recherche communautaire
-> n'a trouvé de symbole vérifiable ; à creuser en jeu, pas en devinant.
+> plus d'étoiles), voyage rapide (`ManageFastTravelLock`, vérifié contre le script décompilé
+> officiel), piétons (`CommunitySystem.ChangeDensityModifier`, vérifié contre le script décompilé
+> officiel), distributeurs boissons/nourriture (`@wrapMethod(VendingMachineControllerPS) GetActions`,
+> signature vérifiée contre un mod publié réel qui wrap la même classe), déclencheurs de quêtes/
+> appels fixers (`questPhoneManager.ApplyPhoneCallRestriction`, partiel — bloque les appels, pas
+> les déclencheurs de zone/PNJ). **Stubs confirmés insuffisants/absents** (pas juste non-cherchés —
+> vérifié contre le script décompilé officiel du jeu) — trafic (aucun levier de densité sur
+> `TrafficSystem`), tutoriels (`questTutorialManager` ne ferme qu'un overlay déjà ouvert), hustles
+> NCPD (aucune classe « Hustle »/« CrimeSpawn » n'existe dans le jeu, confirmé absent). **Stubs
+> avec piste mais pas assez sûrs pour coder à l'aveugle** — cycle jour/nuit
+> (`gameTimeSystem.SetTimeDilation` existe mais affecte aussi le joueur, mauvaise sémantique),
+> vendeurs nommés, distributeurs d'armes/droppoints (classes PS sœurs de celle déjà faite, pas
+> encore câblées), sécurité ambiante (`SecurityTurretControllerPS.ActionProgramSetDeviceOff`
+> existe mais c'est une action quickhack par-instance, pas un switch global). **Encore aucune piste
+> trouvée** — transit, rencontres aléatoires, cyberpsychos, interactables monde.
+>
+> **Hypothèse à tester en jeu (console CET)** : `pedestrians` (densité communautaire) pourrait
+> naturellement réduire le trafic véhicules et les vendeurs ambiants s'ils spawnent via le même
+> système communautaire — pas besoin de lever dédié si confirmé.
 >
 > **Leçon du jour :** un symbole plausible mais non vérifié (`CanPreventionReactToInput`, jamais
 > confirmé) a cassé le jeu entier (crash au lancement, plusieurs cycles de réinstallation
