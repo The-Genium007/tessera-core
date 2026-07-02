@@ -9,7 +9,18 @@ use tokio::net::TcpListener;
 
 const TICK: Duration = Duration::from_millis(50); // 20 Hz
 
-pub async fn shard_main(addr: &str, aoi_radius: f32) -> std::io::Result<()> {
+pub async fn shard_main(addr: &str, aoi_radius: f32, metrics_addr: &str) -> std::io::Result<()> {
+    let metrics = crate::metrics::Metrics::new();
+    {
+        let metrics = metrics.clone();
+        let metrics_addr = metrics_addr.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = crate::metrics::serve(&metrics_addr, metrics).await {
+                tracing::warn!("endpoint métriques indisponible ({metrics_addr}): {e}");
+            }
+        });
+    }
+
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Shard en écoute (interne) sur {addr}");
     loop {
@@ -32,7 +43,16 @@ pub async fn shard_main(addr: &str, aoi_radius: f32) -> std::io::Result<()> {
                 }
                 // Tick de simulation 20 Hz.
                 _ = ticker.tick() => {
+                    let tick_start = std::time::Instant::now();
                     server.tick(&mut transport);
+                    metrics.last_tick_micros.store(
+                        tick_start.elapsed().as_micros() as i64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    metrics.players.store(
+                        server.player_count() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     for frame in transport.take_outbound() {
                         if sock.write_all(&frame).await.is_err() {
                             return Ok(()); // Gateway parti

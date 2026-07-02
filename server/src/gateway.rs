@@ -71,7 +71,10 @@ pub async fn read_from_shards(
             Ok(Ok(0)) => dead.push(addr), // EOF : le shard a fermé la connexion
             Ok(Ok(n)) => {
                 link.reader.push(&sbuf[..n]);
-                if link.reader.declared_len_exceeds(crate::framing::MAX_FRAME_LEN) {
+                if link
+                    .reader
+                    .declared_len_exceeds(crate::framing::MAX_FRAME_LEN)
+                {
                     dead.push(addr);
                     continue;
                 }
@@ -173,6 +176,18 @@ pub async fn gateway_main(
         topology.shards.len()
     );
 
+    let metrics = crate::metrics::Metrics::new();
+    {
+        let metrics = metrics.clone();
+        let metrics_addr = std::env::var("TESSERA_GATEWAY_METRICS_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:9100".to_string());
+        tokio::spawn(async move {
+            if let Err(e) = crate::metrics::serve(&metrics_addr, metrics).await {
+                tracing::warn!("endpoint métriques indisponible ({metrics_addr}): {e}");
+            }
+        });
+    }
+
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
     let mut last_autosave = std::time::Instant::now();
     let autosave_interval = Duration::from_secs(30);
@@ -272,6 +287,12 @@ pub async fn gateway_main(
                 client.send(*cid, &merged);
             }
         }
+        metrics
+            .players
+            .store(latest.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .shards_loaded
+            .store(shards.len() as u64, std::sync::atomic::Ordering::Relaxed);
 
         // 4) Autosave périodique — ne dépend pas d'une déconnexion propre.
         if last_autosave.elapsed() >= autosave_interval {

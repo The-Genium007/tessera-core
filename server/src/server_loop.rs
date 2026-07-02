@@ -19,6 +19,11 @@ impl Server {
         }
     }
 
+    /// Nombre de joueurs actuellement dans le monde de ce Shard — pour l'endpoint métriques.
+    pub fn player_count(&self) -> usize {
+        self.world.player_ids().len()
+    }
+
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
     pub fn tick<T: Transport>(&mut self, transport: &mut T) {
         for ev in transport.poll() {
