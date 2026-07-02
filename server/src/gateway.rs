@@ -2,8 +2,89 @@
 //! internes vers le Shard, et les `ServerSend` du Shard en envois client. Générique sur le
 //! transport client → testable avec `InMemoryTransport`, branché sur `GnsTransport` en prod.
 
+use crate::framing::FrameReader;
 use crate::internal_net::{decode_server_send, event_to_client_event_frame};
 use crate::transport::Transport;
+use std::collections::HashMap;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+/// Une connexion TCP interne vers un Shard, avec son `FrameReader` de lecture persistant.
+pub struct ShardLink {
+    sock: TcpStream,
+    reader: FrameReader,
+}
+
+/// Écrit `frames` vers le shard à `shard_addr`, en connectant si besoin. Une connexion déjà
+/// présente dans `shards` mais dont l'écriture échoue est évacuée avant de renvoyer l'erreur —
+/// une entrée morte ne doit jamais bloquer une reconnexion au prochain appel.
+pub async fn write_to_shard(
+    shards: &mut HashMap<String, ShardLink>,
+    shard_addr: &str,
+    frames: &[Vec<u8>],
+) -> std::io::Result<()> {
+    if !shards.contains_key(shard_addr) {
+        let sock = TcpStream::connect(shard_addr).await?;
+        shards.insert(
+            shard_addr.to_string(),
+            ShardLink {
+                sock,
+                reader: FrameReader::new(),
+            },
+        );
+    }
+    let result: std::io::Result<()> = async {
+        let link = shards.get_mut(shard_addr).unwrap();
+        for f in frames {
+            link.sock.write_all(f).await?;
+        }
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        shards.remove(shard_addr);
+    }
+    result
+}
+
+/// Lit tout ce qui est disponible sur chaque shard connecté (non bloquant, timeout court par
+/// shard) et alimente `latest[client][shard_addr]` avec le dernier `ServerSend` reçu. Une
+/// lecture EOF (`n == 0`) ou en erreur évacue l'entrée du shard concerné — connexion morte,
+/// sera recréée au prochain `write_to_shard` pour cette adresse.
+pub async fn read_from_shards(
+    shards: &mut HashMap<String, ShardLink>,
+    latest: &mut HashMap<u64, HashMap<String, Vec<u8>>>,
+) {
+    use crate::internal_net::decode_server_send;
+
+    let addrs: Vec<String> = shards.keys().cloned().collect();
+    let mut dead = Vec::new();
+    let mut sbuf = [0u8; 8192];
+    for addr in addrs {
+        let link = shards.get_mut(&addr).unwrap();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            link.sock.read(&mut sbuf),
+        )
+        .await
+        {
+            Ok(Ok(0)) => dead.push(addr), // EOF : le shard a fermé la connexion
+            Ok(Ok(n)) => {
+                link.reader.push(&sbuf[..n]);
+                while let Some(body) = link.reader.next_frame() {
+                    if let Some((cid, payload)) = decode_server_send(&body) {
+                        latest.entry(cid).or_default().insert(addr.clone(), payload);
+                    }
+                }
+            }
+            Ok(Err(_)) => dead.push(addr), // erreur de lecture : connexion morte
+            Err(_) => {}                   // timeout : rien à lire pour l'instant
+        }
+    }
+    for addr in dead {
+        shards.remove(&addr);
+    }
+}
 
 /// Poll le transport client et renvoie les frames `ClientEvent` à écrire au Shard.
 pub fn drain_client_to_shard<T: Transport>(client: &mut T) -> Vec<Vec<u8>> {
@@ -34,25 +115,16 @@ pub async fn gateway_main(
     mut store: crate::persistence::FileStore,
     spawn: [f32; 3],
 ) -> std::io::Result<()> {
-    use crate::framing::FrameReader;
     use crate::gateway_routing::{extract_join_name, extract_position};
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
-    use crate::internal_net::decode_server_send;
     use crate::persistence::{resolve_spawn, PlayerRecord, PlayerStore};
     use crate::snapshot_merge::merge_snapshots;
     use crate::transport::{Transport, TransportEvent};
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
 
-    // Une connexion par shard, créée à la demande, avec son FrameReader de lecture.
-    struct ShardLink {
-        sock: TcpStream,
-        reader: FrameReader,
-    }
     let mut shards: HashMap<String, ShardLink> = HashMap::new();
     let mut loader = ShardLoader::new();
     // Dernier snapshot reçu de chaque shard, par client : latest[client][shard_addr] = payload.
@@ -64,29 +136,6 @@ pub async fn gateway_main(
     let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
     let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
 
-    // Connecte un shard si nécessaire et lui écrit des frames.
-    async fn write_to_shard(
-        shards: &mut HashMap<String, ShardLink>,
-        shard_addr: &str,
-        frames: &[Vec<u8>],
-    ) -> std::io::Result<()> {
-        if !shards.contains_key(shard_addr) {
-            let sock = TcpStream::connect(shard_addr).await?;
-            shards.insert(
-                shard_addr.to_string(),
-                ShardLink {
-                    sock,
-                    reader: FrameReader::new(),
-                },
-            );
-        }
-        let link = shards.get_mut(shard_addr).unwrap();
-        for f in frames {
-            link.sock.write_all(f).await?;
-        }
-        Ok(())
-    }
-
     let sock: SocketAddr = listen_addr.parse().expect("adresse GNS invalide");
     let mut client =
         GnsTransport::listen(sock.ip(), sock.port()).expect("GnsTransport::listen failed");
@@ -96,29 +145,9 @@ pub async fn gateway_main(
     );
 
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
-    let mut sbuf = [0u8; 8192];
     loop {
-        // 1) Lire chaque shard connecté : on mémorise le DERNIER snapshot par (client, shard).
-        let addrs: Vec<String> = shards.keys().cloned().collect();
-        for addr in addrs {
-            if let Ok(Ok(n)) = tokio::time::timeout(
-                Duration::from_millis(1),
-                shards.get_mut(&addr).unwrap().sock.read(&mut sbuf),
-            )
-            .await
-            {
-                if n == 0 {
-                    continue;
-                }
-                let link = shards.get_mut(&addr).unwrap();
-                link.reader.push(&sbuf[..n]);
-                while let Some(body) = link.reader.next_frame() {
-                    if let Some((cid, payload)) = decode_server_send(&body) {
-                        latest.entry(cid).or_default().insert(addr.clone(), payload);
-                    }
-                }
-            }
-        }
+        // 1) Lire chaque shard connecté (évacue et laisse reconnecter les connexions mortes).
+        read_from_shards(&mut shards, &mut latest).await;
 
         // 2) Tick : événements clients → placement → charge/décharge/relai.
         ticker.tick().await;
@@ -243,5 +272,53 @@ mod tests {
         apply_shard_frame_to_client(&body, &mut client);
         assert_eq!(client.take_sent(9), vec![vec![7, 7]]);
         let _ = &mut shard_side;
+    }
+
+    #[tokio::test]
+    async fn evicts_dead_shard_link_and_reconnects_once_a_new_listener_is_up() {
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+
+        let listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener1.local_addr().unwrap().to_string();
+
+        // "Shard" n°1 : accepte une connexion puis se ferme aussitôt (simule un crash).
+        tokio::spawn(async move {
+            let (sock, _) = listener1.accept().await.unwrap();
+            drop(sock);
+            drop(listener1); // libère le port pour le "redémarrage" ci-dessous
+        });
+
+        let mut shards: HashMap<String, ShardLink> = HashMap::new();
+        let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+
+        write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+            .await
+            .expect("1re connexion doit réussir");
+        assert!(shards.contains_key(&addr));
+
+        // Laisse le "shard" fermer, puis détecte l'EOF côté lecture.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        read_from_shards(&mut shards, &mut latest).await;
+        assert!(
+            !shards.contains_key(&addr),
+            "la connexion morte doit être évacuée après EOF"
+        );
+
+        // "Shard" n°2 redémarre à la MÊME adresse (comme un conteneur Docker relancé).
+        let listener2 = TcpListener::bind(&addr)
+            .await
+            .expect("le port doit être libre après le drop du 1er listener");
+        let accept2 = tokio::spawn(async move {
+            listener2.accept().await.unwrap();
+        });
+
+        // La prochaine écriture doit reconnecter automatiquement, sans intervention.
+        write_to_shard(&mut shards, &addr, &[b"b".to_vec()])
+            .await
+            .expect("la reconnexion automatique doit réussir");
+        assert!(shards.contains_key(&addr));
+        accept2.await.unwrap();
     }
 }
