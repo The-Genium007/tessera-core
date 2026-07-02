@@ -331,22 +331,51 @@ fn validate_aoi(a: &AoiConfig) -> Result<(), ManifestError> {
 }
 
 fn validate_addr(field: &str, value: &str) -> Result<(), ManifestError> {
-    // Try to parse as SocketAddr (IP:port)
+    // Adresse littérale IP:port (cas le plus courant) — acceptée telle quelle.
     if value.parse::<std::net::SocketAddr>().is_ok() {
         return Ok(());
     }
 
-    // Otherwise, try to parse as hostname:port or service-name:port
-    let parts: Vec<&str> = value.split(':').collect();
-    if parts.len() != 2 {
-        return Err(ManifestError::InvalidAddress(field.to_string(), value.to_string()));
+    // Sinon, nom d'hôte:port (ex. noms de service Docker comme "shard-a:27030") — extrait le
+    // port après le dernier ':' pour rester compatible avec un futur hôte IPv6 entre crochets.
+    let Some((host, port_str)) = value.rsplit_once(':') else {
+        return Err(ManifestError::InvalidAddress(
+            field.to_string(),
+            value.to_string(),
+        ));
+    };
+    if port_str.parse::<u16>().is_err() {
+        return Err(ManifestError::InvalidAddress(
+            field.to_string(),
+            value.to_string(),
+        ));
     }
 
-    let host = parts[0];
-    let port_str = parts[1];
+    // Un hôte qui a la FORME d'une IPv4 (4 segments numériques séparés par des points) mais qui
+    // a échoué au parse SocketAddr ci-dessus est une IP malformée (ex. "999.999.999.999"), pas un
+    // nom d'hôte légitime — la rejeter plutôt que de la laisser passer silencieusement et échouer
+    // plus tard, de façon opaque, au bind/connect.
+    let looks_like_ipv4 = host.split('.').count() == 4
+        && host
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()));
+    if looks_like_ipv4 {
+        return Err(ManifestError::InvalidAddress(
+            field.to_string(),
+            value.to_string(),
+        ));
+    }
 
-    if host.is_empty() || port_str.parse::<u16>().is_err() {
-        return Err(ManifestError::InvalidAddress(field.to_string(), value.to_string()));
+    // Nom d'hôte valide : non vide, caractères alphanumériques/tiret/point uniquement.
+    let valid_host = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+    if !valid_host {
+        return Err(ManifestError::InvalidAddress(
+            field.to_string(),
+            value.to_string(),
+        ));
     }
 
     Ok(())
@@ -744,6 +773,47 @@ mod tests {
         let toml_str = MINIMAL_TOML.replace(
             r#"advertise_addr = "51.38.189.234:27020""#,
             r#"advertise_addr = "not-an-addr""#,
+        );
+        let err = parse_and_validate(&toml_str).unwrap_err();
+        assert!(err.contains("advertise_addr"));
+    }
+
+    #[test]
+    fn accepts_docker_service_name_addr() {
+        // Valeur exacte utilisée par server/server.docker.toml pour le listen_addr du shard :
+        // un nom de service Docker Compose n'est pas un littéral SocketAddr.
+        let toml_str = MINIMAL_TOML.replace(
+            r#"listen_addr = "127.0.0.1:27030""#,
+            r#"listen_addr = "shard-a:27030""#,
+        );
+        parse_and_validate(&toml_str).expect("hostname:port devrait être accepté");
+    }
+
+    #[test]
+    fn rejects_malformed_ipv4_looking_addr() {
+        let toml_str = MINIMAL_TOML.replace(
+            r#"advertise_addr = "51.38.189.234:27020""#,
+            r#"advertise_addr = "999.999.999.999:27020""#,
+        );
+        let err = parse_and_validate(&toml_str).unwrap_err();
+        assert!(err.contains("advertise_addr"));
+    }
+
+    #[test]
+    fn rejects_addr_with_non_numeric_port() {
+        let toml_str = MINIMAL_TOML.replace(
+            r#"advertise_addr = "51.38.189.234:27020""#,
+            r#"advertise_addr = "host:notaport""#,
+        );
+        let err = parse_and_validate(&toml_str).unwrap_err();
+        assert!(err.contains("advertise_addr"));
+    }
+
+    #[test]
+    fn rejects_addr_with_out_of_range_port() {
+        let toml_str = MINIMAL_TOML.replace(
+            r#"advertise_addr = "51.38.189.234:27020""#,
+            r#"advertise_addr = "host:99999""#,
         );
         let err = parse_and_validate(&toml_str).unwrap_err();
         assert!(err.contains("advertise_addr"));
