@@ -9,13 +9,13 @@ use tokio::net::TcpListener;
 
 const TICK: Duration = Duration::from_millis(50); // 20 Hz
 
-pub async fn shard_main(addr: &str) -> std::io::Result<()> {
+pub async fn shard_main(addr: &str, aoi_radius: f32) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Shard en écoute (interne) sur {addr}");
     loop {
         let (mut sock, peer) = listener.accept().await?;
         tracing::info!("Gateway connecté depuis {peer}");
-        let mut server = Server::new();
+        let mut server = Server::new(aoi_radius);
         let mut transport = InternalTransport::new();
         let mut buf = [0u8; 8192];
         let mut ticker = tokio::time::interval(TICK);
