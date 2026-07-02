@@ -1,33 +1,49 @@
-# docker-compose.yml — serveur de jeu TesseraSynth (Rust + GameNetworkingSockets).
+# docker-compose.yml — topologie réelle TesseraSynth (Gateway + 2 Shards), miroir de
+# server.docker.toml. Le manifeste est monté en volume, pas embarqué dans l'image.
 #
-# ⚠️ DIFFÉRENT du site web : le jeu parle en **UDP**, pas en HTTP. On NE passe donc PAS par
-# le tunnel Cloudflare. On **publie directement un port UDP public** (27020) que les jeux
-# moddés des joueurs viennent contacter. Ce port doit être ouvert sur le pare-feu du serveur.
+# ⚠️ Le jeu parle en UDP (port du Gateway), pas HTTP — pas de tunnel Cloudflare pour ce port,
+# il doit être ouvert directement sur le pare-feu du serveur (voir server/README.md).
 #
-# Deux façons de l'utiliser (voir server/README.md) :
-#   A) Dokploy construit l'image depuis le dépôt (section `build:` ci-dessous).
-#   B) Dokploy tire une image déjà construite par le cloud (remplacer `build:` par `image:`).
+# directory/ reste un outil CLI ponctuel (publish/verify/topology) — pas de service ici ;
+# invoqué à la demande : `docker run --rm --entrypoint tessera-directory <image> ...`.
 
 services:
-  server:
+  gateway:
     build:
       context: ..
       dockerfile: server/Dockerfile
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    command: ["tessera-gateway", "--manifest", "/etc/tessera/server.toml"]
     restart: unless-stopped
     ports:
-      - "27020:27020/udp" # port de jeu UDP — à ouvrir sur le pare-feu du serveur
+      - "27020:27020/udp"
+      - "9100:9100" # métriques (texte Prometheus) — à restreindre/retirer en prod publique
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+      - tessera-players:/data
     environment:
       RUST_LOG: ${RUST_LOG:-info}
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 256M
-        reservations:
-          cpus: "0.1"
-          memory: 64M
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
+    depends_on:
+      - shard-a
+      - shard-b
+
+  shard-a:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-b:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+volumes:
+  tessera-players:

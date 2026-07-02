@@ -1,0 +1,53 @@
+format_version = 1
+
+[identity]
+id = "tessera-dev-01"
+name = "Tessera Dev — Night City"
+description = "Serveur de développement TesseraSynth (docker-compose, Gateway + 2 Shards)."
+region = "EU"
+language = "FR"
+max_players = 16
+tags = ["dev", "test"]
+discord_url = ""
+website_url = "https://tesserasynth.net"
+required_modset = "0.1.0-dev10"
+voice_required = false
+
+[runtime]
+whitelist = false
+store_path = "/data/players.json"
+
+[runtime.gateway]
+listen_addr = "0.0.0.0:27020"
+advertise_addr = "51.38.189.234:27020"
+
+[runtime.topology]
+active_preset = "2-shards"
+
+[[runtime.topology.splits]]
+id = "root"
+axis = "x"
+at = 1000.0
+left = "shard-a"
+right = "shard-b"
+
+# listen_addr = noms de service Docker : le Gateway s'y connecte via le réseau compose interne.
+# Chaque conteneur shard, lui, se bind sur 0.0.0.0:<port> (voir docker-compose.yml, `command:`).
+[[runtime.topology.shards]]
+id = "shard-a"
+listen_addr = "shard-a:27030"
+default_entry = true
+spawn_points = [[2387.0, -1295.0, 63.0]]
+
+[[runtime.topology.shards]]
+id = "shard-b"
+listen_addr = "shard-b:27031"
+spawn_points = []
+
+[runtime.radius]
+base = 25.0
+moderator = 50.0
+game_master = 75.0
+
+[runtime.aoi]
+visibility_radius = 100.0

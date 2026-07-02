@@ -331,10 +331,25 @@ fn validate_aoi(a: &AoiConfig) -> Result<(), ManifestError> {
 }
 
 fn validate_addr(field: &str, value: &str) -> Result<(), ManifestError> {
-    value
-        .parse::<std::net::SocketAddr>()
-        .map(|_| ())
-        .map_err(|_| ManifestError::InvalidAddress(field.to_string(), value.to_string()))
+    // Try to parse as SocketAddr (IP:port)
+    if value.parse::<std::net::SocketAddr>().is_ok() {
+        return Ok(());
+    }
+
+    // Otherwise, try to parse as hostname:port or service-name:port
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() != 2 {
+        return Err(ManifestError::InvalidAddress(field.to_string(), value.to_string()));
+    }
+
+    let host = parts[0];
+    let port_str = parts[1];
+
+    if host.is_empty() || port_str.parse::<u16>().is_err() {
+        return Err(ManifestError::InvalidAddress(field.to_string(), value.to_string()));
+    }
+
+    Ok(())
 }
 
 fn validate(m: &Manifest) -> Result<(), ManifestError> {
