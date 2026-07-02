@@ -1,14 +1,30 @@
 module Tessera.Desossage
 
 // Leviers ordre public : police / système de recherche (wanted/MaxTac) + sécurité ambiante.
-// Symboles 2.31 confirmés via source décompilée (core/systems/preventionSystem.swift).
+//
+// Bug constaté en jeu (build dev-7) : le hook précédent, @wrapMethod(PreventionSystem)
+// CanPreventionReactToInput(), ne coupait PAS le gain d'étoiles (étoiles obtenues en tirant sur
+// des PNJ malgré police.active=false). Sa source ("preventionSystem.swift") était fausse — CP2077
+// n'a pas de sources Swift décompilées — et aucune trace de ce symbole n'existe dans la communauté
+// modding. Root cause probable : symbole inventé, jamais réellement vérifié.
+//
+// Remplacé par un levier corroboré par plusieurs mods publiés (Nexus "Disable Police System" #9263,
+// forums schaken-mods) : neutraliser `PreventionSystem.OnAttach()`, le point d'init de tout le
+// système (heat/spawns NCPD/MaxTac). Lu directement sur `DesossageConfig.Default()` (pas via
+// `DesossageSystem.Get()`) pour ne pas dépendre de l'ordre d'attache des ScriptableSystem —
+// `DesossageSystem` pourrait ne pas encore être attaché quand `PreventionSystem.OnAttach` tourne.
+// PIN IN-GAME : à reconfirmer sur le prochain build (log `[Tessera/Desossage]` + test tir/crime).
+@wrapMethod(PreventionSystem)
+private func OnAttach() -> Void {
+  if !DesossageConfig.Default().police.active {
+    FTLog(s"[Tessera/Desossage] police → PreventionSystem.OnAttach coupé (police.active=false)");
+    return;
+  }
+  wrappedMethod();
+}
 
-// Police : la coupure est gérée en CONTINU par le @wrapMethod ci-dessous sur
-// `PreventionSystem.CanPreventionReactToInput()` — c'est LE garde appelé à tous les points de gain
-// d'étoiles (crimes). Piloté par `police.active` de la config, donc plus robuste qu'un appel
-// one-shot que le jeu ré-activerait (logique free-areas).
 public func Tessera_ApplyPolice(game: GameInstance, e: ref<DesossageEntry>) -> Void {
-  FTLog(s"[Tessera/Desossage] police → gérée par hook CanPreventionReactToInput");
+  FTLog(s"[Tessera/Desossage] police → gérée par hook PreventionSystem.OnAttach");
 }
 
 public func Tessera_ApplyAmbientSecurity(game: GameInstance, e: ref<DesossageEntry>) -> Void {
@@ -17,14 +33,4 @@ public func Tessera_ApplyAmbientSecurity(game: GameInstance, e: ref<DesossageEnt
   }
   // PIN IN-GAME : désactiver les devices de sécurité ambiants (tourelles/drones).
   FTLog(s"[Tessera/Desossage] (stub) sécurité ambiante → coupée");
-}
-
-// Garde persistant : la prévention ne réagit plus au joueur quand la config coupe la police.
-@wrapMethod(PreventionSystem)
-public final const func CanPreventionReactToInput() -> Bool {
-  let sys: ref<DesossageSystem> = DesossageSystem.Get(this.GetGameInstance());
-  if IsDefined(sys) && !sys.GetConfig().police.active {
-    return false;
-  };
-  return wrappedMethod();
 }
