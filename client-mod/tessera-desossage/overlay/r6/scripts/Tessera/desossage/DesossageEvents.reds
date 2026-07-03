@@ -7,11 +7,18 @@ module Tessera.Desossage
 // Recherche (script décompilé officiel, CDPR-Modding-Documentation/Cyberpunk-Scripts) : aucune
 // classe/système « Hustle »/« ScannerHustle »/« CrimeSpawn » n'existe dans le jeu — confirmé
 // absent, pas juste non-trouvé (recherché sur l'intégralité du dépôt de scripts décompilés).
-// Les hustles NCPD sont probablement des entrées de spawn communautaire taguées + de la donnée
-// TweakDB/quête, pas un système dédié désactivable. cyberpsychos : un système existe bien
-// (`CyberpsychoEncountersSystem`, vu via GameInstance.GetCyberpsychoEncountersSystem dans un mod
-// publié) mais CE mod l'AJOUTE/le remplace — pas de preuve que c'est le système natif vanilla, à
-// vérifier avant d'utiliser ce nom. randomEncounters : pas encore cherché spécifiquement.
+//
+// DURCI par dump RTTI complet (2026-07-03, WopsS/RED4ext.NativeDB, 14 094 classes + les 98
+// accesseurs GameInstance.GetXXXSystem natifs) : ZÉRO classe contenant "psycho", "encounter" ou
+// "hustle" dans tout le RTTI du jeu, et aucun `GetCyberpsychoEncountersSystem`/`GetEncounterSystem`/
+// `GetHustleSystem` parmi les 98 systèmes natifs. Confirme que `CyberpsychoEncountersSystem`
+// (vu dans un mod publié) est bien ajouté par CE mod, pas un système vanilla — ne PAS l'utiliser
+// comme s'il était natif. Les 3 leviers (ncpdHustles, randomEncounters, cyberpsychos) sont
+// structurellement absents du RTTI : soit ce sont des entrées de spawn communautaire taguées +
+// donnée TweakDB/quête (pas un système dédié désactivable), soit il faudrait un hook C++ natif
+// (dernier recours, cf. mémoire projet triage RTTI → script décompilé → hook C++). Prochaine étape
+// si on veut aller plus loin : chercher côté script décompilé un tag/CName de spawn communautaire
+// dédié (`communitySpawnEntry`/`communitySquadInitializer`, vus dans le RTTI) plutôt qu'un système.
 public func Tessera_ApplyEncounterCategory(game: GameInstance, kind: CName, e: ref<DesossageEntry>) -> Void {
   let factor: Float = 0.0;
   if e.active { factor = e.density; }

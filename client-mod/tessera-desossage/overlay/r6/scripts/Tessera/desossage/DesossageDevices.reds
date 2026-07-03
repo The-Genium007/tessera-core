@@ -37,9 +37,25 @@ public func Tessera_ApplyWorldDevices(game: GameInstance, vending: ref<Desossage
     FTLog(s"[Tessera/Desossage] distributeurs (boissons/nourriture) → coupés (GetActions)");
   }
   if !inter.active {
-    // PIN IN-GAME : désactiver ripperdocs / points d'accès / hackables ambiants.
-    FTLog(s"[Tessera/Desossage] (stub) interactables monde → coupés");
+    // Couvert par le @wrapMethod(AccessPointControllerPS) GetActions ci-dessous — couvre les
+    // points d'accès/hackables ambiants. Les ripperdocs restent hors périmètre (UI de vente
+    // scénarisée, pas une PS de device — même famille de recherche que "vendors").
+    FTLog(s"[Tessera/Desossage] interactables monde (points d'accès) → gérés par hook AccessPointControllerPS.GetActions");
   }
+}
+
+// Même pattern que VendingMachineControllerPS/SecurityTurretControllerPS (cf. DesossageOrder.reds) :
+// `GetActions` est déclarée sur `ScriptableDeviceComponentPS`, classe mère commune à toutes les PS
+// de devices. `AccessPointControllerPS` couvre les points d'accès/panneaux hackables ambiants —
+// confirmé présent dans le dump RTTI (WopsS/RED4ext.NativeDB, classes/AccessPointControllerPS.json).
+// Coupe le menu d'interaction/quickhack, pas la présence physique du device.
+// PIN IN-GAME : à confirmer (le menu de hack doit disparaître sur les points d'accès ambiants).
+@wrapMethod(AccessPointControllerPS)
+protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
+  if !DesossageConfig.Default().worldInteractables.active {
+    return false;
+  }
+  return wrappedMethod(actions, context);
 }
 
 // Coupe-circuit partagé pour les distributeurs boissons/nourriture (toutes instances, un seul

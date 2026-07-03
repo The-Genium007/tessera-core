@@ -28,9 +28,27 @@ public func Tessera_ApplyPolice(game: GameInstance, e: ref<DesossageEntry>) -> V
 }
 
 public func Tessera_ApplyAmbientSecurity(game: GameInstance, e: ref<DesossageEntry>) -> Void {
-  if e.active {
-    return;
+  FTLog(s"[Tessera/Desossage] sécurité ambiante → gérée par hook SecurityTurretControllerPS.GetActions");
+}
+
+// `GetActions(out array<gamedeviceAction>, GetActionsContext) -> Bool` est déclarée sur
+// `ScriptableDeviceComponentPS` (classe mère commune à TOUTES les PS de devices du jeu — vending,
+// access points, NCART, tourelles…), confirmé via le dump RTTI (WopsS/RED4ext.NativeDB,
+// classes/ScriptableDeviceComponentPS.json). Même pattern que `VendingMachineControllerPS`
+// (cf. DesossageDevices.reds) : coupe le menu d'interaction/quickhack sur les tourelles.
+// N'EMPÊCHE PAS la tourelle de détecter/tirer sur le joueur si hostile (ça, c'est le comportement
+// IA de la tourelle, pas les actions joueur) — couvre la partie « interaction », pas « fonctionne
+// encore comme ennemi ambiant ».
+// PISTE PLUS FORTE (non implémentée, pas testable sans jeu) : `SecurityTurretControllerPS
+// .SetDeviceState(EDeviceStatus)` avec `EDeviceStatus.DISABLED` (valeur -2, confirmée dans
+// enums/EDeviceStatus.json) désactiverait probablement la tourelle elle-même (même mécanisme que
+// le quickhack "Overload" du jeu de base). À essayer en suivant sur un hook `GameAttached` si le
+// fix ci-dessous s'avère insuffisant en jeu.
+// PIN IN-GAME : à confirmer (le menu doit disparaître ; la tourelle peut encore réagir aux PNJ).
+@wrapMethod(SecurityTurretControllerPS)
+protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
+  if !DesossageConfig.Default().ambientSecurity.active {
+    return false;
   }
-  // PIN IN-GAME : désactiver les devices de sécurité ambiants (tourelles/drones).
-  FTLog(s"[Tessera/Desossage] (stub) sécurité ambiante → coupée");
+  return wrappedMethod(actions, context);
 }
