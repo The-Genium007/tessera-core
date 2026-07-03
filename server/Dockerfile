@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # flatc EXACTEMENT à la version du crate flatbuffers (25.12.19).
 RUN curl -fsSL -o /tmp/flatc.zip \
       https://github.com/google/flatbuffers/releases/download/v25.12.19/Linux.flatc.binary.g++-13.zip \
+    && echo "9f87066dc5dfa7fe02090b55bab5f3e55df03e32c9b0cdf229004ade7d091039  /tmp/flatc.zip" | sha256sum -c - \
     && unzip -o /tmp/flatc.zip -d /usr/local/bin \
     && chmod +x /usr/local/bin/flatc \
     && rm /tmp/flatc.zip \
