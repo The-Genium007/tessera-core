@@ -17,9 +17,8 @@ function TesseraDesossage:Render()
     end
 
     ImGui.Text("Squelette OK — leviers à venir.")
-
-    ImGui.End()
   end
+  ImGui.End()
 end
 
 registerForEvent('onDraw', function() TesseraDesossage:Render() end)
