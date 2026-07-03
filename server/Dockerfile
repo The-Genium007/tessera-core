@@ -2,7 +2,7 @@
 # Image runtime unique TesseraSynth : Gateway (GNS) + Shard (TCP interne) + directory (CLI).
 # Build multi-stage. CONTEXTE DE BUILD = racine du dépôt.
 #
-#   docker build -f tessera-core/server/Dockerfile -t tessera-server .
+#   docker build -f server/Dockerfile -t tessera-server .
 
 # ---------- étape build ----------
 FROM rust:1-bookworm AS build
