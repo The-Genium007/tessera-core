@@ -16,6 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Installer flatc (version exacte du crate flatbuffers, cf. server/Dockerfile)
+        run: |
+          curl -fsSL -o /tmp/flatc.zip \
+            https://github.com/google/flatbuffers/releases/download/v25.12.19/Linux.flatc.binary.g++-13.zip
+          sudo unzip -o /tmp/flatc.zip -d /usr/local/bin
+          sudo chmod +x /usr/local/bin/flatc
+          flatc --version
       - run: cargo build --workspace
       - run: cargo test --workspace
       - run: cargo fmt --check
