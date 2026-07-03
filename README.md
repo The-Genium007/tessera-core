@@ -78,6 +78,32 @@ flatc --cpp -o client-mod/generated protocol/schema/<x>.fbs
   Windows, et le jeu lui-même est requis pour tester. Version de jeu cible : **v2.31**
   (voir [`docs/0001-pinned-game-version.md`](docs/0001-pinned-game-version.md)).
 
+## Branches & canaux
+
+Trois branches long-cours, chacune correspondant à un canal de déploiement (même logique
+que les canaux `playtest`/`stable` du launcher) :
+
+| Branche | Rôle |
+| --- | --- |
+| `dev` | Développement actif — code destiné au serveur de test utilisé pour valider les changements en jeu |
+| `playtest` | Test public — build candidate en cours de validation par les joueurs |
+| `main` | Stable — versions publiées |
+
+`dev` est synchronisée automatiquement depuis le monorepo privé de développement
+(Tessera). La promotion vers `playtest` puis `main` est un geste délibéré (pas
+automatique) — typiquement une PR ou un merge dans ce dépôt une fois une étape validée.
+
+À chaque push sur l'une de ces branches, la CI (`.github/workflows/ci.yml`) build et teste
+le workspace, et (`.github/workflows/docker-image.yml`) publie une image Docker sur GHCR
+taguée par canal : `ghcr.io/the-genium007/tessera-server:dev`, `:playtest`, `:stable`.
+
+**Ce qui n'est pas automatisé** : le déploiement de cette image sur un serveur hébergé
+(dev/playtest/stable). Il n'existe aujourd'hui qu'un seul serveur hébergé (VPS de
+production) — aucune infrastructure séparée pour `dev`/`playtest` n'est provisionnée, donc
+aucune CI ne peut y déployer automatiquement. Procédure manuelle en attendant : sur le
+serveur cible, `docker pull ghcr.io/the-genium007/tessera-server:<canal>` puis relancer le
+`docker-compose.yml` du canal concerné.
+
 ## Ce que ce dépôt ne contient pas
 
 Aucun asset de CD Projekt Red n'est présent ni redistribué : le mod fonctionne

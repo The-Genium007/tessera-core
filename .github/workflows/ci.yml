@@ -1,0 +1,22 @@
+name: ci
+
+# Inerte tant que ce fichier vit sous tessera-core/.github/workflows/ dans le monorepo
+# privé Tessera (GitHub n'exécute que le .github/workflows/ à la racine d'un repo).
+# Devient actif une fois publié à la racine du repo public tessera-core.
+
+on:
+  push:
+    branches: [dev, playtest, main]
+  pull_request:
+    branches: [dev, playtest, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace -- -D warnings
