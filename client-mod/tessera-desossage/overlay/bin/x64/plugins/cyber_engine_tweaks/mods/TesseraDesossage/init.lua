@@ -28,6 +28,8 @@ for _, lever in ipairs(TesseraDesossage.levers) do
   end
 end
 
+TesseraDesossage.dayNightScale = TesseraDesossage.dayNightScale or 1.0
+
 function TesseraDesossage:RenderLevers()
   for _, lever in ipairs(TesseraDesossage.levers) do
     local current = TesseraDesossage.leverState[lever.key]
@@ -40,6 +42,18 @@ function TesseraDesossage:RenderLevers()
     ImGui.SameLine()
     ImGui.TextDisabled("(" .. lever.note .. ")")
   end
+end
+
+function TesseraDesossage:RenderWorld()
+  ImGui.Separator()
+  ImGui.Text("Monde")
+  local newScale = ImGui.SliderFloat("Échelle jour/nuit", TesseraDesossage.dayNightScale, 0.0, 4.0)
+  if newScale ~= TesseraDesossage.dayNightScale then
+    TesseraDesossage.dayNightScale = newScale
+    Game.GetPlayer():Tessera_SetLever("dayNightCycleScale", true, newScale)
+  end
+  ImGui.SameLine()
+  ImGui.TextDisabled("(1.0 normal, 0.0 figé, stub — aucun effet confirmé)")
 end
 
 local isOverlayVisible = false
@@ -55,6 +69,7 @@ function TesseraDesossage:Render()
     end
 
     TesseraDesossage:RenderLevers()
+    TesseraDesossage:RenderWorld()
   end
   ImGui.End()
 end
