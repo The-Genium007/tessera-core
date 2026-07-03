@@ -95,13 +95,13 @@ automatique) — typiquement une PR ou un merge dans ce dépôt une fois une ét
 
 À chaque push sur l'une de ces branches, la CI (`.github/workflows/ci.yml`) build et teste
 le workspace, et (`.github/workflows/docker-image.yml`) publie une image Docker sur GHCR
-taguée par canal : `ghcr.io/the-genium007/tessera-server:dev`, `:playtest`, `:stable`.
+taguée par canal : `ghcr.io/the-genium007/tessera-core:dev`, `:playtest`, `:stable`.
 
 **Ce qui n'est pas automatisé** : le déploiement de cette image sur un serveur hébergé
 (dev/playtest/stable). Il n'existe aujourd'hui qu'un seul serveur hébergé (VPS de
 production) — aucune infrastructure séparée pour `dev`/`playtest` n'est provisionnée, donc
 aucune CI ne peut y déployer automatiquement. Procédure manuelle en attendant : sur le
-serveur cible, `docker pull ghcr.io/the-genium007/tessera-server:<canal>` puis relancer le
+serveur cible, `docker pull ghcr.io/the-genium007/tessera-core:<canal>` puis relancer le
 `docker-compose.yml` du canal concerné.
 
 ## Ce que ce dépôt ne contient pas

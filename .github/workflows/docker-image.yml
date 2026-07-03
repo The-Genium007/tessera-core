@@ -4,6 +4,9 @@ name: docker-image
 # privé Tessera. Devient actif une fois publié à la racine du repo public tessera-core.
 #
 # Construit et publie l'image serveur sur GHCR, taguée par branche (dev/playtest/stable).
+# Package `tessera-core` (pas `tessera-server`, déjà utilisé par le pipeline interne de
+# Tessera) : un package GHCR est lié au premier repo qui le publie, donc un nom distinct
+# évite un permission_denied: write_package quand tessera-core essaie de pousser dessus.
 # Ne déploie PAS automatiquement sur un serveur hébergé : aucune cible d'hébergement
 # séparée pour dev/playtest n'est provisionnée à ce jour. Voir la section « Déploiement »
 # de README.md pour la procédure manuelle.
@@ -42,7 +45,7 @@ jobs:
           file: server/Dockerfile
           push: true
           tags: |
-            ghcr.io/the-genium007/tessera-server:${{ steps.tag.outputs.channel }}
-            ghcr.io/the-genium007/tessera-server:${{ github.sha }}
+            ghcr.io/the-genium007/tessera-core:${{ steps.tag.outputs.channel }}
+            ghcr.io/the-genium007/tessera-core:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
