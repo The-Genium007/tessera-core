@@ -23,6 +23,11 @@ public func Tessera_ApplyEncounterCategory(game: GameInstance, kind: CName, e: r
 // Best-effort : bloque les appels entrants (donc les gigs/side-quests poussés par téléphone),
 // mais PAS les déclencheurs de proximité ni les donneurs de quête in-world — ceux-là restent
 // des PIN IN-GAME (aucun symbole vérifié trouvé côté déclencheurs de zone/PNJ).
+//
+// CONFIRMÉ EN JEU (2026-07-03) : effet observable immédiat sans attendre un vrai appel — le jeu
+// verrouille l'icône de sélection de station radio tant que les appels sont autorisés (icône
+// rouge). Décocher (e.active=false → ApplyPhoneCallRestriction(true)) déverrouille l'icône
+// (rouge → bleu). C'est le moyen de vérif de référence pour ce levier en test manuel.
 public func Tessera_ApplyQuestTriggers(game: GameInstance, e: ref<DesossageEntry>) -> Void {
   GameInstance.GetPhoneManager(game).ApplyPhoneCallRestriction(!e.active);
   if e.active {

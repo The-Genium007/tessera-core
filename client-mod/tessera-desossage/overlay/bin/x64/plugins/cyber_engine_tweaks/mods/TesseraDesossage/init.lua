@@ -17,7 +17,7 @@ TesseraDesossage.levers = {
   { key = "fastTravel", label = "Voyage rapide", note = "Réel — BOOT ONLY, recharge nécessaire" },
   { key = "vendingDevices", label = "Distributeurs", note = "Réel — BOOT ONLY, recharge nécessaire" },
   { key = "worldInteractables", label = "Interactables monde", note = "Stub — aucun effet" },
-  { key = "questTriggers", label = "Appels fixers", note = "Réel (partiel) — réagit en direct" },
+  { key = "questTriggers", label = "Appels fixers", note = "Réel (partiel) — décoché = icône radio déverrouillée" },
   { key = "tutorials", label = "Tutoriels", note = "Stub — aucun effet" },
 }
 
