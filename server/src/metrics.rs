@@ -98,10 +98,13 @@ mod tests {
             .await
             .unwrap();
         let mut buf = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_secs(2), sock.read_to_end(&mut buf))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sock.read_to_end(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("200 OK"));
         assert!(text.contains("tessera_players 3"));

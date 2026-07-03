@@ -95,7 +95,11 @@ mod tests {
         let huge_len: u32 = MAX_FRAME_LEN as u32 + 1;
         r.push(&huge_len.to_be_bytes());
         assert!(r.declared_len_exceeds(MAX_FRAME_LEN));
-        assert_eq!(r.next_frame(), None, "pas assez de données pour un frame complet");
+        assert_eq!(
+            r.next_frame(),
+            None,
+            "pas assez de données pour un frame complet"
+        );
     }
 
     #[test]

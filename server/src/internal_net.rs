@@ -137,7 +137,10 @@ impl InternalTransport {
     /// connexion plutôt que de continuer à lire (frame malveillant/buggé, jamais complet).
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
         self.reader.push(bytes);
-        if self.reader.declared_len_exceeds(crate::framing::MAX_FRAME_LEN) {
+        if self
+            .reader
+            .declared_len_exceeds(crate::framing::MAX_FRAME_LEN)
+        {
             return false;
         }
         while let Some(body) = self.reader.next_frame() {
