@@ -56,13 +56,16 @@ pub async fn write_to_shard(
     Ok(created)
 }
 
-/// Lit tout ce qui est disponible sur chaque shard connecté (non bloquant, timeout court par
-/// shard) et alimente `latest[client][shard_addr]` avec le dernier `ServerSend` reçu. Une
-/// lecture EOF (`n == 0`) ou en erreur évacue l'entrée du shard concerné — connexion morte,
-/// sera recréée au prochain `write_to_shard` pour cette adresse — et purge de `latest`, pour
-/// tous les clients, tout snapshot associé à cette adresse : un snapshot laissé en place y
-/// serait rediffusé à chaque tick jusqu'à la reconnexion, comme s'il était encore à jour (bug
-/// A.1 de l'audit prod du 2026-07-03 : la zone paraît figée au lieu de disparaître).
+/// Lit tout ce qui est disponible sur chaque shard connecté et alimente
+/// `latest[client][shard_addr]` avec le dernier `ServerSend` reçu. Pour un même shard, enchaîne
+/// les lectures (chacune bornée par un timeout court, pour approcher un `read()` non bloquant)
+/// tant que des octets arrivent, au lieu de s'arrêter après une seule — un unique appel de 8192
+/// octets max par shard laissait le débit plafonné à ~160 KiB/s/lien, et le retard s'accumulait
+/// sans borne dès qu'un shard dépassait ce débit (bug A.2 de l'audit prod du 2026-07-03). Une
+/// lecture EOF (`n == 0`) ou en erreur évacue l'entrée du shard concerné — connexion morte, sera
+/// recréée au prochain `write_to_shard` pour cette adresse — et purge de `latest`, pour tous les
+/// clients, tout snapshot associé à cette adresse : un snapshot laissé en place y serait
+/// rediffusé à chaque tick jusqu'à la reconnexion, comme s'il était encore à jour (bug A.1).
 pub async fn read_from_shards(
     shards: &mut HashMap<String, ShardLink>,
     latest: &mut HashMap<u64, HashMap<String, Vec<u8>>>,
@@ -74,30 +77,39 @@ pub async fn read_from_shards(
     let mut sbuf = [0u8; 8192];
     for addr in addrs {
         let link = shards.get_mut(&addr).unwrap();
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(1),
-            link.sock.read(&mut sbuf),
-        )
-        .await
-        {
-            Ok(Ok(0)) => dead.push(addr), // EOF : le shard a fermé la connexion
-            Ok(Ok(n)) => {
-                link.reader.push(&sbuf[..n]);
-                if link
-                    .reader
-                    .declared_len_exceeds(crate::framing::MAX_FRAME_LEN)
-                {
-                    dead.push(addr);
-                    continue;
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(1),
+                link.sock.read(&mut sbuf),
+            )
+            .await
+            {
+                Ok(Ok(0)) => {
+                    dead.push(addr.clone()); // EOF : le shard a fermé la connexion
+                    break;
                 }
-                while let Some(body) = link.reader.next_frame() {
-                    if let Some((cid, payload)) = decode_server_send(&body) {
-                        latest.entry(cid).or_default().insert(addr.clone(), payload);
+                Ok(Ok(n)) => {
+                    link.reader.push(&sbuf[..n]);
+                    if link
+                        .reader
+                        .declared_len_exceeds(crate::framing::MAX_FRAME_LEN)
+                    {
+                        dead.push(addr.clone());
+                        break;
                     }
+                    while let Some(body) = link.reader.next_frame() {
+                        if let Some((cid, payload)) = decode_server_send(&body) {
+                            latest.entry(cid).or_default().insert(addr.clone(), payload);
+                        }
+                    }
+                    // Continue la boucle : peut-être encore plus à lire sur ce même shard.
                 }
+                Ok(Err(_)) => {
+                    dead.push(addr.clone()); // erreur de lecture : connexion morte
+                    break;
+                }
+                Err(_) => break, // timeout : plus rien à lire pour l'instant sur ce shard
             }
-            Ok(Err(_)) => dead.push(addr), // erreur de lecture : connexion morte
-            Err(_) => {}                   // timeout : rien à lire pour l'instant
         }
     }
     for addr in &dead {
@@ -573,6 +585,51 @@ mod tests {
         assert!(
             !created_second,
             "une connexion déjà vivante ne doit pas être signalée comme nouvelle"
+        );
+    }
+
+    /// Bug A.2 de l'audit prod 2026-07-03 : `read_from_shards` ne faisait qu'UN SEUL `read()`
+    /// (max 8192 octets) par shard et par appel. Sous un débit soutenu, le retard s'accumule
+    /// sans borne au fil des ticks — ce test le prouve en un seul appel : le "shard" envoie
+    /// d'un coup bien plus de 8192 octets de frames avant que le Gateway ne lise quoi que ce
+    /// soit ; un seul appel à `read_from_shards` doit malgré tout TOUT drainer.
+    #[tokio::test]
+    async fn read_from_shards_drains_more_than_one_socket_buffer_in_a_single_call() {
+        use crate::internal_net::InternalTransport;
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        const N: u64 = 300; // ~300 × (32 + enveloppe) octets ≫ 8192
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut it = InternalTransport::new();
+            for cid in 0..N {
+                it.send(cid, &[0u8; 32]);
+            }
+            for frame in it.take_outbound() {
+                sock.write_all(&frame).await.unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await; // garde la connexion ouverte
+        });
+
+        let mut shards: HashMap<String, ShardLink> = HashMap::new();
+        write_to_shard(&mut shards, &addr, &[]).await.unwrap();
+
+        // Laisse le temps aux 300 frames d'atterrir dans le buffer kernel du socket Gateway
+        // AVANT le premier (et unique) appel à read_from_shards.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+        read_from_shards(&mut shards, &mut latest).await;
+
+        assert_eq!(
+            latest.len(),
+            N as usize,
+            "un seul appel doit drainer TOUTES les frames disponibles, pas juste ~8192 octets"
         );
     }
 
