@@ -4,6 +4,44 @@
 
 TesseraDesossage = TesseraDesossage or {}
 
+TesseraDesossage.levers = {
+  { key = "pedestrians", label = "Piétons", note = "Réel — réagit en direct" },
+  { key = "traffic", label = "Trafic véhicules", note = "Stub — aucun effet" },
+  { key = "vendors", label = "Vendeurs", note = "Stub — aucun effet" },
+  { key = "transit", label = "Transit (métro)", note = "Stub — aucun effet" },
+  { key = "police", label = "Police", note = "Réel — BOOT ONLY, recharge nécessaire" },
+  { key = "ambientSecurity", label = "Sécurité ambiante", note = "Stub — aucun effet" },
+  { key = "ncpdHustles", label = "Hustles NCPD", note = "Stub — aucun effet" },
+  { key = "randomEncounters", label = "Rencontres aléatoires", note = "Stub — aucun effet" },
+  { key = "cyberpsychos", label = "Cyberpsychos", note = "Stub — aucun effet" },
+  { key = "fastTravel", label = "Voyage rapide", note = "Réel — BOOT ONLY, recharge nécessaire" },
+  { key = "vendingDevices", label = "Distributeurs", note = "Réel — BOOT ONLY, recharge nécessaire" },
+  { key = "worldInteractables", label = "Interactables monde", note = "Stub — aucun effet" },
+  { key = "questTriggers", label = "Appels fixers", note = "Réel (partiel) — réagit en direct" },
+  { key = "tutorials", label = "Tutoriels", note = "Stub — aucun effet" },
+}
+
+TesseraDesossage.leverState = TesseraDesossage.leverState or {}
+for _, lever in ipairs(TesseraDesossage.levers) do
+  if TesseraDesossage.leverState[lever.key] == nil then
+    TesseraDesossage.leverState[lever.key] = false
+  end
+end
+
+function TesseraDesossage:RenderLevers()
+  for _, lever in ipairs(TesseraDesossage.levers) do
+    local current = TesseraDesossage.leverState[lever.key]
+    local newValue = ImGui.Checkbox(lever.label, current)
+    if newValue ~= current then
+      TesseraDesossage.leverState[lever.key] = newValue
+      local density = newValue and 1.0 or 0.0
+      Game.GetPlayer():Tessera_SetLever(lever.key, newValue, density)
+    end
+    ImGui.SameLine()
+    ImGui.TextDisabled("(" .. lever.note .. ")")
+  end
+end
+
 local isOverlayVisible = false
 
 function TesseraDesossage:Render()
@@ -16,7 +54,7 @@ function TesseraDesossage:Render()
       return
     end
 
-    ImGui.Text("Squelette OK — leviers à venir.")
+    TesseraDesossage:RenderLevers()
   end
   ImGui.End()
 end
