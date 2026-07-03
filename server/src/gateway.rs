@@ -4,7 +4,7 @@
 
 use crate::framing::FrameReader;
 use crate::internal_net::{decode_server_send, event_to_client_event_frame};
-use crate::transport::Transport;
+use crate::transport::{Transport, TransportEvent};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -18,12 +18,17 @@ pub struct ShardLink {
 /// Écrit `frames` vers le shard à `shard_addr`, en connectant si besoin. Une connexion déjà
 /// présente dans `shards` mais dont l'écriture échoue est évacuée avant de renvoyer l'erreur —
 /// une entrée morte ne doit jamais bloquer une reconnexion au prochain appel.
+///
+/// Renvoie `true` si cet appel vient de créer la connexion (1re connexion, ou reconnexion après
+/// une entrée morte évacuée) — signal utilisé par l'appelant pour re-semer l'état des clients
+/// déjà chargés sur ce shard (cf. `reseed_frames_for_reconnected_shard`), puisqu'un shard qui
+/// vient d'accepter une nouvelle connexion a perdu tout son état précédent.
 pub async fn write_to_shard(
     shards: &mut HashMap<String, ShardLink>,
     shard_addr: &str,
     frames: &[Vec<u8>],
-) -> std::io::Result<()> {
-    if !shards.contains_key(shard_addr) {
+) -> std::io::Result<bool> {
+    let created = if !shards.contains_key(shard_addr) {
         let sock = TcpStream::connect(shard_addr).await?;
         shards.insert(
             shard_addr.to_string(),
@@ -32,7 +37,10 @@ pub async fn write_to_shard(
                 reader: FrameReader::new(),
             },
         );
-    }
+        true
+    } else {
+        false
+    };
     let result: std::io::Result<()> = async {
         let link = shards.get_mut(shard_addr).unwrap();
         for f in frames {
@@ -41,16 +49,20 @@ pub async fn write_to_shard(
         Ok(())
     }
     .await;
-    if result.is_err() {
+    if let Err(e) = result {
         shards.remove(shard_addr);
+        return Err(e);
     }
-    result
+    Ok(created)
 }
 
 /// Lit tout ce qui est disponible sur chaque shard connecté (non bloquant, timeout court par
 /// shard) et alimente `latest[client][shard_addr]` avec le dernier `ServerSend` reçu. Une
 /// lecture EOF (`n == 0`) ou en erreur évacue l'entrée du shard concerné — connexion morte,
-/// sera recréée au prochain `write_to_shard` pour cette adresse.
+/// sera recréée au prochain `write_to_shard` pour cette adresse — et purge de `latest`, pour
+/// tous les clients, tout snapshot associé à cette adresse : un snapshot laissé en place y
+/// serait rediffusé à chaque tick jusqu'à la reconnexion, comme s'il était encore à jour (bug
+/// A.1 de l'audit prod du 2026-07-03 : la zone paraît figée au lieu de disparaître).
 pub async fn read_from_shards(
     shards: &mut HashMap<String, ShardLink>,
     latest: &mut HashMap<u64, HashMap<String, Vec<u8>>>,
@@ -88,8 +100,11 @@ pub async fn read_from_shards(
             Err(_) => {}                   // timeout : rien à lire pour l'instant
         }
     }
-    for addr in dead {
-        shards.remove(&addr);
+    for addr in &dead {
+        shards.remove(addr);
+        for per_shard in latest.values_mut() {
+            per_shard.remove(addr);
+        }
     }
 }
 
@@ -99,6 +114,33 @@ pub fn drain_client_to_shard<T: Transport>(client: &mut T) -> Vec<Vec<u8>> {
         .poll()
         .iter()
         .map(event_to_client_event_frame)
+        .collect()
+}
+
+/// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
+/// rejouer vers ce shard après une reconnexion. Le shard vient de perdre tout son état (nouveau
+/// `Server::new()` recréé côté Shard à chaque connexion acceptée, cf. `shard_main`) et ne connaît
+/// plus aucun de ces clients tant qu'on ne les re-sème pas : sans ça, ils restent invisibles pour
+/// les autres joueurs du shard, indéfiniment (bug A.1 de l'audit prod du 2026-07-03). Un client
+/// chargé mais sans position connue du Gateway (ne devrait pas arriver : `loaded` n'est peuplé
+/// qu'après une 1re position) est ignoré plutôt que de semer une position inventée.
+pub fn reseed_frames_for_reconnected_shard(
+    loader: &crate::handoff::ShardLoader,
+    shard_addr: &str,
+    last_pos: &HashMap<u64, [f32; 3]>,
+) -> Vec<(u64, Vec<Vec<u8>>)> {
+    loader
+        .clients_loaded_on(shard_addr)
+        .into_iter()
+        .filter_map(|cid| {
+            let pos = *last_pos.get(&cid)?;
+            let mut frames = loader.preamble_frames(cid);
+            frames.push(event_to_client_event_frame(&TransportEvent::Message {
+                from: cid,
+                data: crate::gateway_routing::encode_position_update(pos),
+            }));
+            Some((cid, frames))
+        })
         .collect()
 }
 
@@ -258,7 +300,19 @@ pub async fn gateway_main(
             }
 
             for LoadAction::Forward { shard, frames } in loader.feed(ev, placement) {
-                let _ = write_to_shard(&mut shards, &shard, &frames).await;
+                if let Ok(true) = write_to_shard(&mut shards, &shard, &frames).await {
+                    // Le shard vient de (re)connecter : côté Shard, `Server::new()` est recréé à
+                    // chaque connexion acceptée (cf. `shard_main`) — tout son état précédent est
+                    // perdu. Re-semer le préambule + dernière position connue de chaque client que
+                    // le Gateway sait chargé sur ce shard, sinon ils y restent invisibles pour
+                    // toujours (bug A.1, audit prod 2026-07-03). Idempotent : `World::add_player`
+                    // (`or_default`) et `set_pose` tolèrent un double envoi sans effet de bord.
+                    for (_, seed_frames) in
+                        reseed_frames_for_reconnected_shard(&loader, &shard, &last_pos)
+                    {
+                        let _ = write_to_shard(&mut shards, &shard, &seed_frames).await;
+                    }
+                }
             }
 
             if is_disconnect {
@@ -408,6 +462,289 @@ mod tests {
         apply_shard_frame_to_client(&body, &mut client);
         assert_eq!(client.take_sent(9), vec![vec![7, 7]]);
         let _ = &mut shard_side;
+    }
+
+    fn join_payload() -> Vec<u8> {
+        let mut b = flatbuffers::FlatBufferBuilder::new();
+        let name = b.create_string("v");
+        let join = protocol::Join::create(
+            &mut b,
+            &protocol::JoinArgs {
+                display_name: Some(name),
+            },
+        );
+        let env = protocol::ClientEnvelope::create(
+            &mut b,
+            &protocol::ClientEnvelopeArgs {
+                msg_type: protocol::ClientMsg::Join,
+                msg: Some(join.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    #[test]
+    fn reseed_frames_reconstruct_preamble_and_last_position_for_every_loaded_client() {
+        use crate::handoff::Placement;
+        use crate::transport::TransportEvent;
+
+        let mut loader = crate::handoff::ShardLoader::new();
+        loader.feed(TransportEvent::Connected(1), None);
+        loader.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: join_payload(),
+            },
+            None,
+        );
+        loader.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: crate::gateway_routing::encode_position_update([500.0, 0.0, 0.0]),
+            },
+            Some(Placement {
+                authoritative: "A".to_string(),
+                overlaps: vec![],
+            }),
+        );
+
+        let mut last_pos = HashMap::new();
+        last_pos.insert(1u64, [500.0, 0.0, 0.0]);
+
+        let seeded = reseed_frames_for_reconnected_shard(&loader, "A", &last_pos);
+        assert_eq!(seeded.len(), 1);
+        let (cid, frames) = &seeded[0];
+        assert_eq!(*cid, 1);
+        assert_eq!(frames.len(), 3); // Connected + Join + Position
+    }
+
+    #[test]
+    fn reseed_frames_skips_a_loaded_client_with_no_known_position() {
+        use crate::handoff::Placement;
+        use crate::transport::TransportEvent;
+
+        let mut loader = crate::handoff::ShardLoader::new();
+        loader.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: crate::gateway_routing::encode_position_update([500.0, 0.0, 0.0]),
+            },
+            Some(Placement {
+                authoritative: "A".to_string(),
+                overlaps: vec![],
+            }),
+        );
+
+        let last_pos: HashMap<u64, [f32; 3]> = HashMap::new(); // aucune position connue du Gateway
+        assert!(reseed_frames_for_reconnected_shard(&loader, "A", &last_pos).is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_to_shard_reports_whether_it_created_a_new_connection() {
+        use std::collections::HashMap;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 64];
+                loop {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+        });
+
+        let mut shards: HashMap<String, ShardLink> = HashMap::new();
+
+        let created_first = write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+            .await
+            .expect("1re écriture doit réussir");
+        assert!(created_first, "la 1re écriture crée forcément la connexion");
+
+        let created_second = write_to_shard(&mut shards, &addr, &[b"b".to_vec()])
+            .await
+            .expect("2e écriture doit réussir");
+        assert!(
+            !created_second,
+            "une connexion déjà vivante ne doit pas être signalée comme nouvelle"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_shard_link_purges_its_stale_snapshots_from_latest_for_every_client() {
+        use std::collections::HashMap;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            drop(sock); // ferme aussitôt : simule un shard qui vient de crasher
+        });
+
+        let mut shards: HashMap<String, ShardLink> = HashMap::new();
+        write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+            .await
+            .unwrap();
+
+        // Deux clients ont chacun un snapshot périmé en attente pour ce shard, plus un snapshot
+        // d'un AUTRE shard qui doit survivre à la purge (seule l'adresse morte est concernée).
+        let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+        latest
+            .entry(1u64)
+            .or_default()
+            .insert(addr.clone(), b"perime-1".to_vec());
+        latest
+            .entry(1u64)
+            .or_default()
+            .insert("autre-shard".to_string(), b"toujours-valide".to_vec());
+        latest
+            .entry(2u64)
+            .or_default()
+            .insert(addr.clone(), b"perime-2".to_vec());
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        read_from_shards(&mut shards, &mut latest).await;
+
+        assert!(
+            !latest.get(&1).unwrap().contains_key(&addr),
+            "le snapshot périmé du client 1 pour le shard mort doit être purgé"
+        );
+        assert!(
+            latest.get(&1).unwrap().contains_key("autre-shard"),
+            "le snapshot d'un shard toujours vivant ne doit pas être touché"
+        );
+        assert!(
+            !latest.contains_key(&2) || !latest.get(&2).unwrap().contains_key(&addr),
+            "le snapshot périmé du client 2 pour le shard mort doit être purgé"
+        );
+    }
+
+    /// Reproduit le bug A.1 de bout en bout, sans GNS : un shard "crashe" (ferme sa connexion),
+    /// redémarre sur la même adresse (comme un conteneur Docker relancé), et un 2e client
+    /// déclenche une nouvelle écriture vers ce shard. Le shard frais ne connaît plus le 1er
+    /// client — il doit être re-semé (Connected+Join+Position), sinon il reste invisible pour
+    /// toujours pour les autres joueurs de ce shard, silencieusement.
+    #[tokio::test]
+    async fn shard_reconnect_reseeds_every_previously_loaded_client() {
+        use crate::handoff::{LoadAction, Placement, ShardLoader};
+        use crate::transport::TransportEvent;
+        use std::collections::HashMap;
+        use tokio::net::TcpListener;
+
+        let listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener1.local_addr().unwrap().to_string();
+        let accept1 = tokio::spawn(async move {
+            let (sock, _) = listener1.accept().await.unwrap();
+            drop(sock); // le shard "crashe" aussitôt après avoir accepté le client 1
+        });
+
+        let mut shards: HashMap<String, ShardLink> = HashMap::new();
+        let mut loader = ShardLoader::new();
+        let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
+
+        // Client 1 rejoint et se place sur le shard "A" — écriture normale vers le shard n°1.
+        loader.feed(TransportEvent::Connected(1), None);
+        loader.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: join_payload(),
+            },
+            None,
+        );
+        last_pos.insert(1, [500.0, 0.0, 0.0]);
+        for LoadAction::Forward { shard, frames } in loader.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: crate::gateway_routing::encode_position_update([500.0, 0.0, 0.0]),
+            },
+            Some(Placement {
+                authoritative: addr.clone(),
+                overlaps: vec![],
+            }),
+        ) {
+            write_to_shard(&mut shards, &shard, &frames).await.unwrap();
+        }
+        accept1.await.unwrap();
+
+        // Le shard n°1 meurt : EOF détecté, connexion évacuée.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+        read_from_shards(&mut shards, &mut latest).await;
+        assert!(!shards.contains_key(&addr));
+
+        // Le shard redémarre sur la MÊME adresse et capture tout ce qu'il reçoit. Le Gateway
+        // écrit en 2 appels séparés (frames du client 2, puis re-seed du client 1) qui peuvent
+        // arriver en 2 segments TCP distincts : accumuler jusqu'à 6 frames décodables (3+3) ou
+        // un timeout, plutôt qu'un seul `read()` qui capturerait parfois seulement le 1er lot.
+        let listener2 = TcpListener::bind(&addr).await.unwrap();
+        let (recv_tx, recv_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener2.accept().await.unwrap();
+            let mut reader = FrameReader::new();
+            let mut events = Vec::new();
+            let mut buf = [0u8; 4096];
+            while events.len() < 6 {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                reader.push(&buf[..n]);
+                while let Some(body) = reader.next_frame() {
+                    if let Some(ev) = crate::internal_net::decode_client_event(&body) {
+                        events.push(ev);
+                    }
+                }
+            }
+            let _ = recv_tx.send(events);
+        });
+
+        // Client 2 arrive et se place aussi sur le shard "A" — déclenche la reconnexion.
+        loader.feed(TransportEvent::Connected(2), None);
+        loader.feed(
+            TransportEvent::Message {
+                from: 2,
+                data: join_payload(),
+            },
+            None,
+        );
+        last_pos.insert(2, [510.0, 0.0, 0.0]);
+        for LoadAction::Forward { shard, frames } in loader.feed(
+            TransportEvent::Message {
+                from: 2,
+                data: crate::gateway_routing::encode_position_update([510.0, 0.0, 0.0]),
+            },
+            Some(Placement {
+                authoritative: addr.clone(),
+                overlaps: vec![],
+            }),
+        ) {
+            let reconnected = write_to_shard(&mut shards, &shard, &frames).await.unwrap();
+            if reconnected {
+                for (_, seed_frames) in
+                    reseed_frames_for_reconnected_shard(&loader, &shard, &last_pos)
+                {
+                    write_to_shard(&mut shards, &shard, &seed_frames)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
+        let events = tokio::time::timeout(std::time::Duration::from_secs(2), recv_rx)
+            .await
+            .expect("le shard frais doit recevoir les 6 frames attendues (3+3) sous 2s")
+            .unwrap();
+        assert!(
+            events.contains(&TransportEvent::Connected(1)),
+            "le client 1 (jamais revenu lui-même) doit être re-semé au shard frais par le Gateway ; reçu {events:?}"
+        );
     }
 
     #[tokio::test]

@@ -1,7 +1,9 @@
 //! Logique de routage du Gateway (M3) : extraire la position du protocole client + assigner les
 //! clients aux shards selon leur 1re position. Pur, testable sans GNS/TCP.
 
-use protocol::{ClientEnvelope, ClientMsg};
+use protocol::{
+    ClientEnvelope, ClientEnvelopeArgs, ClientMsg, PositionUpdate, PositionUpdateArgs, Vec3,
+};
 
 /// Décode un `ClientEnvelope` client ; si c'est un `PositionUpdate`, renvoie sa position.
 pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
@@ -12,6 +14,31 @@ pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
     let pu = env.msg_as_position_update()?;
     let p = pu.position()?;
     Some((p.x(), p.y(), p.z()))
+}
+
+/// Construit le payload client d'un `PositionUpdate` — utilisé pour re-semer, sur un shard qui
+/// vient de perdre son état, la dernière position connue d'un client par le Gateway (le client
+/// réel n'a pas renvoyé cette position, elle est reconstruite depuis `last_pos`). Yaw à 0 : une
+/// orientation temporairement fausse s'auto-corrige au prochain vrai `PositionUpdate` du client.
+pub fn encode_position_update(pos: [f32; 3]) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let p = Vec3::new(pos[0], pos[1], pos[2]);
+    let pu = PositionUpdate::create(
+        &mut b,
+        &PositionUpdateArgs {
+            position: Some(&p),
+            yaw: 0.0,
+        },
+    );
+    let env = ClientEnvelope::create(
+        &mut b,
+        &ClientEnvelopeArgs {
+            msg_type: ClientMsg::PositionUpdate,
+            msg: Some(pu.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
 }
 
 /// Décode un `ClientEnvelope` client ; si c'est un `Join`, renvoie son `display_name`.
@@ -152,6 +179,12 @@ mod tests {
         );
         b.finish(env, None);
         b.finished_data().to_vec()
+    }
+
+    #[test]
+    fn encode_position_update_round_trips_through_extract_position() {
+        let payload = encode_position_update([2387.0, -1295.0, 63.0]);
+        assert_eq!(extract_position(&payload), Some((2387.0, -1295.0, 63.0)));
     }
 
     #[test]

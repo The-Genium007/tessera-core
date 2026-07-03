@@ -252,6 +252,24 @@ impl ShardLoader {
             .unwrap_or_default()
     }
 
+    /// Frames `ClientEvent` (Connected/Join) à rejouer pour re-semer ce client sur un shard qui
+    /// vient de perdre son état — vide pour un client inconnu.
+    pub fn preamble_frames(&self, client_id: ClientId) -> Vec<Vec<u8>> {
+        self.clients
+            .get(&client_id)
+            .map(|s| s.preamble.iter().map(event_to_client_event_frame).collect())
+            .unwrap_or_default()
+    }
+
+    /// Tous les clients dont `shard_addr` fait partie des shards actuellement chargés.
+    pub fn clients_loaded_on(&self, shard_addr: &str) -> Vec<ClientId> {
+        self.clients
+            .iter()
+            .filter(|(_, st)| st.loaded.contains(shard_addr))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     pub fn forget(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
     }
@@ -368,6 +386,76 @@ mod tests {
         assert_eq!(fa.len(), 3); // Connected + Join + Position
         assert_eq!(decode_first(&fa[0]), Some(TransportEvent::Connected(1)));
         assert_eq!(l.loaded_shards(1), vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn preamble_frames_replays_connected_and_join_for_a_loaded_client() {
+        let mut l = ShardLoader::new();
+        l.feed(TransportEvent::Connected(1), None);
+        l.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: join_payload(),
+            },
+            None,
+        );
+        l.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: pos_payload(500.0),
+            },
+            Some(place("A", &[])),
+        );
+
+        let frames = l.preamble_frames(1);
+        assert_eq!(frames.len(), 2); // Connected + Join — pas la Position
+        assert_eq!(decode_first(&frames[0]), Some(TransportEvent::Connected(1)));
+    }
+
+    #[test]
+    fn preamble_frames_is_empty_for_an_unknown_client() {
+        let l = ShardLoader::new();
+        assert!(l.preamble_frames(42).is_empty());
+    }
+
+    #[test]
+    fn clients_loaded_on_lists_every_client_with_the_shard_in_its_loaded_set() {
+        let mut l = ShardLoader::new();
+        l.feed(TransportEvent::Connected(1), None);
+        l.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: join_payload(),
+            },
+            None,
+        );
+        l.feed(
+            TransportEvent::Message {
+                from: 1,
+                data: pos_payload(500.0),
+            },
+            Some(place("A", &[])),
+        );
+
+        l.feed(TransportEvent::Connected(2), None);
+        l.feed(
+            TransportEvent::Message {
+                from: 2,
+                data: join_payload(),
+            },
+            None,
+        );
+        l.feed(
+            TransportEvent::Message {
+                from: 2,
+                data: pos_payload(2000.0),
+            },
+            Some(place("B", &[])),
+        );
+
+        assert_eq!(l.clients_loaded_on("A"), vec![1]);
+        assert_eq!(l.clients_loaded_on("B"), vec![2]);
+        assert!(l.clients_loaded_on("Z").is_empty());
     }
 
     #[test]
