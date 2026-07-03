@@ -20,6 +20,19 @@ public func Tessera_ApplyFastTravel(game: GameInstance, e: ref<DesossageEntry>) 
 // probablement avec `pedestrians` (CommunitySystem.ChangeDensityModifier, cf. DesossagePopulation)
 // s'ils sont spawnés comme PNJ communautaires — à tester en jeu. Les vendeurs NOMMÉS (fixes,
 // scénarisés) restent un stub : pas de symbole de désactivation trouvé.
+//
+// Recherche élargie (2026-07-03, dump RTTI complet) : aucune classe "Shop"/"Store"/"Customer"
+// pertinente. Cherché aussi un levier GÉNÉRIQUE (masquer/despawn n'importe quel PNJ, peu importe
+// son rôle) qui aurait couvert vendeurs ET clients en magasin d'un coup : `entEntity`/
+// `ScriptedPuppet` n'exposent aucune méthode visibilité/despawn/hide/destroy ;
+// `SmartDespawnRequest`/`MarkDespawnCandidate` existent (événements internes du jeu, mécanisme de
+// nettoyage de PNJ) mais n'ont aucun champ propre exposé — pas de point d'accroche scriptable
+// trouvé pour les déclencher nous-mêmes. Piste générique épuisée côté RTTI.
+// HYPOTHÈSE (à tester en jeu, pas encore fait) : les PNJ ambiants EN INTÉRIEUR (clients dans un
+// magasin) sont probablement, comme le trafic, spawnés via le même mécanisme que `pedestrians`
+// (zones `communityArea`/`worldCompiledCommunityAreaNode` vues dans le RTTI), donc potentiellement
+// déjà coupés par le levier `pedestrians` existant, sans code supplémentaire. Seuls les vendeurs
+// NOMMÉS scénarisés (pas ambiants) resteraient un vrai stub sans solution native trouvée.
 public func Tessera_ApplyVendors(game: GameInstance, e: ref<DesossageEntry>) -> Void {
   if e.active {
     return;

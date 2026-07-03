@@ -19,12 +19,20 @@ public func Tessera_ApplyPedestrians(game: GameInstance, e: ref<DesossageEntry>)
 // Recherche confirmée via dump RTTI complet (WopsS/RED4ext.NativeDB) : GameInstance.GetTrafficSystem
 // retourne `worldTrafficScriptInterface`, qui n'expose qu'UNE seule méthode dans tout le jeu :
 // IsPathIntersectingWithTraffic (requête, pas de setter de densité). Parent = IScriptable (rien
-// d'hérité d'utile). Confirme et durcit la suspicion précédente (qui citait aussi
-// FindEntitiesNearPlane — absent du dump, probablement une confusion). HYPOTHÈSE TOUJOURS À TESTER
-// (console CET) : le trafic véhicules est peut-être aussi gouverné par
-// CommunitySystem.ChangeDensityModifier (le « Community System » du jeu couvre la population
-// ambiante en général, pas juste les piétons) — si couper `pedestrians` réduit aussi le trafic
-// observé en jeu, ce stub devient inutile. Reste un stub tant que non testé.
+// d'hérité d'utile). AITrafficMovementSystem (la classe interne derrière l'interface scriptée) est
+// tout aussi vide — zéro méthode/champ propre à aucun niveau de sa chaîne de parenté. Piste
+// "système de trafic dédié" définitivement épuisée côté RTTI.
+//
+// HYPOTHÈSE RENFORCÉE (2026-07-03, re-creusée) : `worldPopulationSpawnerNode` (le nœud de spawn
+// placé dans le monde par le level design) a un champ `.isVehicle: Bool` — piétons ET véhicules
+// sont donc le MÊME type de nœud de spawn, juste distingués par ce booléen, pas deux systèmes
+// séparés. Les classes `populationModifier`/`populationSpawnModifier`/
+// `populationPopulationSpawnParameter` qui gravitent autour sont de purs conteneurs de données
+// (zéro méthode), cohérent avec un système consommé en interne par CommunitySystem plutôt qu'une
+// API scriptable parallèle. Ça renforce nettement l'hypothèse que `ChangeDensityModifier` pilote
+// aussi le trafic, sans qu'on ait trouvé de setter dédié séparé pour les véhicules. TEST À FAIRE
+// EN JEU (le seul qui manque) : couper `pedestrians` seul, observer si le trafic véhicules baisse
+// aussi — si oui, ce stub `traffic` devient un doublon à retirer plutôt qu'à implémenter.
 public func Tessera_ApplyTraffic(game: GameInstance, e: ref<DesossageEntry>) -> Void {
   let factor: Float = 0.0;
   if e.active { factor = e.density; }
