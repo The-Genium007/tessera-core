@@ -191,6 +191,13 @@ pub async fn gateway_main(
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
     let mut last_autosave = std::time::Instant::now();
     let autosave_interval = Duration::from_secs(30);
+    // Enregistré UNE SEULE FOIS avant la boucle : sur Unix, `tokio::signal::unix::signal(...)`
+    // installe une registration OS qui ne bufferise rien tant qu'aucun récepteur n'existe — la
+    // recréer à chaque itération (comme le faisait l'ancien `shutdown_signal()` appelé depuis le
+    // `select!` ci-dessous) crée une fenêtre où un SIGTERM reçu pendant la partie synchrone de
+    // l'itération (après le drop de l'ancien flux, avant la création du nouveau) est perdu — le
+    // process attend alors un 2e signal. Le flux persistant survit à toutes les itérations.
+    let mut shutdown = ShutdownSignal::new();
     loop {
         // 1) Lire chaque shard connecté (évacue et laisse reconnecter les connexions mortes).
         read_from_shards(&mut shards, &mut latest).await;
@@ -198,7 +205,7 @@ pub async fn gateway_main(
         // 2) Tick, avec une course contre le signal d'arrêt propre (SIGTERM/SIGINT).
         tokio::select! {
             _ = ticker.tick() => {}
-            _ = shutdown_signal() => {
+            _ = shutdown.recv() => {
                 save_all_known(&mut store, &keys, &last_pos, &residence);
                 tracing::info!("Arrêt propre : positions sauvegardées, extinction du Gateway");
                 return Ok(());
@@ -302,21 +309,48 @@ pub async fn gateway_main(
     }
 }
 
-/// Attend un signal d'arrêt propre : SIGINT (Ctrl+C) partout, plus SIGTERM (docker stop) sous
-/// Unix. Utilisé uniquement depuis `gateway_main`, qui est déjà gns-gated.
+/// Détecteur d'arrêt propre : SIGINT (Ctrl+C) partout, plus SIGTERM (docker stop) sous Unix.
+/// Utilisé uniquement depuis `gateway_main`, qui est déjà gns-gated.
+///
+/// Doit être construit UNE SEULE FOIS avant la boucle principale et réutilisé (via `&mut`) à
+/// chaque itération. Sur Unix, `recv()` réutilise le même flux `tokio::signal::unix::Signal` —
+/// reconstruire ce flux à chaque itération (comme le faisait un appel `shutdown_signal()` frais
+/// dans le `select!` de la boucle) rouvre une fenêtre où un signal arrivé entre deux itérations
+/// (après le drop de l'ancien flux, avant la création du nouveau) n'est délivré à personne et est
+/// silencieusement perdu — tokio ne bufferise pas un signal pour un récepteur qui n'existe pas
+/// encore. `tokio::signal::ctrl_c()`, lui, n'a pas ce problème (canal partagé installé une seule
+/// fois en interne par tokio dès le premier appel) : il reste donc appelé frais à chaque `recv()`.
 #[cfg(feature = "gns")]
-async fn shutdown_signal() {
+struct ShutdownSignal {
     #[cfg(unix)]
-    {
+    sigterm: tokio::signal::unix::Signal,
+}
+
+#[cfg(feature = "gns")]
+impl ShutdownSignal {
+    #[cfg(unix)]
+    fn new() -> Self {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+        Self {
+            sigterm: signal(SignalKind::terminate()).expect("SIGTERM handler"),
         }
     }
+
     #[cfg(not(unix))]
-    {
+    fn new() -> Self {
+        Self {}
+    }
+
+    #[cfg(unix)]
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = self.sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn recv(&mut self) {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
