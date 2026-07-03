@@ -17,7 +17,9 @@ services:
     restart: unless-stopped
     ports:
       - "27020:27020/udp"
-      - "9100:9100" # métriques (texte Prometheus) — à restreindre/retirer en prod publique
+      # Port 9100 (métriques Prometheus texte) volontairement NON publié : le pare-feu ufw du VPS
+      # de production est inactif (tout serait exposé publiquement sans authentification). Reste
+      # accessible depuis l'intérieur du réseau Docker (ex. un futur Prometheus interne).
     volumes:
       - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
       - tessera-players:/data
