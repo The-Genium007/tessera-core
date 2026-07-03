@@ -10,8 +10,8 @@
 services:
   gateway:
     build:
-      context: ..
-      dockerfile: server/Dockerfile
+      context: ../..
+      dockerfile: tessera-core/server/Dockerfile
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
     command: ["tessera-gateway", "--manifest", "/etc/tessera/server.toml"]
     restart: unless-stopped
