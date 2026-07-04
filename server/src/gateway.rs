@@ -231,6 +231,9 @@ pub async fn gateway_main(
     }
 
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
+    // Cf. shard.rs : Skip plutôt que le Burst par défaut — sauter un tick manqué au lieu de
+    // rattraper en rafale, pour ne pas dépenser plus de CPU/réseau juste après un pic de charge.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_autosave = std::time::Instant::now();
     let autosave_interval = Duration::from_secs(30);
     // Enregistré UNE SEULE FOIS avant la boucle : sur Unix, `tokio::signal::unix::signal(...)`

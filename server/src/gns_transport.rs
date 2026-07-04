@@ -121,13 +121,21 @@ impl Transport for GnsTransport {
         events
     }
 
-    /// Envoie `data` de façon fiable à `to`. Sans effet si `to` n'est pas connecté.
+    /// Envoie `data` en unreliable à `to`. Sans effet si `to` n'est pas connecté.
+    ///
+    /// Seul trafic sortant du Gateway aujourd'hui : les snapshots (`ServerMsg::Snapshot`), dont
+    /// chacun rend le précédent obsolète — pas la peine de les retransmettre en cas de perte, le
+    /// suivant arrive 50 ms après. En RELIABLE (avant ce fix, audit prod 2026-07-03 §4.3), une
+    /// perte de paquet chez un client au réseau faible mettait tous ses snapshots suivants en
+    /// attente de retransmission (head-of-line blocking) au lieu de simplement en recevoir un
+    /// plus récent. Si un futur message a besoin de fiabilité (chat, transaction), lui donner son
+    /// propre appel avec `SendFlags::RELIABLE` plutôt que de changer ce chemin partagé.
     fn send(&mut self, to: ClientId, data: &[u8]) {
         if let Some(&conn) = self.id_to_conn.get(&to) {
             let msg =
                 self.global
                     .utils()
-                    .allocate_message(conn, SendFlags::RELIABLE, data.to_vec());
+                    .allocate_message(conn, SendFlags::UNRELIABLE, data.to_vec());
             let outcomes = self.socket.send_messages(std::iter::once(msg));
             for outcome in outcomes {
                 match outcome {
