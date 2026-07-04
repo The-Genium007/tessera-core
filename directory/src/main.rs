@@ -33,6 +33,14 @@ enum Command {
         #[command(subcommand)]
         command: TopologyCommand,
     },
+    Register {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long = "platform-url")]
+        platform_url: String,
+        #[arg(long = "identity-path")]
+        identity_path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -58,6 +66,11 @@ fn main() -> anyhow::Result<()> {
             TopologyCommand::Check { manifest } => cmd_topology_check(&manifest),
             TopologyCommand::Render { manifest, out } => cmd_topology_render(&manifest, &out),
         },
+        Command::Register {
+            manifest,
+            platform_url,
+            identity_path,
+        } => cmd_register(&manifest, &platform_url, &identity_path),
     }
 }
 
@@ -111,4 +124,68 @@ fn cmd_topology_render(
     std::fs::write(out, svg)?;
     println!("Rendu dans {}", out.display());
     Ok(())
+}
+
+fn cmd_register(
+    manifest_path: &std::path::Path,
+    platform_url: &str,
+    identity_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let manifest = server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
+    let key = server_identity::load_or_create(identity_path).map_err(|e| anyhow::anyhow!(e))?;
+    let public_key_b64 = signing::public_b64(&key);
+    let payload = build_register_payload(&manifest, public_key_b64);
+
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(format!("{platform_url}/v1/servers/register"))
+        .json(&payload)
+        .send()?;
+
+    if resp.status().is_success() {
+        println!(
+            "Serveur '{}' enregistré auprès de {platform_url}.",
+            manifest.identity.id
+        );
+        Ok(())
+    } else {
+        anyhow::bail!("échec d'enregistrement : HTTP {}", resp.status())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RegisterPayload {
+    id: String,
+    name: String,
+    public_key_b64: String,
+}
+
+fn build_register_payload(
+    manifest: &server::manifest::Manifest,
+    public_key_b64: String,
+) -> RegisterPayload {
+    RegisterPayload {
+        id: manifest.identity.id.clone(),
+        name: manifest.identity.name.clone(),
+        public_key_b64,
+    }
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+
+    fn sample_manifest() -> server::manifest::Manifest {
+        server::manifest::load(std::path::Path::new("../server/server.example.toml"))
+            .expect("server.example.toml doit être chargeable depuis tessera-core/directory")
+    }
+
+    #[test]
+    fn build_register_payload_uses_manifest_identity() {
+        let manifest = sample_manifest();
+        let payload = build_register_payload(&manifest, "fake-pubkey-b64".to_string());
+        assert_eq!(payload.id, manifest.identity.id);
+        assert_eq!(payload.name, manifest.identity.name);
+        assert_eq!(payload.public_key_b64, "fake-pubkey-b64");
+    }
 }
