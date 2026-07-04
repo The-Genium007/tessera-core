@@ -3,6 +3,7 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use rand::rngs::OsRng;
 
 pub fn signing_key_from_b64_seed(seed_b64: &str) -> Result<SigningKey, String> {
     let raw = B64
@@ -13,6 +14,13 @@ pub fn signing_key_from_b64_seed(seed_b64: &str) -> Result<SigningKey, String> {
         .try_into()
         .map_err(|_| format!("le seed doit faire 32 octets, reçu {}", raw.len()))?;
     Ok(SigningKey::from_bytes(&seed))
+}
+
+/// Génère une paire de clés Ed25519 fraîche — utilisée pour l'identité propre d'un serveur
+/// (distincte de `TESSERA_DIRECTORY_SIGNING_KEY`, la clé centrale qui signe l'agrégat
+/// `servers.json` — cf. spec `docs/superpowers/specs/2026-07-04-auth-platform-core-design.md`).
+pub fn generate_signing_key() -> SigningKey {
+    SigningKey::generate(&mut OsRng)
 }
 
 pub fn verifying_key_from_b64(pub_b64: &str) -> Result<VerifyingKey, String> {
@@ -100,5 +108,22 @@ mod tests {
     #[test]
     fn rejects_wrong_length_seed() {
         assert!(signing_key_from_b64_seed("aGVsbG8=").is_err());
+    }
+
+    #[test]
+    fn generate_signing_key_produces_a_usable_ed25519_keypair() {
+        let key = generate_signing_key();
+        let msg = b"round-trip test";
+        let sig_b64 = sign_detached_b64(&key, msg);
+        let pub_b64 = public_b64(&key);
+        let vk = verifying_key_from_b64(&pub_b64).unwrap();
+        assert!(verify_detached_b64(&vk, msg, &sig_b64).is_ok());
+    }
+
+    #[test]
+    fn generate_signing_key_produces_distinct_keys_each_call() {
+        let a = generate_signing_key();
+        let b = generate_signing_key();
+        assert_ne!(public_b64(&a), public_b64(&b));
     }
 }
