@@ -150,6 +150,20 @@ impl Transport for GnsTransport {
             }
         }
     }
+
+    /// Ferme la connexion de `to` (kick — serveur plein, flood soutenu). `linger: true` laisse
+    /// le temps aux messages déjà en file par un `send()` précédent (ex. `Kicked`) de partir
+    /// avant la fermeture effective — mais `send()` est UNRELIABLE (cf. sa doc), donc sous
+    /// perte de paquet le client peut se retrouver déconnecté sans avoir reçu le motif. Sans
+    /// effet si `to` n'est pas connecté.
+    fn disconnect(&mut self, to: ClientId) {
+        if let Some(conn) = self.id_to_conn.remove(&to) {
+            self.conn_to_id.remove(&conn);
+            if let Err(e) = self.socket.close_connection(conn, 0, None, true) {
+                tracing::warn!(client_id = to, ?e, "GNS close_connection failed");
+            }
+        }
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

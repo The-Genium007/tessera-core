@@ -182,6 +182,11 @@ impl Transport for InternalTransport {
         b.finish(env, None);
         self.outbound.push(encode_frame(b.finished_data()));
     }
+
+    /// No-op : `InternalTransport` est le lien interne Gateway↔Shard, pas la connexion
+    /// publique d'un client. Kicker un client est une décision du Gateway (serveur plein,
+    /// flood), qui agit sur son propre transport client-facing (`GnsTransport`), jamais ici.
+    fn disconnect(&mut self, _to: ClientId) {}
 }
 
 #[cfg(test)]

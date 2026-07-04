@@ -13,10 +13,12 @@ pub enum TransportEvent {
 }
 
 /// Transport réseau abstrait. `poll` draine les events en attente (non bloquant) ;
-/// `send` envoie des octets de façon fiable à un client.
+/// `send` envoie des octets de façon fiable à un client ; `disconnect` force la fermeture
+/// d'une connexion (kick — serveur plein, flood soutenu... cf. audit prod 2026-07-03 §5.4).
 pub trait Transport {
     fn poll(&mut self) -> Vec<TransportEvent>;
     fn send(&mut self, to: ClientId, data: &[u8]);
+    fn disconnect(&mut self, to: ClientId);
 }
 
 /// Transport déterministe en mémoire, pour les tests (aucun réseau).
@@ -24,6 +26,7 @@ pub trait Transport {
 pub struct InMemoryTransport {
     incoming: VecDeque<TransportEvent>,
     sent: HashMap<ClientId, Vec<Vec<u8>>>,
+    disconnected: Vec<ClientId>,
 }
 
 impl InMemoryTransport {
@@ -38,6 +41,10 @@ impl InMemoryTransport {
     pub fn take_sent(&mut self, to: ClientId) -> Vec<Vec<u8>> {
         self.sent.remove(&to).unwrap_or_default()
     }
+    /// Récupère (et vide) les clients déconnectés via `disconnect`, pour assertions.
+    pub fn take_disconnected(&mut self) -> Vec<ClientId> {
+        std::mem::take(&mut self.disconnected)
+    }
 }
 
 impl Transport for InMemoryTransport {
@@ -46,6 +53,9 @@ impl Transport for InMemoryTransport {
     }
     fn send(&mut self, to: ClientId, data: &[u8]) {
         self.sent.entry(to).or_default().push(data.to_vec());
+    }
+    fn disconnect(&mut self, to: ClientId) {
+        self.disconnected.push(to);
     }
 }
 
@@ -70,5 +80,17 @@ mod tests {
         t.send(1, &[7, 7]);
         assert_eq!(t.take_sent(1), vec![vec![7, 7]]);
         assert!(t.take_sent(1).is_empty(), "take_sent doit vider");
+    }
+
+    #[test]
+    fn disconnect_is_recorded_and_take_disconnected_drains_it() {
+        let mut t = InMemoryTransport::new();
+        t.disconnect(1);
+        t.disconnect(2);
+        assert_eq!(t.take_disconnected(), vec![1, 2]);
+        assert!(
+            t.take_disconnected().is_empty(),
+            "take_disconnected doit vider"
+        );
     }
 }

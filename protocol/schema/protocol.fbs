@@ -8,8 +8,13 @@ table PositionUpdate { position:Vec3; yaw:float; }
 table PlayerState { id:ulong; position:Vec3; yaw:float; }
 table Snapshot { tick:ulong; players:[PlayerState]; }
 
+// Envoyé juste avant de fermer la connexion, avec un motif lisible — serveur plein, flood
+// soutenu, etc. (audit prod 2026-07-03 §5.4 : avant, un client rejeté ne recevait aucune
+// explication, juste une coupure muette).
+table Kicked { reason:string; }
+
 union ClientMsg { Join, PositionUpdate }
-union ServerMsg { Snapshot }
+union ServerMsg { Snapshot, Kicked }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }

@@ -5,6 +5,7 @@
 use crate::framing::FrameReader;
 use crate::internal_net::{decode_server_send, event_to_client_event_frame};
 use crate::transport::{Transport, TransportEvent};
+use protocol::{Kicked, KickedArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -129,6 +130,28 @@ pub fn drain_client_to_shard<T: Transport>(client: &mut T) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Encode un `ServerEnvelope{Kicked}` — envoyé à un client juste avant de le déconnecter
+/// (serveur plein, flood soutenu...), pour qu'il voie un motif plutôt qu'une coupure muette.
+pub fn encode_kicked(reason: &str) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let reason = b.create_string(reason);
+    let kicked = Kicked::create(
+        &mut b,
+        &KickedArgs {
+            reason: Some(reason),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::Kicked,
+            msg: Some(kicked.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
 /// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
 /// rejouer vers ce shard après une reconnexion. Le shard vient de perdre tout son état (nouveau
 /// `Server::new()` recréé côté Shard à chaque connexion acceptée, cf. `shard_main`) et ne connaît
@@ -197,11 +220,16 @@ pub async fn gateway_main(
     radius: crate::handoff::RadiusPolicy,
     mut store: crate::persistence::FileStore,
     spawn: [f32; 3],
+    max_players: u32,
 ) -> std::io::Result<()> {
     use crate::gateway_routing::{extract_join_name, extract_position};
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
     use crate::persistence::{resolve_spawn, PlayerRecord, PlayerStore};
+    use crate::rate_limit::{
+        check_rate_limit, RateDecision, RateLimitState, DEFAULT_KICK_AFTER_WINDOWS,
+        DEFAULT_LIMIT_PER_WINDOW,
+    };
     use crate::snapshot_merge::merge_snapshots;
     use crate::transport::{Transport, TransportEvent};
     use std::collections::HashMap;
@@ -221,6 +249,8 @@ pub async fn gateway_main(
     // position n'a encore été acceptée depuis le Join — sert de garde anti-triche).
     let mut last_pos_at: HashMap<u64, std::time::Instant> = HashMap::new();
     let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
+    // Fenêtre de rate-limit par client (audit prod 2026-07-03 §5.4).
+    let mut rate_states: HashMap<u64, RateLimitState> = HashMap::new();
 
     let sock: SocketAddr = listen_addr.parse().expect("adresse GNS invalide");
     let mut client =
@@ -275,12 +305,64 @@ pub async fn gateway_main(
             };
             let is_disconnect = matches!(ev, TransportEvent::Disconnected(_));
 
+            // Rate-limit : chaque message compte contre la fenêtre de CE client, avant tout
+            // autre traitement — sinon un flood de PositionUpdate amplifie gratuitement vers
+            // l'interne (locate() + écritures shards par message, audit prod 2026-07-03 §5.4).
+            if matches!(ev, TransportEvent::Message { .. }) {
+                let now = std::time::Instant::now();
+                let state = rate_states
+                    .entry(cid)
+                    .or_insert_with(|| RateLimitState::new(now));
+                match check_rate_limit(
+                    state,
+                    now,
+                    DEFAULT_LIMIT_PER_WINDOW,
+                    DEFAULT_KICK_AFTER_WINDOWS,
+                ) {
+                    RateDecision::Accept => {}
+                    RateDecision::Drop => {
+                        tracing::warn!(client = cid, "message ignoré (rate-limit)");
+                        continue;
+                    }
+                    RateDecision::Kick => {
+                        tracing::warn!(client = cid, "kick : flood soutenu (rate-limit)");
+                        client.send(cid, &encode_kicked("flood"));
+                        client.disconnect(cid);
+                        if let Some(name) = keys.remove(&cid) {
+                            if let Some(pos) = last_pos.get(&cid).copied() {
+                                store.save(
+                                    &name,
+                                    PlayerRecord {
+                                        last_position: pos,
+                                        residence: residence.get(&cid).copied().flatten(),
+                                    },
+                                );
+                            }
+                        }
+                        last_pos.remove(&cid);
+                        last_pos_at.remove(&cid);
+                        residence.remove(&cid);
+                        rate_states.remove(&cid);
+                        loader.forget(cid);
+                        latest.remove(&cid);
+                        continue;
+                    }
+                }
+            }
+
             // Décoder ce que porte un message client : Join → identité + résolution de spawn ;
             // PositionUpdate → placement (topologie + rang) et mémorisation de la dernière position.
             let mut placement = None;
             if let TransportEvent::Message { data, .. } = &ev {
                 if let Some(name) = extract_join_name(data) {
                     if !name.is_empty() {
+                        if !keys.contains_key(&cid) && keys.len() >= max_players as usize {
+                            tracing::warn!(client = cid, max_players, "kick : serveur plein");
+                            client.send(cid, &encode_kicked("serveur plein"));
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
                         let record = store.load(&name);
                         let (pos, source) = resolve_spawn(record.as_ref(), spawn);
                         tracing::info!(
@@ -297,7 +379,10 @@ pub async fn gateway_main(
                             (Some(prev), Some(at)) => crate::anticheat::is_plausible_move(
                                 prev,
                                 [x, y, z],
-                                now.duration_since(at),
+                                crate::anticheat::cap_elapsed(
+                                    now.duration_since(at),
+                                    crate::anticheat::MAX_ELAPSED_WINDOW,
+                                ),
                                 crate::anticheat::MAX_PLAYER_SPEED_MPS,
                             ),
                             // Pas encore de référence temporelle (1re position après Join) : accepté.
@@ -347,6 +432,7 @@ pub async fn gateway_main(
                 last_pos.remove(&cid);
                 last_pos_at.remove(&cid);
                 residence.remove(&cid);
+                rate_states.remove(&cid);
                 loader.forget(cid);
                 latest.remove(&cid);
             } else if let Some(per_shard) = latest.get_mut(&cid) {
@@ -430,6 +516,15 @@ mod tests {
     use crate::framing::FrameReader;
     use crate::internal_net::decode_client_event;
     use crate::transport::{InMemoryTransport, Transport, TransportEvent};
+
+    #[test]
+    fn encode_kicked_produces_a_server_envelope_carrying_the_reason() {
+        let payload = encode_kicked("serveur plein");
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&payload).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::Kicked);
+        let kicked = env.msg_as_kicked().unwrap();
+        assert_eq!(kicked.reason(), Some("serveur plein"));
+    }
 
     #[test]
     fn drains_client_events_into_shard_frames() {

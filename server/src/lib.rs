@@ -9,6 +9,7 @@ pub mod internal_net;
 pub mod manifest;
 pub mod metrics;
 pub mod persistence;
+pub mod rate_limit;
 pub mod server_loop;
 pub mod shard;
 pub mod snapshot_merge;
