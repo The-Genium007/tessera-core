@@ -6,6 +6,16 @@
 #
 # directory/ reste un outil CLI ponctuel (publish/verify/topology) — pas de service ici ;
 # invoqué à la demande : `docker run --rm --entrypoint tessera-directory <image> ...`.
+#
+# logging + mem_limit/cpus (chantier 4.5, audit 2026-07-03) : un Gateway verbeux ne doit pas
+# remplir le disque du VPS, et un shard qui fuit la mémoire ne doit pas affamer les autres
+# services du même hôte. Valeurs par défaut prudentes, ajustables par variable d'env sans
+# toucher ce fichier.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
 
 services:
   gateway:
@@ -15,6 +25,9 @@ services:
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
     command: ["tessera-gateway", "--manifest", "/etc/tessera/server.toml"]
     restart: unless-stopped
+    mem_limit: ${GATEWAY_MEM_LIMIT:-512m}
+    cpus: ${GATEWAY_CPUS:-1.0}
+    logging: *default-logging
     ports:
       - "27020:27020/udp"
       # Port 9100 (métriques Prometheus texte) volontairement NON publié : le pare-feu ufw du VPS
@@ -34,6 +47,9 @@ services:
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
     command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
     volumes:
       - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
     environment:
@@ -43,6 +59,9 @@ services:
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
     command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
     volumes:
       - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
     environment:

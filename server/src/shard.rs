@@ -30,6 +30,11 @@ pub async fn shard_main(addr: &str, aoi_radius: f32, metrics_addr: &str) -> std:
         let mut transport = InternalTransport::new();
         let mut buf = [0u8; 8192];
         let mut ticker = tokio::time::interval(TICK);
+        // Défaut tokio = Burst : un tick en retard déclenche une rafale de rattrapage — chaque
+        // tick de rattrapage ré-encode et renvoie un snapshot complet à chaque joueur, dépensant
+        // donc PLUS de CPU/réseau juste après un pic de charge. Skip saute les ticks manqués
+        // (le dernier état écrase les précédents, cf. audit prod 2026-07-03 §4.3/§C.2).
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
