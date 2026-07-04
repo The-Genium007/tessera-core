@@ -1,5 +1,6 @@
 mod derive;
 mod render;
+mod server_identity;
 mod signing;
 
 use clap::{Parser, Subcommand};
