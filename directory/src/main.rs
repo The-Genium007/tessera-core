@@ -158,6 +158,7 @@ struct RegisterPayload {
     id: String,
     name: String,
     public_key_b64: String,
+    metadata: derive::DirectoryEntry,
 }
 
 fn build_register_payload(
@@ -168,6 +169,7 @@ fn build_register_payload(
         id: manifest.identity.id.clone(),
         name: manifest.identity.name.clone(),
         public_key_b64,
+        metadata: derive_entry(manifest),
     }
 }
 
@@ -187,5 +189,26 @@ mod register_tests {
         assert_eq!(payload.id, manifest.identity.id);
         assert_eq!(payload.name, manifest.identity.name);
         assert_eq!(payload.public_key_b64, "fake-pubkey-b64");
+    }
+
+    #[test]
+    fn register_payload_carries_full_directory_entry_as_metadata() {
+        let manifest = sample_manifest();
+        let payload = build_register_payload(&manifest, "fake-pubkey-b64".to_string());
+        let json = serde_json::to_value(&payload).unwrap();
+        // Le metadata doit être l'entrée launcher camelCase, dérivée du manifeste.
+        assert_eq!(
+            json["metadata"]["address"],
+            manifest.runtime.gateway.advertise_addr
+        );
+        assert_eq!(
+            json["metadata"]["maxPlayers"],
+            manifest.identity.max_players
+        );
+        assert_eq!(
+            json["metadata"]["requiredModset"],
+            manifest.identity.required_modset
+        );
+        assert!(json["metadata"]["launchArgs"].is_array());
     }
 }
