@@ -1,6 +1,7 @@
 mod derive;
 mod render;
 mod server_identity;
+mod shard_map;
 mod signing;
 
 use clap::{Parser, Subcommand};
@@ -71,6 +72,12 @@ enum TopologyCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    Export {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -81,6 +88,7 @@ fn main() -> anyhow::Result<()> {
         Command::Topology { command } => match command {
             TopologyCommand::Check { manifest } => cmd_topology_check(&manifest),
             TopologyCommand::Render { manifest, out } => cmd_topology_render(&manifest, &out),
+            TopologyCommand::Export { manifest, out } => cmd_topology_export(&manifest, &out),
         },
         Command::Register {
             manifest,
@@ -157,6 +165,19 @@ fn cmd_topology_render(
     Ok(())
 }
 
+fn cmd_topology_export(
+    manifest_path: &std::path::Path,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let manifest = server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
+    let zones = server::manifest::flatten_topology(&manifest.runtime.topology)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let v = shard_map::shard_map_json(&manifest, &zones);
+    std::fs::write(out, serde_json::to_vec_pretty(&v)?)?;
+    println!("Carte des shards exportée dans {}", out.display());
+    Ok(())
+}
+
 fn cmd_register(
     manifest_path: &std::path::Path,
     platform_url: &str,
@@ -230,7 +251,10 @@ fn fetch_player_count(client: &reqwest::blocking::Client, metrics_url: &str) -> 
         }
     };
     if !resp.status().is_success() {
-        eprintln!("métriques refusées ({metrics_url}) : HTTP {}", resp.status());
+        eprintln!(
+            "métriques refusées ({metrics_url}) : HTTP {}",
+            resp.status()
+        );
         return 0;
     }
     let text = match resp.text() {
