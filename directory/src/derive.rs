@@ -1,6 +1,7 @@
 //! Dérive une entrée `servers.json` (schéma déjà consommé par le launcher) depuis `[identity]`
 //! du manifeste. `address`/`launchArgs` sont calculés depuis `advertise_addr`, jamais dupliqués
-//! à la main.
+//! à la main. `launchArgs` porte aussi `-skipStartScreen` (spec playtest-shards §#3) : argument
+//! de lancement du jeu, communautaire et documenté, qui saute la vidéo d'intro.
 
 use serde::Serialize;
 use server::manifest::Manifest;
@@ -53,6 +54,7 @@ pub fn derive_entry(m: &Manifest) -> DirectoryEntry {
         required_modset: m.identity.required_modset.clone(),
         voice_required: m.identity.voice_required,
         launch_args: vec![
+            "-skipStartScreen".to_string(),
             format!("--cyberverse-server-address={ip}"),
             format!("--cyberverse-server-port={port}"),
         ],
@@ -90,6 +92,7 @@ mod tests {
             "requiredModset": "0.1.0-dev10",
             "voiceRequired": false,
             "launchArgs": [
+                "-skipStartScreen",
                 "--cyberverse-server-address=51.38.189.234",
                 "--cyberverse-server-port=27020"
             ]

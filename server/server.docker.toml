@@ -27,7 +27,12 @@ active_preset = "2-shards"
 [[runtime.topology.splits]]
 id = "root"
 axis = "x"
-at = 1000.0
+# 2450 (pas 1000) : le spawn par défaut de shard-a est Watson (2387, -1295) — avec at=1000,
+# ce point tombait côté shard-b (x >= 1000), à ~1387 unités de la frontière, bien au-delà du
+# rayon de zone tampon (25-75) : le spawn était en fait mal rattaché à shard-a, et un playtest
+# n'aurait vu aucune frontière avant une longue marche. À 2450, Watson reste côté shard-a
+# (63 unités de marge, hors zone tampon de base) et une courte marche traverse la frontière.
+at = 2450.0
 left = "shard-a"
 right = "shard-b"
 
