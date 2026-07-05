@@ -40,22 +40,22 @@ public func Tessera_ApplyGangHostility(game: GameInstance, e: ref<DesossageEntry
   // (PreventionSystem.OnAttach, DesossageOrder.reds) — mélanger les deux périmètres prêterait à
   // confusion.
   let groups: array<TweakDBID>;
-  groups.PushBack(t"Attitudes.Group_Maelstrom");
-  groups.PushBack(t"Attitudes.Group_Maelstrom_OW");
-  groups.PushBack(t"Attitudes.Group_TygerClaws");
-  groups.PushBack(t"Attitudes.Group_TygerClaws_OW");
-  groups.PushBack(t"Attitudes.Group_Animals");
-  groups.PushBack(t"Attitudes.Group_Animals_OW");
-  groups.PushBack(t"Attitudes.Group_Scavenger");
-  groups.PushBack(t"Attitudes.Group_Scavenger_OW");
-  groups.PushBack(t"Attitudes.Group_Valentinos");
-  groups.PushBack(t"Attitudes.Group_Valentinos_OW");
-  groups.PushBack(t"Attitudes.Group_VoodooBoys");
-  groups.PushBack(t"Attitudes.Group_VoodooBoys_OW");
-  groups.PushBack(t"Attitudes.Group_6thStreet");
-  groups.PushBack(t"Attitudes.Group_6thStreet_OW");
-  groups.PushBack(t"Attitudes.Group_Aldecaldos");
-  groups.PushBack(t"Attitudes.Group_Aldecaldos_OW");
+  ArrayPush(groups,t"Attitudes.Group_Maelstrom");
+  ArrayPush(groups,t"Attitudes.Group_Maelstrom_OW");
+  ArrayPush(groups,t"Attitudes.Group_TygerClaws");
+  ArrayPush(groups,t"Attitudes.Group_TygerClaws_OW");
+  ArrayPush(groups,t"Attitudes.Group_Animals");
+  ArrayPush(groups,t"Attitudes.Group_Animals_OW");
+  ArrayPush(groups,t"Attitudes.Group_Scavenger");
+  ArrayPush(groups,t"Attitudes.Group_Scavenger_OW");
+  ArrayPush(groups,t"Attitudes.Group_Valentinos");
+  ArrayPush(groups,t"Attitudes.Group_Valentinos_OW");
+  ArrayPush(groups,t"Attitudes.Group_VoodooBoys");
+  ArrayPush(groups,t"Attitudes.Group_VoodooBoys_OW");
+  ArrayPush(groups,t"Attitudes.Group_6thStreet");
+  ArrayPush(groups,t"Attitudes.Group_6thStreet_OW");
+  ArrayPush(groups,t"Attitudes.Group_Aldecaldos");
+  ArrayPush(groups,t"Attitudes.Group_Aldecaldos_OW");
 
   let i = 0;
   while i < ArraySize(groups) {
@@ -63,4 +63,27 @@ public func Tessera_ApplyGangHostility(game: GameInstance, e: ref<DesossageEntry
     i += 1;
   }
   FTLog(s"[Tessera/Desossage] hostilité gangs → \(e.active)");
+}
+
+// Piste 1 (activée 2026-07-05 en complément de la relation de groupe ci-dessus) : la relation de
+// groupe seule s'est révélée insuffisante en jeu — confirmé par Lucas : rester dans la zone du
+// gang (ou l'avoir frappé une fois) finit par le repasser hostile malgré la relation neutre
+// (un autre chemin du jeu — stims/détection de menace — re-déclenche l'escalade indépendamment de
+// la relation de groupe de base). `TryChangingAttitudeToHostile` est l'entonnoir UNIQUE par lequel
+// passent tous ces chemins (confirmé par script décompilé + 14 sites d'appel vanilla vérifiés) :
+// bloquer ce point précis devrait couvrir tous les cas, pas seulement la relation de base.
+// PIN IN-GAME : @wrapMethod tenté en premier (standard, préserve le comportement vanilla via
+// wrappedMethod quand le levier est actif) même si les mods publiés de référence utilisaient
+// @replaceMethod pour cette fonction précise — à confirmer si `final static` bloque le wrap ; si
+// ça casse au compile, cf. alternative @replaceMethod plus haut (réimplémentation complète requise,
+// plus risqué, pas encore tentée).
+// CORRIGÉ (2026-07-05, dans la foulée du premier test) : lisait `DesossageConfig.Default()` direct
+// — bug confirmé en jeu (fonctionnait seulement après un cocher/décocher manuel, jamais à l'état
+// par défaut, cf. `DesossageSystem.GetLiveConfig`). Utilise maintenant l'état réellement vivant.
+@wrapMethod(AIActionHelper)
+public final static func TryChangingAttitudeToHostile(owner: ref<ScriptedPuppet>, target: ref<GameObject>) -> Bool {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).gangHostility.active && target.IsPlayer() {
+    return false;
+  }
+  return wrappedMethod(owner, target);
 }

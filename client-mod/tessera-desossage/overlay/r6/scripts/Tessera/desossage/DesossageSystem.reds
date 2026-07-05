@@ -24,6 +24,24 @@ public class DesossageSystem extends ScriptableSystem {
     return container.Get(n"Tessera.Desossage.DesossageSystem") as DesossageSystem;
   }
 
+  // CORRIGE UN BUG CONFIRMÉ EN JEU (2026-07-05) : plusieurs coupe-circuits @wrapMethod
+  // (worldInteractables, vendingDevices, police, ambientSecurity, vendors, gangHostility) lisaient
+  // `DesossageConfig.Default()` directement — qui reconstruit un OBJET NEUF avec les valeurs par
+  // défaut codées en dur à CHAQUE appel, jamais l'état réellement coché dans le panneau CET. Bug
+  // masqué jusqu'ici car les tests précédents comparaient surtout contre l'état par défaut
+  // (qui coïncide avec Default()). Révélé par `gangHostility` : fonctionnait seulement après un
+  // cocher/décocher manuel (qui, via Tessera_SetLever → Apply(), pousse un effet de bord réel côté
+  // AttitudeSystem — mais le wrapMethod lui-même ignorait toujours l'état affiché). Cette fonction
+  // lit l'état RÉELLEMENT vivant (`sys.GetConfig()`) quand le système est attaché, et ne retombe
+  // sur `Default()` que si `DesossageSystem` n'est pas encore attaché (tout début de boot).
+  public static func GetLiveConfig(game: GameInstance) -> ref<DesossageConfig> {
+    let sys = DesossageSystem.Get(game);
+    if IsDefined(sys) {
+      return sys.GetConfig();
+    }
+    return DesossageConfig.Default();
+  }
+
   // Applique tous les leviers selon la config.
   public func Apply(game: GameInstance) -> Void {
     FTLog(s"[Tessera/Desossage] application des leviers…");

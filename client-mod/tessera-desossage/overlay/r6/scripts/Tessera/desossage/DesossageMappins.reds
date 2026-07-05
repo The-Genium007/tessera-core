@@ -67,10 +67,12 @@ func Tessera_ClearMappinLayer(sys: ref<MappinSystem>, layer: gamemappinsMappinTa
 // PNJ vendeurs/donneurs de mission : masque le marqueur de rôle au rattachement du composant.
 // N'empêche PAS l'interaction/le dialogue (ça reste un vrai stub, cf. findings.md "vendors") —
 // couvre uniquement l'icône visuelle au-dessus de la tête.
+// CORRIGÉ (2026-07-05) : lisait `DesossageConfig.Default()` direct — bug confirmé en jeu, cf.
+// `DesossageSystem.GetLiveConfig`. Utilise maintenant l'état réellement vivant du panneau.
 @wrapMethod(GameplayRoleComponent)
 protected func OnGameAttach() -> Void {
   wrappedMethod();
-  if !DesossageConfig.Default().vendors.active {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).vendors.active {
     this.SetForceHidden(true);
     this.HideRoleMappins();
   }

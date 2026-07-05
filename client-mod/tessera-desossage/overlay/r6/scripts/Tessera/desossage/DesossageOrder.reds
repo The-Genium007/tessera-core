@@ -10,13 +10,17 @@ module Tessera.Desossage
 //
 // Remplacé par un levier corroboré par plusieurs mods publiés (Nexus "Disable Police System" #9263,
 // forums schaken-mods) : neutraliser `PreventionSystem.OnAttach()`, le point d'init de tout le
-// système (heat/spawns NCPD/MaxTac). Lu directement sur `DesossageConfig.Default()` (pas via
-// `DesossageSystem.Get()`) pour ne pas dépendre de l'ordre d'attache des ScriptableSystem —
-// `DesossageSystem` pourrait ne pas encore être attaché quand `PreventionSystem.OnAttach` tourne.
-// PIN IN-GAME : à reconfirmer sur le prochain build (log `[Tessera/Desossage]` + test tir/crime).
+// système (heat/spawns NCPD/MaxTac).
+// CORRIGÉ (2026-07-05) : lisait `DesossageConfig.Default()` direct — bug confirmé en jeu (toujours
+// les valeurs par défaut codées en dur, jamais l'état réellement coché dans le panneau CET, cf.
+// `DesossageSystem.GetLiveConfig`). La préoccupation d'origine (ne pas dépendre de l'ordre
+// d'attache des ScriptableSystem, `DesossageSystem` pouvant ne pas encore être attaché quand
+// `PreventionSystem.OnAttach` tourne) est gérée PAR `GetLiveConfig` lui-même : retombe sur
+// `Default()` si le système n'est pas encore attaché, lit l'état vivant sinon — le meilleur des
+// deux plutôt qu'un choix figé entre les deux.
 @wrapMethod(PreventionSystem)
 private func OnAttach() -> Void {
-  if !DesossageConfig.Default().police.active {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).police.active {
     FTLog(s"[Tessera/Desossage] police → PreventionSystem.OnAttach coupé (police.active=false)");
     return;
   }
@@ -45,9 +49,11 @@ public func Tessera_ApplyAmbientSecurity(game: GameInstance, e: ref<DesossageEnt
 // le quickhack "Overload" du jeu de base). À essayer en suivant sur un hook `GameAttached` si le
 // fix ci-dessous s'avère insuffisant en jeu.
 // PIN IN-GAME : à confirmer (le menu doit disparaître ; la tourelle peut encore réagir aux PNJ).
+// CORRIGÉ (2026-07-05) : lisait `DesossageConfig.Default()` direct — bug confirmé en jeu, cf.
+// `DesossageSystem.GetLiveConfig`. Utilise maintenant l'état réellement vivant du panneau.
 @wrapMethod(SecurityTurretControllerPS)
 protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
-  if !DesossageConfig.Default().ambientSecurity.active {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).ambientSecurity.active {
     return false;
   }
   return wrappedMethod(actions, context);

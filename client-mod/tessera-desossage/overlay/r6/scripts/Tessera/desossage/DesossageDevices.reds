@@ -74,7 +74,7 @@ public func Tessera_ApplyWorldDevices(game: GameInstance, vending: ref<Desossage
 // PIN IN-GAME : jamais testé — à confirmer (menu de hack absent sur un point d'accès ambiant).
 @wrapMethod(ScriptableDeviceComponentPS)
 protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
-  if !DesossageConfig.Default().worldInteractables.active {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).worldInteractables.active {
     return false;
   }
   return wrappedMethod(actions, context);
@@ -87,11 +87,11 @@ protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetAct
 // (out outActions:array<ref<DeviceAction>>, context:GetActionsContext)`) ; la méthode elle-même
 // (GetActions, pas GetQuickHackActions) et son rôle sont confirmés par le script décompilé
 // officiel (CDPR-Modding-Documentation/Cyberpunk-Scripts, vendingMachineController.script:108).
-// Lu via DesossageConfig.Default() direct (même raison que le hook police : pas de dépendance à
-// l'ordre d'attache des ScriptableSystem).
+// CORRIGÉ (2026-07-05) : lisait `DesossageConfig.Default()` direct — bug confirmé en jeu, cf.
+// `DesossageSystem.GetLiveConfig`. Utilise maintenant l'état réellement vivant du panneau.
 @wrapMethod(VendingMachineControllerPS)
 protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
-  if !DesossageConfig.Default().vendingDevices.active {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).vendingDevices.active {
     return false;
   }
   return wrappedMethod(actions, context);
