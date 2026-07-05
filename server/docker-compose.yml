@@ -23,6 +23,10 @@ services:
       context: ../..
       dockerfile: tessera-core/server/Dockerfile
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    # Si ce service utilise l'image GHCR pré-construite (plutôt que `build:` ci-dessus) : sans
+    # ça, un redeploy réutilise l'image locale en cache et ne re-tire pas un `:latest` plus
+    # récent (même symptôme vécu sur platform-api le 2026-07-05 : redeploys sans effet).
+    pull_policy: always
     command: ["tessera-gateway", "--manifest", "/etc/tessera/server.toml"]
     restart: unless-stopped
     mem_limit: ${GATEWAY_MEM_LIMIT:-512m}
@@ -47,6 +51,7 @@ services:
 
   shard-a:
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
     mem_limit: ${SHARD_MEM_LIMIT:-512m}
@@ -59,6 +64,7 @@ services:
 
   shard-b:
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
     mem_limit: ${SHARD_MEM_LIMIT:-512m}
@@ -71,6 +77,7 @@ services:
 
   heartbeat:
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
     entrypoint: ["tessera-directory"]
     command: ["heartbeat",
               "--manifest", "/etc/tessera/server.toml",
