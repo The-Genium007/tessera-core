@@ -16,7 +16,7 @@ TesseraDesossage.levers = {
   { key = "cyberpsychos", label = "Cyberpsychos", note = "Stub — absent du RTTI, aucun effet" },
   { key = "fastTravel", label = "Voyage rapide", note = "Réel — BOOT ONLY, recharge nécessaire" },
   { key = "vendingDevices", label = "Distributeurs", note = "Réel — BOOT ONLY, recharge nécessaire" },
-  { key = "worldInteractables", label = "Interactables monde", note = "Stub — hook AccessPointControllerPS cassé au compile, désactivé (2026-07-05)" },
+  { key = "worldInteractables", label = "Interactables monde", note = "Réel — confirmé en jeu 2026-07-05 (drop point), couvre aussi les points d'accès" },
   { key = "questTriggers", label = "Appels fixers", note = "Réel (partiel) — décoché = icône radio déverrouillée" },
   { key = "tutorials", label = "Tutoriels", note = "Stub — aucun effet" },
   { key = "mapMarkers", label = "Marqueurs carte", note = "Nouveau (2026-07-05, PIN IN-GAME) — décoché = nettoyage PONCTUEL (recocher/décocher pour relancer), pas de blocage persistant" },
