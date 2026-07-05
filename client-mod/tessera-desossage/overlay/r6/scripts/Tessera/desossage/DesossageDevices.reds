@@ -50,26 +50,26 @@ public func Tessera_ApplyWorldDevices(game: GameInstance, vending: ref<Desossage
     FTLog(s"[Tessera/Desossage] distributeurs (boissons/nourriture) → coupés (GetActions)");
   }
   if !inter.active {
-    // Couvert par le @wrapMethod(AccessPointControllerPS) GetActions ci-dessous — couvre les
-    // points d'accès/hackables ambiants. Les ripperdocs restent hors périmètre (UI de vente
-    // scénarisée, pas une PS de device — même famille de recherche que "vendors").
-    FTLog(s"[Tessera/Desossage] interactables monde (points d'accès) → gérés par hook AccessPointControllerPS.GetActions");
+    // Stub à nouveau (2026-07-05) — cf. note de désactivation ci-dessous.
+    FTLog(s"[Tessera/Desossage] (stub) interactables monde (points d'accès) → coupés");
   }
 }
 
-// Même pattern que VendingMachineControllerPS/SecurityTurretControllerPS (cf. DesossageOrder.reds) :
-// `GetActions` est déclarée sur `ScriptableDeviceComponentPS`, classe mère commune à toutes les PS
-// de devices. `AccessPointControllerPS` couvre les points d'accès/panneaux hackables ambiants —
-// confirmé présent dans le dump RTTI (WopsS/RED4ext.NativeDB, classes/AccessPointControllerPS.json).
-// Coupe le menu d'interaction/quickhack, pas la présence physique du device.
-// PIN IN-GAME : à confirmer (le menu de hack doit disparaître sur les points d'accès ambiants).
-@wrapMethod(AccessPointControllerPS)
-protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
-  if !DesossageConfig.Default().worldInteractables.active {
-    return false;
-  }
-  return wrappedMethod(actions, context);
-}
+// CASSÉ AU COMPILE (confirmé en jeu, 2026-07-05) : `@wrapMethod(AccessPointControllerPS)
+// GetActions(...)` échoue avec `[UNRESOLVED_METHOD] no method with this name exists on the
+// target type` (redscript_rCURRENT.log). Root cause identifiée via nativedb : contrairement à
+// `VendingMachineControllerPS`/`SecurityTurretControllerPS` (cf. DesossageOrder.reds), qui
+// déclarent chacune leur PROPRE override de `GetActions` (visible dans `search.py show
+// <Classe>`, sans --deep), `AccessPointControllerPS` n'a AUCUN override propre — `GetActions`
+// n'existe que sur `ScriptableDeviceComponentPS` (l'ancêtre commun), jamais réintroduit le long
+// de la chaîne AccessPointControllerPS → MasterControllerPS → ScriptableDeviceComponentPS.
+// `@wrapMethod` exige une méthode explicitement déclarée sur la classe ciblée, pas juste héritée
+// (la réflexion RTTI ne fait pas cette distinction, d'où l'erreur de conception initiale).
+// PISTE À TESTER (pas encore fait) : wrapper `ScriptableDeviceComponentPS.GetActions`
+// directement — couvrirait AccessPointControllerPS (et toute autre PS de device qui n'override
+// pas GetActions elle-même) sans toucher aux classes qui ont leur propre override (répartition
+// par dispatch virtuel). À valider en jeu via hot-reload Red Hot Tools avant de relancer le jeu
+// à chaque essai.
 
 // Coupe-circuit partagé pour les distributeurs boissons/nourriture (toutes instances, un seul
 // hook). Signature moderne vérifiée contre un mod publié réel qui wrap la même classe PS

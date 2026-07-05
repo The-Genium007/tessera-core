@@ -30,9 +30,14 @@ public func Tessera_ApplyPedestrians(game: GameInstance, e: ref<DesossageEntry>)
 // `populationPopulationSpawnParameter` qui gravitent autour sont de purs conteneurs de données
 // (zéro méthode), cohérent avec un système consommé en interne par CommunitySystem plutôt qu'une
 // API scriptable parallèle. Ça renforce nettement l'hypothèse que `ChangeDensityModifier` pilote
-// aussi le trafic, sans qu'on ait trouvé de setter dédié séparé pour les véhicules. TEST À FAIRE
-// EN JEU (le seul qui manque) : couper `pedestrians` seul, observer si le trafic véhicules baisse
-// aussi — si oui, ce stub `traffic` devient un doublon à retirer plutôt qu'à implémenter.
+// aussi le trafic, sans qu'on ait trouvé de setter dédié séparé pour les véhicules.
+//
+// CONFIRMÉ EN JEU (2026-07-05, cf. tools/nativedb/findings.md) : comparaison avant/après au même
+// endroit — `pedestrians` décoché = 0 véhicule sur la rue ; `pedestrians` coché (rien d'autre
+// changé) = plusieurs véhicules apparaissent. `ChangeDensityModifier` pilote donc bien les deux.
+// Ce stub est un DOUBLON, pas un système à implémenter — candidat à retirer (lever + case UI dans
+// TesseraDesossage/init.lua) dans un prochain nettoyage, laissé en l'état pour ne pas changer le
+// schéma DesossageConfig pendant la session de test.
 public func Tessera_ApplyTraffic(game: GameInstance, e: ref<DesossageEntry>) -> Void {
   let factor: Float = 0.0;
   if e.active { factor = e.density; }

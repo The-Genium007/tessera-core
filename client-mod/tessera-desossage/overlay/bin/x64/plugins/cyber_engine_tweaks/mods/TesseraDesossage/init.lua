@@ -6,7 +6,7 @@ TesseraDesossage = TesseraDesossage or {}
 
 TesseraDesossage.levers = {
   { key = "pedestrians", label = "Piétons", note = "Réel — réagit en direct" },
-  { key = "traffic", label = "Trafic véhicules", note = "Stub — aucun effet" },
+  { key = "traffic", label = "Trafic véhicules", note = "Stub — doublon confirmé de Piétons (2026-07-05), candidat à retirer" },
   { key = "vendors", label = "Vendeurs", note = "Stub — aucun effet" },
   { key = "transit", label = "Transit (métro)", note = "Stub — aucun effet" },
   { key = "police", label = "Police", note = "Réel — BOOT ONLY, recharge nécessaire" },
@@ -16,7 +16,7 @@ TesseraDesossage.levers = {
   { key = "cyberpsychos", label = "Cyberpsychos", note = "Stub — absent du RTTI, aucun effet" },
   { key = "fastTravel", label = "Voyage rapide", note = "Réel — BOOT ONLY, recharge nécessaire" },
   { key = "vendingDevices", label = "Distributeurs", note = "Réel — BOOT ONLY, recharge nécessaire" },
-  { key = "worldInteractables", label = "Interactables monde", note = "Réel (points d'accès) — probable BOOT ONLY, à confirmer" },
+  { key = "worldInteractables", label = "Interactables monde", note = "Stub — hook AccessPointControllerPS cassé au compile, désactivé (2026-07-05)" },
   { key = "questTriggers", label = "Appels fixers", note = "Réel (partiel) — décoché = icône radio déverrouillée" },
   { key = "tutorials", label = "Tutoriels", note = "Stub — aucun effet" },
 }
