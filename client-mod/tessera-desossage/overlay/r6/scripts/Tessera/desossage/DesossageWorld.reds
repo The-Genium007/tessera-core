@@ -12,3 +12,17 @@ module Tessera.Desossage
 public func Tessera_ApplyDayNightScale(game: GameInstance, scale: Float) -> Void {
   FTLog(s"[Tessera/Desossage] (stub) cycle jour/nuit → échelle \(scale)");
 }
+
+// Saut direct à une heure précise — `gameTimeSystem.SetGameTimeByHMS(h, m, s, reason)`, confirmé
+// par le script décompilé officiel (CDPR-Modding-Documentation/Cyberpunk-Scripts,
+// scripts/core/systems/timeSystem.script) ET plusieurs mods publiés réels qui l'appellent
+// (CyanideX/NovaCityTools, MaximiliumM/appearancemenumod, Avi6481/EasyTrainers — tous via
+// `Game.GetTimeSystem():SetGameTimeByHMS(...)`). Contrairement à MappinSystem, `gameTimeSystem`
+// GARDE son nom RTTI complet côté redscript (pas de préfixe à retirer ici).
+// N'affecte QUE l'horloge/l'éclairage — pas de ralenti joueur/combat, contrairement à
+// SetTimeDilation (raison pour laquelle dayNightCycleScale, lui, reste un stub).
+// PIN IN-GAME : jamais testé sur cette machine avant ce build.
+public func Tessera_DoJumpToTime(game: GameInstance, hour: Int32, minute: Int32) -> Void {
+  GameInstance.GetTimeSystem(game).SetGameTimeByHMS(hour, minute, 0, n"tessera_desossage");
+  FTLog(s"[Tessera/Desossage] heure → \(hour)h\(minute)");
+}

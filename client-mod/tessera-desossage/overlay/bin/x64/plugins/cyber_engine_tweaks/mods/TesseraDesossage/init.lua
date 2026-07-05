@@ -55,6 +55,18 @@ function TesseraDesossage:RenderWorld()
   end
   ImGui.SameLine()
   ImGui.TextDisabled("(1.0 normal, 0.0 figé, stub — aucun effet confirmé)")
+
+  -- Saut direct à une heure précise (Tessera_JumpToTime, DesossageConsole.reds) — distinct de
+  -- l'échelle ci-dessus, jamais testé avant ce build (2026-07-05, PIN IN-GAME).
+  if ImGui.Button("Midi (12h00)") then
+    Game.GetPlayer():Tessera_JumpToTime(12, 0)
+  end
+  ImGui.SameLine()
+  if ImGui.Button("Minuit (00h00)") then
+    Game.GetPlayer():Tessera_JumpToTime(0, 0)
+  end
+  ImGui.SameLine()
+  ImGui.TextDisabled("(saut direct, n'affecte pas le joueur/combat — PIN IN-GAME)")
 end
 
 local isOverlayVisible = false

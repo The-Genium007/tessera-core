@@ -59,3 +59,11 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
   FTLog(s"[Tessera/Desossage] SetLever \(name) → active=\(active) density=\(density)");
   sys.Apply(this.GetGame());
 }
+
+// Saut direct à une heure précise (bouton panneau : Midi/Minuit) — distinct de
+// dayNightCycleScale (qui reste un stub, cf. DesossageWorld.reds). Ne touche ni au joueur ni au
+// combat, contrairement à SetTimeDilation. Corps réel dans Tessera_JumpToTime (DesossageWorld.reds).
+@addMethod(PlayerPuppet)
+public func Tessera_JumpToTime(hour: Int32, minute: Int32) -> Void {
+  Tessera_DoJumpToTime(this.GetGame(), hour, minute);
+}
