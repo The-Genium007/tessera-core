@@ -216,6 +216,41 @@ fn heartbeat_message(id: &str, player_count: i32, timestamp_rfc3339: &str) -> St
     format!("{id}|{player_count}|{timestamp_rfc3339}")
 }
 
+/// Récupère le nombre de joueurs depuis l'endpoint `/metrics` du Gateway.
+/// En cas d'échec (requête injoignable, HTTP non-2xx, corps illisible ou gauge
+/// absente/invalide), journalise la cause sur stderr et retombe sur 0 — le
+/// heartbeat continue d'être envoyé, mais l'opérateur voit que la valeur est
+/// dégradée plutôt qu'un simple "0 joueur" silencieux.
+fn fetch_player_count(client: &reqwest::blocking::Client, metrics_url: &str) -> i32 {
+    let resp = match client.get(metrics_url).send() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("métriques injoignables ({metrics_url}) : {e}");
+            return 0;
+        }
+    };
+    if !resp.status().is_success() {
+        eprintln!("métriques refusées ({metrics_url}) : HTTP {}", resp.status());
+        return 0;
+    }
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("corps des métriques illisible ({metrics_url}) : {e}");
+            return 0;
+        }
+    };
+    match parse_players_metric(&text) {
+        Some(n) => n,
+        None => {
+            eprintln!(
+                "gauge tessera_players absente ou invalide dans les métriques ({metrics_url})"
+            );
+            0
+        }
+    }
+}
+
 fn cmd_heartbeat(
     manifest_path: &std::path::Path,
     platform_url: &str,
@@ -242,13 +277,7 @@ fn cmd_heartbeat(
     println!("Serveur '{id}' enregistré auprès de {platform_url} — heartbeat toutes les {interval_secs}s.");
 
     loop {
-        let players = client
-            .get(metrics_url)
-            .send()
-            .ok()
-            .and_then(|r| r.text().ok())
-            .and_then(|t| parse_players_metric(&t))
-            .unwrap_or(0);
+        let players = fetch_player_count(&client, metrics_url);
         let ts = chrono::Utc::now().to_rfc3339();
         let sig = signing::sign_detached_b64(&key, heartbeat_message(&id, players, &ts).as_bytes());
         let sent = client
