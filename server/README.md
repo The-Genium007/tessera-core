@@ -80,3 +80,25 @@ complet, et les doc-comments de `src/bin/shard.rs` / `src/bin/gateway.rs` pour l
 - Protocole : FlatBuffers (voir `protocol/`). Contrat client : `client-mod/INTEGRATION-server-contract.md`.
 - Build GNS : cmake + protobuf 3.21 + openssl + flatc 25.12.19 (voir `Dockerfile` et ADR 0003).
 - Sans la feature `gns`, `cargo build -p server` tourne « à vide » (pas de réseau) — utile pour les tests.
+
+## Journal de session (playtest)
+
+Le Gateway écrit un journal JSONL des événements de session (connexions, handoffs, zones
+tampons, stalls) — spec `docs/superpowers/specs/2026-07-05-playtest-shards-design.md` §#4.
+
+- `TESSERA_SESSION_LOG_PATH` (défaut `session.jsonl`) — fichier JSONL, une ligne par événement
+  (`{"ts_ms":…,"event":"handoff","client":…,"from":…,"to":…,…}`).
+- `TESSERA_GATEWAY_SESSIONLOG_ADDR` (défaut `127.0.0.1:9102`) — endpoint HTTP qui sert le
+  fichier brut. Comme 9100, **non publié** hors du réseau Docker.
+
+Récupérer le rapport après une session (depuis le VPS) :
+
+    docker compose cp gateway:/data/session.jsonl ./rapport-session-$(date +%Y%m%d).jsonl
+
+## Présence serveur (registre Platform API)
+
+Le service `heartbeat` du compose (`tessera-directory heartbeat`) enregistre le serveur puis
+bat toutes les 30 s vers `PLATFORM_URL` (défaut `https://platform.tesserasynth.net`). La clé
+d'identité Ed25519 est créée au premier lancement dans le volume (`/data/server_identity.b64`)
+— la sauvegarder : c'est elle qui prouve l'identité du serveur auprès du registre. Sans
+heartbeat depuis 90 s, le serveur disparaît de la liste publique (`GET /v1/servers`).
