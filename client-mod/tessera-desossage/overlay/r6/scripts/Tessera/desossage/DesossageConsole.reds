@@ -48,6 +48,7 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
   else if StrCmp(name, "worldInteractables") == 0 { e = c.worldInteractables; }
   else if StrCmp(name, "questTriggers") == 0 { e = c.questTriggers; }
   else if StrCmp(name, "tutorials") == 0 { e = c.tutorials; }
+  else if StrCmp(name, "mapMarkers") == 0 { e = c.mapMarkers; }
   else {
     FTLog(s"[Tessera/Desossage] SetLever: nom de levier inconnu \"\(name)\"");
     return;

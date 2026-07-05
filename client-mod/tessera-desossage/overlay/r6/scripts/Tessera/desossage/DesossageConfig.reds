@@ -42,6 +42,8 @@ public class DesossageConfig {
   public let tutorials: ref<DesossageEntry>;
   // F. Monde (gardé, réglable) — 1.0 normal ; 2.0 = jour/nuit 2x plus long ; 0.0 = figé
   public let dayNightCycleScale: Float;
+  // G. Marqueurs carte/minimap + icônes de rôle PNJ (vendeurs, donneurs de mission)
+  public let mapMarkers: ref<DesossageEntry>;
 
   // Défaut : monde vide (tout coupé). Chaque entrée est une instance distincte
   // (pour pouvoir en rallumer une sans toucher aux autres).
@@ -68,6 +70,8 @@ public class DesossageConfig {
     c.tutorials = DesossageEntry.New(false, 0.0);
     // F.
     c.dayNightCycleScale = 1.0;
+    // G.
+    c.mapMarkers = DesossageEntry.New(false, 0.0);
     return c;
   }
 }

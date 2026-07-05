@@ -32,6 +32,7 @@ public class DesossageSystem extends ScriptableSystem {
     this.ApplyDevices(game);
     this.ApplyEvents(game);
     this.ApplyWorld(game);
+    this.ApplyMappins(game);
     FTLog(s"[Tessera/Desossage] leviers appliqués.");
   }
 
@@ -67,6 +68,10 @@ public class DesossageSystem extends ScriptableSystem {
 
   public func ApplyWorld(game: GameInstance) -> Void {
     Tessera_ApplyDayNightScale(game, this.m_config.dayNightCycleScale);
+  }
+
+  public func ApplyMappins(game: GameInstance) -> Void {
+    Tessera_ApplyMapMarkers(game, this.m_config.mapMarkers);
   }
 }
 

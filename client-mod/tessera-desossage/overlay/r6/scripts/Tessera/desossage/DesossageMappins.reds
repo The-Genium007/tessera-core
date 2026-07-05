@@ -1,0 +1,71 @@
+module Tessera.Desossage
+
+// Marqueurs carte/minimap (quêtes, vendeurs, POI, voyage rapide) + rôle PNJ (icône au-dessus de
+// la tête — vendeur, donneur de mission…). Deux mécanismes RTTI distincts pour un même symptôme
+// visuel côté joueur :
+// - `MappinSystem` : les marqueurs globaux (monde/minimap/carte). Noms confirmés via le script
+//   décompilé officiel (CDPR-Modding-Documentation/Cyberpunk-Scripts,
+//   scripts/core/systems/mappinSystem.script) — redscript expose la classe/struct/ID sous un nom
+//   court sans préfixe : `MappinSystem`, `MappinData`, `MappinEntry`, `NewMappinID`, `GameObject`
+//   (au lieu des noms bruts du dump RTTI `gamemappinsMappinSystem`/`gamemappinsMappinEntry`/
+//   `gameNewMappinID`/`gameObject`), contrairement à l'enum `gamemappinsMappinTargetType` qui,
+//   elle, garde son nom RTTI complet — CASSÉ deux fois de suite avant de trouver le bon nom
+//   (2026-07-05).
+// - CASSÉ, RETIRÉ (2026-07-05) : `RegisterMappin`/`RegisterMappinWithObject` en `@wrapMethod` —
+//   erreur `this signature does not match any existing method` malgré des types individuellement
+//   valides (MappinData/NewMappinID/GameObject tous acceptés isolément). Cause exacte non
+//   identifiée (visibilité ? params optionnels de RegisterMappinWithObject changés en v2.31 ?) —
+//   pas re-tenté à l'aveugle après deux échecs de suite sur ce fichier. PISTE POUR PLUS TARD :
+//   chercher un mod publié récent qui wrap concrètement l'une de ces deux méthodes (pas juste qui
+//   les appelle, comme `tiltedphoques/CyberpunkMP` ou le sample `limitedFastTravel.reds`) pour
+//   copier une signature confirmée compilable.
+// - `GameplayRoleComponent` : composant attaché aux PNJ/devices avec un "rôle" gameplay ; porte le
+//   marqueur au-dessus de la tête. `OnGameAttach()` confirmé déclaré directement dessus (RTTI,
+//   `search.py show GameplayRoleComponent` sans --deep) — n'a jamais été signalé en erreur sur 2
+//   tentatives de compilation, mais reste PIN IN-GAME côté comportement (jamais vu tourner).
+//   PIN IN-GAME (plus incertain) : `EGameplayRole` n'a pas de valeur "Vendor"/"QuestGiver"
+//   explicite dans le dump RTTI (juste des rôles génériques type ServicePoint/StoreItems/NPC/
+//   GenericRole) — le hook masque donc TOUS les rôles sans distinction pour l'instant. À affiner
+//   si ça s'avère trop large une fois testé en jeu.
+//
+// PIN IN-GAME : rien de ce fichier n'a encore tourné en jeu — à confirmer au premier chargement
+// (nettoyage des marqueurs existants) et au premier PNJ avec rôle (GameplayRoleComponent).
+
+public func Tessera_ApplyMapMarkers(game: GameInstance, e: ref<DesossageEntry>) -> Void {
+  if e.active {
+    FTLog(s"[Tessera/Desossage] marqueurs carte → normaux");
+    return;
+  }
+  // Nettoyage ponctuel des marqueurs déjà enregistrés au moment de l'appel — PAS persistant (le
+  // hook RegisterMappin qui aurait bloqué les nouveaux a été retiré, cf. note plus haut) : les
+  // marqueurs futurs (prochaine quête, nouveau vendeur découvert) réapparaîtront tant que ce
+  // levier n'est pas ré-appliqué. Suffisant pour "nettoyer maintenant", pas pour "jamais de
+  // marqueur".
+  let sys = GameInstance.GetMappinSystem(game);
+  Tessera_ClearMappinLayer(sys, gamemappinsMappinTargetType.World);
+  Tessera_ClearMappinLayer(sys, gamemappinsMappinTargetType.Minimap);
+  Tessera_ClearMappinLayer(sys, gamemappinsMappinTargetType.Map);
+  FTLog(s"[Tessera/Desossage] marqueurs carte → nettoyés (world+minimap+map, ponctuel)");
+}
+
+func Tessera_ClearMappinLayer(sys: ref<MappinSystem>, layer: gamemappinsMappinTargetType) -> Void {
+  let entries: array<MappinEntry>;
+  sys.GetMappinEntries(layer, entries);
+  let i = 0;
+  while i < ArraySize(entries) {
+    sys.UnregisterMappin(entries[i].id);
+    i += 1;
+  }
+}
+
+// PNJ vendeurs/donneurs de mission : masque le marqueur de rôle au rattachement du composant.
+// N'empêche PAS l'interaction/le dialogue (ça reste un vrai stub, cf. findings.md "vendors") —
+// couvre uniquement l'icône visuelle au-dessus de la tête.
+@wrapMethod(GameplayRoleComponent)
+protected func OnGameAttach() -> Void {
+  wrappedMethod();
+  if !DesossageConfig.Default().vendors.active {
+    this.SetForceHidden(true);
+    this.HideRoleMappins();
+  }
+}

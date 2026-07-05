@@ -7,7 +7,7 @@ TesseraDesossage = TesseraDesossage or {}
 TesseraDesossage.levers = {
   { key = "pedestrians", label = "Piétons", note = "Réel — réagit en direct" },
   { key = "traffic", label = "Trafic véhicules", note = "Stub — doublon confirmé de Piétons (2026-07-05), candidat à retirer" },
-  { key = "vendors", label = "Vendeurs", note = "Stub — aucun effet" },
+  { key = "vendors", label = "Vendeurs", note = "Partiel (2026-07-05, PIN IN-GAME) — masque l'icône de rôle PNJ (GameplayRoleComponent), pas l'interaction" },
   { key = "transit", label = "Transit (métro)", note = "Stub — aucun effet" },
   { key = "police", label = "Police", note = "Réel — BOOT ONLY, recharge nécessaire" },
   { key = "ambientSecurity", label = "Sécurité ambiante", note = "Réel (menu tourelles) — probable BOOT ONLY, à confirmer" },
@@ -19,6 +19,7 @@ TesseraDesossage.levers = {
   { key = "worldInteractables", label = "Interactables monde", note = "Stub — hook AccessPointControllerPS cassé au compile, désactivé (2026-07-05)" },
   { key = "questTriggers", label = "Appels fixers", note = "Réel (partiel) — décoché = icône radio déverrouillée" },
   { key = "tutorials", label = "Tutoriels", note = "Stub — aucun effet" },
+  { key = "mapMarkers", label = "Marqueurs carte", note = "Nouveau (2026-07-05, PIN IN-GAME) — décoché = nettoyage PONCTUEL (recocher/décocher pour relancer), pas de blocage persistant" },
 }
 
 TesseraDesossage.leverState = TesseraDesossage.leverState or {}
