@@ -272,6 +272,30 @@ pub async fn gateway_main(
         });
     }
 
+    // Journal de session (spec playtest-shards §#4) : vérité autoritaire des handoffs/stalls.
+    let session_log_path =
+        std::env::var("TESSERA_SESSION_LOG_PATH").unwrap_or_else(|_| "session.jsonl".to_string());
+    let mut slog =
+        match crate::session_log::SessionLog::open(std::path::Path::new(&session_log_path)) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                tracing::warn!("journal de session indisponible ({session_log_path}): {e}");
+                None
+            }
+        };
+    {
+        let addr = std::env::var("TESSERA_GATEWAY_SESSIONLOG_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:9102".to_string());
+        let path = std::path::PathBuf::from(session_log_path.clone());
+        tokio::spawn(async move {
+            if let Err(e) = crate::session_log::serve_file(&addr, path).await {
+                tracing::warn!("endpoint journal de session indisponible ({addr}): {e}");
+            }
+        });
+    }
+    // Dernier placement connu par client — pour détecter handoffs et zones tampons.
+    let mut prev_placements: HashMap<u64, crate::handoff::Placement> = HashMap::new();
+
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
     // Cf. shard.rs : Skip plutôt que le Burst par défaut — sauter un tick manqué au lieu de
     // rattraper en rafale, pour ne pas dépenser plus de CPU/réseau juste après un pic de charge.
@@ -298,12 +322,25 @@ pub async fn gateway_main(
                 return Ok(());
             }
         }
+        let iter_start = std::time::Instant::now();
         for ev in client.poll() {
             let cid = match &ev {
                 TransportEvent::Connected(id) | TransportEvent::Disconnected(id) => *id,
                 TransportEvent::Message { from, .. } => *from,
             };
             let is_disconnect = matches!(ev, TransportEvent::Disconnected(_));
+
+            if let Some(sl) = slog.as_mut() {
+                match &ev {
+                    TransportEvent::Connected(id) => {
+                        sl.write(&crate::session_log::SessionEvent::Connect { client: *id })
+                    }
+                    TransportEvent::Disconnected(id) => {
+                        sl.write(&crate::session_log::SessionEvent::Disconnect { client: *id })
+                    }
+                    TransportEvent::Message { .. } => {}
+                }
+            }
 
             // Rate-limit : chaque message compte contre la fenêtre de CE client, avant tout
             // autre traitement — sinon un flood de PositionUpdate amplifie gratuitement vers
@@ -345,6 +382,7 @@ pub async fn gateway_main(
                         rate_states.remove(&cid);
                         loader.forget(cid);
                         latest.remove(&cid);
+                        prev_placements.remove(&cid);
                         continue;
                     }
                 }
@@ -370,6 +408,12 @@ pub async fn gateway_main(
                         );
                         residence.insert(cid, record.and_then(|r| r.residence));
                         last_pos.insert(cid, pos); // départ tant qu'aucune position réelle
+                        if let Some(sl) = slog.as_mut() {
+                            sl.write(&crate::session_log::SessionEvent::Join {
+                                client: cid,
+                                name: name.clone(),
+                            });
+                        }
                         keys.insert(cid, name);
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
@@ -396,6 +440,30 @@ pub async fn gateway_main(
                     last_pos_at.insert(cid, now);
                     let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
                     placement = Some(topology.locate(x, y, r));
+                    if let (Some(sl), Some(next)) = (slog.as_mut(), placement.as_ref()) {
+                        for c in crate::session_log::diff_placement(prev_placements.get(&cid), next)
+                        {
+                            use crate::session_log::{PlacementChange, SessionEvent};
+                            let ev = match c {
+                                PlacementChange::Handoff { from, to } => SessionEvent::Handoff {
+                                    client: cid,
+                                    from,
+                                    to,
+                                    x,
+                                    y,
+                                    z,
+                                },
+                                PlacementChange::BufferEnter { shard } => {
+                                    SessionEvent::BufferEnter { client: cid, shard }
+                                }
+                                PlacementChange::BufferExit { shard } => {
+                                    SessionEvent::BufferExit { client: cid, shard }
+                                }
+                            };
+                            sl.write(&ev);
+                        }
+                        prev_placements.insert(cid, next.clone());
+                    }
                 }
             }
 
@@ -435,6 +503,7 @@ pub async fn gateway_main(
                 rate_states.remove(&cid);
                 loader.forget(cid);
                 latest.remove(&cid);
+                prev_placements.remove(&cid);
             } else if let Some(per_shard) = latest.get_mut(&cid) {
                 // Élaguer les snapshots des shards qui ne sont plus chargés pour ce client.
                 let loaded = loader.loaded_shards(cid);
@@ -460,6 +529,17 @@ pub async fn gateway_main(
         if last_autosave.elapsed() >= autosave_interval {
             save_all_known(&mut store, &keys, &last_pos, &residence);
             last_autosave = std::time::Instant::now();
+        }
+
+        // Stall : une itération complète (poll + routage + merge + envois) au-delà de 100 ms
+        // (2× le budget de tick 50 ms) mérite une trace — c'est le « gel » vécu par les joueurs.
+        let iter_micros = iter_start.elapsed().as_micros() as u64;
+        if iter_micros > 100_000 {
+            if let Some(sl) = slog.as_mut() {
+                sl.write(&crate::session_log::SessionEvent::TickStall {
+                    micros: iter_micros,
+                });
+            }
         }
     }
 }

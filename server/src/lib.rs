@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod persistence;
 pub mod rate_limit;
 pub mod server_loop;
+pub mod session_log;
 pub mod shard;
 pub mod snapshot_merge;
 pub mod transport;
