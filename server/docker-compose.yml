@@ -39,6 +39,8 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       TESSERA_GATEWAY_METRICS_ADDR: "0.0.0.0:9100"
+      TESSERA_SESSION_LOG_PATH: "/data/session.jsonl"
+      TESSERA_GATEWAY_SESSIONLOG_ADDR: "0.0.0.0:9102"
     depends_on:
       - shard-a
       - shard-b
@@ -66,6 +68,24 @@ services:
       - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
     environment:
       RUST_LOG: ${RUST_LOG:-info}
+
+  heartbeat:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    entrypoint: ["tessera-directory"]
+    command: ["heartbeat",
+              "--manifest", "/etc/tessera/server.toml",
+              "--platform-url", "${PLATFORM_URL:-https://platform.tesserasynth.net}",
+              "--identity-path", "/data/server_identity.b64",
+              "--metrics-url", "http://gateway:9100"]
+    restart: unless-stopped
+    mem_limit: ${HEARTBEAT_MEM_LIMIT:-64m}
+    cpus: ${HEARTBEAT_CPUS:-0.2}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+      - tessera-players:/data
+    depends_on:
+      - gateway
 
 volumes:
   tessera-players:
