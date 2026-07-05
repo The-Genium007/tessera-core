@@ -41,6 +41,22 @@ enum Command {
         #[arg(long = "identity-path")]
         identity_path: PathBuf,
     },
+    Heartbeat {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long = "platform-url")]
+        platform_url: String,
+        #[arg(long = "identity-path")]
+        identity_path: PathBuf,
+        /// Endpoint métriques Prometheus du Gateway (fournit tessera_players).
+        #[arg(long = "metrics-url", default_value = "http://127.0.0.1:9100")]
+        metrics_url: String,
+        #[arg(long = "interval-secs", default_value_t = 30)]
+        interval_secs: u64,
+        /// Un seul battement puis sortie (tests/vérification manuelle).
+        #[arg(long, default_value_t = false)]
+        once: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -71,6 +87,21 @@ fn main() -> anyhow::Result<()> {
             platform_url,
             identity_path,
         } => cmd_register(&manifest, &platform_url, &identity_path),
+        Command::Heartbeat {
+            manifest,
+            platform_url,
+            identity_path,
+            metrics_url,
+            interval_secs,
+            once,
+        } => cmd_heartbeat(
+            &manifest,
+            &platform_url,
+            &identity_path,
+            &metrics_url,
+            interval_secs,
+            once,
+        ),
     }
 }
 
@@ -173,6 +204,72 @@ fn build_register_payload(
     }
 }
 
+/// Extrait la gauge `tessera_players` du texte Prometheus rendu par server::metrics.
+fn parse_players_metric(prometheus_text: &str) -> Option<i32> {
+    prometheus_text
+        .lines()
+        .find_map(|l| l.strip_prefix("tessera_players ")?.trim().parse().ok())
+}
+
+/// Le message signé du heartbeat — format FIGÉ, dupliqué de platform-api/src/routes.rs.
+fn heartbeat_message(id: &str, player_count: i32, timestamp_rfc3339: &str) -> String {
+    format!("{id}|{player_count}|{timestamp_rfc3339}")
+}
+
+fn cmd_heartbeat(
+    manifest_path: &std::path::Path,
+    platform_url: &str,
+    identity_path: &std::path::Path,
+    metrics_url: &str,
+    interval_secs: u64,
+    once: bool,
+) -> anyhow::Result<()> {
+    let manifest = server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
+    let key = server_identity::load_or_create(identity_path).map_err(|e| anyhow::anyhow!(e))?;
+    let id = manifest.identity.id.clone();
+    let client = reqwest::blocking::Client::new();
+
+    // Register d'abord (upsert idempotent) : le serveur s'annonce dès son lancement.
+    let public_key_b64 = signing::public_b64(&key);
+    let payload = build_register_payload(&manifest, public_key_b64);
+    let resp = client
+        .post(format!("{platform_url}/v1/servers/register"))
+        .json(&payload)
+        .send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("échec d'enregistrement : HTTP {}", resp.status());
+    }
+    println!("Serveur '{id}' enregistré auprès de {platform_url} — heartbeat toutes les {interval_secs}s.");
+
+    loop {
+        let players = client
+            .get(metrics_url)
+            .send()
+            .ok()
+            .and_then(|r| r.text().ok())
+            .and_then(|t| parse_players_metric(&t))
+            .unwrap_or(0);
+        let ts = chrono::Utc::now().to_rfc3339();
+        let sig = signing::sign_detached_b64(&key, heartbeat_message(&id, players, &ts).as_bytes());
+        let sent = client
+            .post(format!("{platform_url}/v1/heartbeat"))
+            .json(&serde_json::json!({
+                "id": id, "player_count": players, "timestamp": ts, "signature_b64": sig
+            }))
+            .send();
+        match sent {
+            Ok(r) if r.status().is_success() => println!("heartbeat ok · players={players}"),
+            Ok(r) => eprintln!("heartbeat refusé : HTTP {}", r.status()),
+            Err(e) => eprintln!("heartbeat injoignable : {e}"),
+        }
+        if once {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod register_tests {
     use super::*;
@@ -210,5 +307,34 @@ mod register_tests {
             manifest.identity.required_modset
         );
         assert!(json["metadata"]["launchArgs"].is_array());
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    #[test]
+    fn parse_players_metric_reads_the_gauge_from_prometheus_text() {
+        let text = "# HELP tessera_players Nombre de joueurs actuellement suivis par ce process.\n\
+                    # TYPE tessera_players gauge\n\
+                    tessera_players 7\n\
+                    tessera_shards_loaded 2\n";
+        assert_eq!(parse_players_metric(text), Some(7));
+    }
+
+    #[test]
+    fn parse_players_metric_is_none_when_absent_or_invalid() {
+        assert_eq!(parse_players_metric(""), None);
+        assert_eq!(parse_players_metric("tessera_players abc\n"), None);
+    }
+
+    #[test]
+    fn heartbeat_message_matches_platform_contract() {
+        // Format figé côté platform-api (routes.rs) : "{id}|{player_count}|{timestamp_rfc3339}".
+        assert_eq!(
+            heartbeat_message("srv-1", 3, "2026-07-05T12:00:00+00:00"),
+            "srv-1|3|2026-07-05T12:00:00+00:00"
+        );
     }
 }
