@@ -77,3 +77,27 @@ protected func OnGameAttach() -> Void {
     this.HideRoleMappins();
   }
 }
+
+// Icône de vigilance/détection (l'œil/jauge au-dessus des PNJ pendant la furtivité) — recherche
+// déléguée (Fable 5) 2026-07-05, suite au résiduel constaté après le test `gangHostility` (les
+// gangs restent neutres mais l'icône de détection restait visible). Système DISTINCT de
+// GameplayRoleComponent ci-dessus : c'est le "stealth mappin" (RTTI `gamemappinsStealthMappin` /
+// `gameuiStealthMappinController`, alias redscript court `StealthMappinController`, même piège de
+// nommage que `MappinSystem`).
+// Confirmé par le script décompilé officiel (CDPR-Modding-Documentation/Cyberpunk-Scripts,
+// scripts/cyberpunk/UI/mappins/stealthMappins.script) : `ShouldDisableMappin()` est le point
+// d'accroche vanilla existant — quand il renvoie `true`, `OnUpdate()` masque intégralement le
+// mappin (widget ET représentation 3D). Le vanilla l'utilise déjà pour les PNJ amicaux/morts ; on
+// étend ce chemin à tous les cas. Signature confirmée par 2 mods publiés qui compilent
+// (djkovrik/CP77Mods "Limited HUD", worldMarkersEnemy.reds ; mod Nexus "Drone Companions" #4520).
+// Purement cosmétique : ne touche PAS à la perception IA (senses/stims restent intacts, les PNJ
+// perçoivent toujours le joueur normalement) — seul l'affichage disparaît. Rattaché au levier
+// `mapMarkers` existant plutôt qu'un nouveau, même famille "cacher les marqueurs".
+// PIN IN-GAME : jamais testé — à confirmer (icône de détection absente au-dessus des PNJ).
+@wrapMethod(StealthMappinController)
+private final func ShouldDisableMappin() -> Bool {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).mapMarkers.active {
+    return true;
+  }
+  return wrappedMethod();
+}
