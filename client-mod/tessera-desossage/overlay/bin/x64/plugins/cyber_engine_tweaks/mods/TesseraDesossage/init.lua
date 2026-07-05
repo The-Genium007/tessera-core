@@ -11,6 +11,7 @@ TesseraDesossage.levers = {
   { key = "transit", label = "Transit (métro)", note = "Stub — aucun effet" },
   { key = "police", label = "Police", note = "Réel — BOOT ONLY, recharge nécessaire" },
   { key = "ambientSecurity", label = "Sécurité ambiante", note = "Réel (menu tourelles) — probable BOOT ONLY, à confirmer" },
+  { key = "gangHostility", label = "Hostilité gangs", note = "Nouveau (2026-07-05, PIN IN-GAME) — décoché = relations d'attitude neutres, gangs non hostiles" },
   { key = "ncpdHustles", label = "Hustles NCPD", note = "Stub — absent du RTTI, aucun effet" },
   { key = "randomEncounters", label = "Rencontres aléatoires", note = "Stub — absent du RTTI, aucun effet" },
   { key = "cyberpsychos", label = "Cyberpsychos", note = "Stub — absent du RTTI, aucun effet" },

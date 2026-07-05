@@ -48,6 +48,7 @@ public class DesossageSystem extends ScriptableSystem {
     let c = this.m_config;
     Tessera_ApplyPolice(game, c.police);
     Tessera_ApplyAmbientSecurity(game, c.ambientSecurity);
+    Tessera_ApplyGangHostility(game, c.gangHostility);
   }
 
   public func ApplyDevices(game: GameInstance) -> Void {

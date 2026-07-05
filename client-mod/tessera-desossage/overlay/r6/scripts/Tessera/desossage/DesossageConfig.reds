@@ -29,6 +29,7 @@ public class DesossageConfig {
   // B. Ordre public & hostilité
   public let police: ref<DesossageEntry>;
   public let ambientSecurity: ref<DesossageEntry>;
+  public let gangHostility: ref<DesossageEntry>;
   // C. Événements / rencontres ambiantes
   public let ncpdHustles: ref<DesossageEntry>;
   public let randomEncounters: ref<DesossageEntry>;
@@ -57,6 +58,7 @@ public class DesossageConfig {
     // B.
     c.police = DesossageEntry.New(false, 0.0);
     c.ambientSecurity = DesossageEntry.New(false, 0.0);
+    c.gangHostility = DesossageEntry.New(false, 0.0);
     // C.
     c.ncpdHustles = DesossageEntry.New(false, 0.0);
     c.randomEncounters = DesossageEntry.New(false, 0.0);

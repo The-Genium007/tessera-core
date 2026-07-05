@@ -40,6 +40,7 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
   else if StrCmp(name, "transit") == 0 { e = c.transit; }
   else if StrCmp(name, "police") == 0 { e = c.police; }
   else if StrCmp(name, "ambientSecurity") == 0 { e = c.ambientSecurity; }
+  else if StrCmp(name, "gangHostility") == 0 { e = c.gangHostility; }
   else if StrCmp(name, "ncpdHustles") == 0 { e = c.ncpdHustles; }
   else if StrCmp(name, "randomEncounters") == 0 { e = c.randomEncounters; }
   else if StrCmp(name, "cyberpsychos") == 0 { e = c.cyberpsychos; }

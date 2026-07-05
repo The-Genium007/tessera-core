@@ -23,13 +23,19 @@ module Tessera.Desossage
 //   marqueur au-dessus de la tête. `OnGameAttach()` confirmé déclaré directement dessus (RTTI,
 //   `search.py show GameplayRoleComponent` sans --deep) — n'a jamais été signalé en erreur sur 2
 //   tentatives de compilation, mais reste PIN IN-GAME côté comportement (jamais vu tourner).
-//   PIN IN-GAME (plus incertain) : `EGameplayRole` n'a pas de valeur "Vendor"/"QuestGiver"
-//   explicite dans le dump RTTI (juste des rôles génériques type ServicePoint/StoreItems/NPC/
-//   GenericRole) — le hook masque donc TOUS les rôles sans distinction pour l'instant. À affiner
-//   si ça s'avère trop large une fois testé en jeu.
+//   `EGameplayRole` n'a pas de valeur "Vendor"/"QuestGiver" explicite dans le dump RTTI (juste des
+//   rôles génériques type ServicePoint/StoreItems/NPC/GenericRole) — le hook masque donc TOUS les
+//   rôles sans distinction, y compris les policiers en patrouille (confirmé en jeu 2026-07-05 :
+//   perdent leur marqueur au-dessus de la tête dès qu'ils s'attachent, ex. à l'arrivée d'un
+//   nouveau chunk). **Comportement VOULU, pas un bug** (clarifié par Lucas 2026-07-05) : l'objectif
+//   du désossage est de vider la carte de TOUS les marqueurs/icônes pour reconstruire de zéro un
+//   monde compatible multijoueur — la portée large de ce hook sert exactement ça. Ne pas
+//   restreindre à des rôles spécifiques sans redemander.
 //
-// PIN IN-GAME : rien de ce fichier n'a encore tourné en jeu — à confirmer au premier chargement
-// (nettoyage des marqueurs existants) et au premier PNJ avec rôle (GameplayRoleComponent).
+// PIN IN-GAME (confirmé en jeu 2026-07-05, tourne sans erreur) : nettoyage des marqueurs
+// existants (MappinSystem) et masquage des rôles PNJ (GameplayRoleComponent) tous les deux
+// fonctionnels. Note : le NPC reste fonctionnellement un policier/PNJ normal (IA/faction
+// intactes) — seul le marqueur visuel disparaît, pas de conversion de type de PNJ.
 
 public func Tessera_ApplyMapMarkers(game: GameInstance, e: ref<DesossageEntry>) -> Void {
   if e.active {
