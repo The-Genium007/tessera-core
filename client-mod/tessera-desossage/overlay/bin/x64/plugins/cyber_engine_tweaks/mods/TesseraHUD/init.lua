@@ -23,12 +23,20 @@ TesseraHUD.trafficDensity = TesseraHUD.trafficDensity or 1.0
 -- (Paramètres > Input > Bindings > "Tessera HUD : afficher/masquer"), pas au démarrage du jeu.
 TesseraHUD.visible = false
 
+-- Log explicite à chaque étape clé (2026-07-07, demandé) : jusqu'ici, en cas de souci, la seule
+-- trace était "le mod a une erreur de chargement" dans la console CET, sans dire QUOI — impossible
+-- de diagnostiquer à distance sans deviner. print() va dans la console/log CET, toujours safe.
+print("[TesseraHUD] fichier init.lua en cours de chargement...")
+
 local function loadShardMap()
   -- `pcall(json.decode, content)` évaluerait `json.decode` comme argument AVANT l'appel de
   -- pcall — si `json` n'existe pas, l'erreur se produit hors de la protection de pcall et fait
   -- planter le chargement du mod entier. Vérifier `json` d'abord rend ce chemin sûr dans tous
   -- les cas (que `json` existe ou non pour les mods CET).
-  if type(json) ~= "table" or type(json.decode) ~= "function" then return nil end
+  if type(json) ~= "table" or type(json.decode) ~= "function" then
+    print("[TesseraHUD] json indisponible dans ce sandbox CET — shard-map désactivé")
+    return nil
+  end
 
   -- Chemin relatif nu : CET résout déjà tout chemin io/dofile par rapport au dossier du mod
   -- lui-même (mods/TesseraHUD/), pas au cwd du jeu — confirmé par la doc CET ("all pathing is
@@ -38,15 +46,24 @@ local function loadShardMap()
   -- une erreur de chargement", aucun des autres mods Tessera n'étant affecté). `debug.getinfo`
   -- n'est apparemment pas fiable/disponible dans ce sandbox de mod ; supprimé plutôt que retenté.
   local f = io.open("shard-map.json", "r")
-  if f == nil then return nil end
+  if f == nil then
+    print("[TesseraHUD] shard-map.json introuvable (chemin relatif au dossier du mod)")
+    return nil
+  end
   local content = f:read("*a")
   f:close()
   local ok, data = pcall(json.decode, content)
-  if not ok then return nil end
+  if not ok then
+    print("[TesseraHUD] shard-map.json trouvé mais JSON invalide : " .. tostring(data))
+    return nil
+  end
+  print("[TesseraHUD] shard-map.json chargé (" .. #(data.shards or {}) .. " shards, " .. #(data.splits or {}) .. " frontières)")
   return data
 end
 
 TesseraHUD.shardMap = TesseraHUD.shardMap or loadShardMap()
+
+print("[TesseraHUD] init.lua chargé jusqu'au bout — hotkey en cours d'enregistrement")
 
 local function withinBounds(v, lo, hi)
   if lo ~= nil and v < lo then return false end
@@ -184,4 +201,7 @@ registerForEvent('onDraw', function() TesseraHUD:Render() end)
 -- choisit la sienne. registerHotkey est l'API CET standard pour ça (persistée par CET lui-même).
 registerHotkey('TesseraHUD_Toggle', 'Tessera HUD : afficher/masquer', function()
   TesseraHUD.visible = not TesseraHUD.visible
+  print("[TesseraHUD] visibilité -> " .. tostring(TesseraHUD.visible))
 end)
+
+print("[TesseraHUD] hotkey enregistré avec succès — le mod a fini de charger sans erreur")
