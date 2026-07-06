@@ -249,6 +249,13 @@ pub async fn gateway_main(
     // Horodatage de la dernière PositionUpdate ACCEPTÉE par client (absent tant qu'aucune
     // position n'a encore été acceptée depuis le Join — sert de garde anti-triche).
     let mut last_pos_at: HashMap<u64, std::time::Instant> = HashMap::new();
+    // Dernière fois qu'on a loggé le contournement anti-triche GameMaster pour ce client (2026-07-07,
+    // rapporté en playtest) : sans throttle, un GameMaster en mouvement spamme un WARN à chaque
+    // PositionUpdate (plusieurs par seconde) — noie le reste des logs, y compris les Handoff qu'on
+    // veut justement pouvoir suivre. Une ligne au plus toutes les BYPASS_LOG_INTERVAL suffit à
+    // documenter que le contournement est actif sans inonder la sortie.
+    let mut bypass_warned_at: HashMap<u64, std::time::Instant> = HashMap::new();
+    const BYPASS_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
     let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
     // Fenêtre de rate-limit par client (audit prod 2026-07-03 §5.4).
     let mut rate_states: HashMap<u64, RateLimitState> = HashMap::new();
@@ -393,6 +400,7 @@ pub async fn gateway_main(
                         }
                         last_pos.remove(&cid);
                         last_pos_at.remove(&cid);
+                        bypass_warned_at.remove(&cid);
                         residence.remove(&cid);
                         rate_states.remove(&cid);
                         loader.forget(cid);
@@ -439,10 +447,17 @@ pub async fn gateway_main(
                     let now = std::time::Instant::now();
                     let bypassed = matches!(ranks.get(&cid), Some(Rank::GameMaster));
                     let plausible = if bypassed {
-                        tracing::warn!(
-                            client = cid,
-                            "PositionUpdate accepté sans vérification (contournement anti-triche playtest)"
-                        );
+                        let should_log = match bypass_warned_at.get(&cid) {
+                            Some(at) => now.duration_since(*at) >= BYPASS_LOG_INTERVAL,
+                            None => true,
+                        };
+                        if should_log {
+                            bypass_warned_at.insert(cid, now);
+                            tracing::warn!(
+                                client = cid,
+                                "PositionUpdate accepté sans vérification (contournement anti-triche playtest, log throttled {BYPASS_LOG_INTERVAL:?})"
+                            );
+                        }
                         true
                     } else {
                         match (last_pos.get(&cid).copied(), last_pos_at.get(&cid).copied()) {
@@ -548,6 +563,7 @@ pub async fn gateway_main(
                 }
                 last_pos.remove(&cid);
                 last_pos_at.remove(&cid);
+                bypass_warned_at.remove(&cid);
                 residence.remove(&cid);
                 rate_states.remove(&cid);
                 loader.forget(cid);
