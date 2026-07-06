@@ -23,10 +23,6 @@ TesseraHUD.trafficDensity = TesseraHUD.trafficDensity or 1.0
 -- (Paramètres > Input > Bindings > "Tessera HUD : afficher/masquer"), pas au démarrage du jeu.
 TesseraHUD.visible = false
 
--- Chemin absolu du dossier du mod (mods/TesseraHUD/) — une simple string relative "shard-map.json"
--- se résoudrait par rapport au cwd du jeu (bin/x64/), pas ce dossier ; technique standard CET.
-local MOD_DIR = debug.getinfo(1, "S").source:match("^@(.*[/\\])") or ""
-
 local function loadShardMap()
   -- `pcall(json.decode, content)` évaluerait `json.decode` comme argument AVANT l'appel de
   -- pcall — si `json` n'existe pas, l'erreur se produit hors de la protection de pcall et fait
@@ -34,7 +30,14 @@ local function loadShardMap()
   -- les cas (que `json` existe ou non pour les mods CET).
   if type(json) ~= "table" or type(json.decode) ~= "function" then return nil end
 
-  local f = io.open(MOD_DIR .. "shard-map.json", "r")
+  -- Chemin relatif nu : CET résout déjà tout chemin io/dofile par rapport au dossier du mod
+  -- lui-même (mods/TesseraHUD/), pas au cwd du jeu — confirmé par la doc CET ("all pathing is
+  -- now relative to mods"). CORRIGÉ (2026-07-06) : la version précédente calculait elle-même un
+  -- chemin absolu via `debug.getinfo(1, "S")`, qui plantait au tout premier chargement du fichier
+  -- (avant même l'enregistrement du hotkey) — confirmé en jeu via la console CET ("TesseraHUD a
+  -- une erreur de chargement", aucun des autres mods Tessera n'étant affecté). `debug.getinfo`
+  -- n'est apparemment pas fiable/disponible dans ce sandbox de mod ; supprimé plutôt que retenté.
+  local f = io.open("shard-map.json", "r")
   if f == nil then return nil end
   local content = f:read("*a")
   f:close()
