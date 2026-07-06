@@ -16,6 +16,38 @@ public func Tessera_ApplyPedestrians(game: GameInstance, e: ref<DesossageEntry>)
   FTLog(s"[Tessera/Desossage] piétons → densité \(factor) (ChangeDensityModifier)");
 }
 
+// Repeuplement observé en jeu (bug rapporté 2026-07-06) : la densité coupée revient après
+// quelques minutes, surtout en changeant de quartier. Recherché (2026-07-06, sources réelles :
+// dépôt de scripts décompilés adamsmasher/cyberpunk — ChangeDensityModifier n'est déclarée que
+// native, JAMAIS appelée par aucun script du jeu ; mod Nexus "No Crowds and Cars" #248, qui
+// documente devoir "marcher/conduire vers une nouvelle zone" pour que son propre réglage
+// s'applique) : la densité de population est réinitialisée par le moteur À CHAQUE secteur streamé
+// (pas un timer, pas un reset lié au combat/à l'heure) — `ChangeDensityModifier` ne modifie que
+// les communautés déjà chargées, les nouvelles reçoivent les valeurs par défaut du moteur. Pas de
+// native pour "couper" ce comportement (pas de ResetDensityModifier ni équivalent trouvé) : on le
+// traite en réactif plutôt qu'en préventif pur — réappliquer IMMÉDIATEMENT à l'entrée d'un
+// nouveau quartier, avant que les PNJ/véhicules par défaut n'aient le temps de spawn/pop visible.
+// `PreventionSystem.OnDistrictAreaEntered(handle:gamemappinsDistrictEnteredEvent)` confirmé dans
+// notre propre dump RTTI (tools/nativedb) comme point d'entrée à chaque changement de quartier.
+// PIN IN-GAME : visibilité exacte (`protected`) non confirmée par le RTTI (qui ne donne pas la
+// visibilité) — choisie par analogie avec SecurityTurretControllerPS.GetActions
+// (DesossageOrder.reds), à corriger si la compilation échoue. À valider aussi : le délai entre
+// l'événement et le premier spawn est-il suffisant pour éviter tout pop-in visible ?
+//
+// PISTE ALTERNATIVE PLUS ROBUSTE (non implémentée) : l'API CET `GameOptions` (hors RTTI, binding
+// CET pur — absent du dump car non exposé au moteur de réflexion du jeu) permettrait de modifier
+// directement les réglages moteur `[Crowd]`/`[Traffic]` (engine/config/platform/pc/*.ini) que le
+// streaming relit à CHAQUE secteur — plus besoin de réagir à quoi que ce soit. Mods réels utilisant
+// cette voie : "Disabled Crowd" #175, "Realistic Traffic Density" #6457 (ini statiques),
+// "CP77 Ini Tweaker" #15973 (même réglage via GameOptions à la volée). Clés ini exactes non
+// confirmées ici (pages Nexus non accessibles en fetch direct) — à reprendre si le hook réactif
+// ci-dessous s'avère insuffisant (pop-in visible malgré tout).
+@wrapMethod(PreventionSystem)
+protected func OnDistrictAreaEntered(evt: ref<gamemappinsDistrictEnteredEvent>) -> Void {
+  wrappedMethod(evt);
+  Tessera_ApplyPedestrians(GetGameInstance(), DesossageSystem.GetLiveConfig(GetGameInstance()).pedestrians);
+}
+
 // Recherche confirmée via dump RTTI complet (WopsS/RED4ext.NativeDB) : GameInstance.GetTrafficSystem
 // retourne `worldTrafficScriptInterface`, qui n'expose qu'UNE seule méthode dans tout le jeu :
 // IsPathIntersectingWithTraffic (requête, pas de setter de densité). Parent = IScriptable (rien

@@ -1,0 +1,30 @@
+{
+  "formatVersion": 1,
+  "radius": {
+    "base": 25.0,
+    "gameMaster": 75.0,
+    "moderator": 50.0
+  },
+  "shards": [
+    {
+      "id": "shard-a",
+      "maxX": 2450.0,
+      "maxY": null,
+      "minX": null,
+      "minY": null
+    },
+    {
+      "id": "shard-b",
+      "maxX": null,
+      "maxY": null,
+      "minX": 2450.0,
+      "minY": null
+    }
+  ],
+  "splits": [
+    {
+      "at": 2450.0,
+      "axis": "x"
+    }
+  ]
+}
