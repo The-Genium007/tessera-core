@@ -10,7 +10,7 @@ max_players = 16
 tags = ["dev", "test"]
 discord_url = ""
 website_url = "https://tesserasynth.net"
-required_modset = "0.1.0-dev16"
+required_modset = "0.1.0-dev7"
 voice_required = false
 
 [runtime]
