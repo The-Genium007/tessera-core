@@ -197,8 +197,9 @@ end
 
 registerForEvent('onDraw', function() TesseraHUD:Render() end)
 
--- Bindable dans Paramètres > Input > Bindings (CET) — aucune touche imposée par défaut, l'utilisateur
--- choisit la sienne. registerHotkey est l'API CET standard pour ça (persistée par CET lui-même).
+-- Bindable dans l'overlay CET lui-même (touche ~ par défaut > onglet "Bindings"/"Hotkeys"), PAS
+-- dans le menu Paramètres > Input du jeu — aucune touche imposée par défaut, l'utilisateur choisit
+-- la sienne dans cet onglet. registerHotkey est l'API CET standard pour ça (persistée par CET).
 registerHotkey('TesseraHUD_Toggle', 'Tessera HUD : afficher/masquer', function()
   TesseraHUD.visible = not TesseraHUD.visible
   print("[TesseraHUD] visibilité -> " .. tostring(TesseraHUD.visible))
