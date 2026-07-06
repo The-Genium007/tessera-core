@@ -16,37 +16,23 @@ public func Tessera_ApplyPedestrians(game: GameInstance, e: ref<DesossageEntry>)
   FTLog(s"[Tessera/Desossage] piétons → densité \(factor) (ChangeDensityModifier)");
 }
 
-// Repeuplement observé en jeu (bug rapporté 2026-07-06) : la densité coupée revient après
-// quelques minutes, surtout en changeant de quartier. Recherché (2026-07-06, sources réelles :
-// dépôt de scripts décompilés adamsmasher/cyberpunk — ChangeDensityModifier n'est déclarée que
-// native, JAMAIS appelée par aucun script du jeu ; mod Nexus "No Crowds and Cars" #248, qui
-// documente devoir "marcher/conduire vers une nouvelle zone" pour que son propre réglage
-// s'applique) : la densité de population est réinitialisée par le moteur À CHAQUE secteur streamé
-// (pas un timer, pas un reset lié au combat/à l'heure) — `ChangeDensityModifier` ne modifie que
-// les communautés déjà chargées, les nouvelles reçoivent les valeurs par défaut du moteur. Pas de
-// native pour "couper" ce comportement (pas de ResetDensityModifier ni équivalent trouvé) : on le
-// traite en réactif plutôt qu'en préventif pur — réappliquer IMMÉDIATEMENT à l'entrée d'un
-// nouveau quartier, avant que les PNJ/véhicules par défaut n'aient le temps de spawn/pop visible.
-// `PreventionSystem.OnDistrictAreaEntered(handle:gamemappinsDistrictEnteredEvent)` confirmé dans
-// notre propre dump RTTI (tools/nativedb) comme point d'entrée à chaque changement de quartier.
-// PIN IN-GAME : visibilité exacte (`protected`) non confirmée par le RTTI (qui ne donne pas la
-// visibilité) — choisie par analogie avec SecurityTurretControllerPS.GetActions
-// (DesossageOrder.reds), à corriger si la compilation échoue. À valider aussi : le délai entre
-// l'événement et le premier spawn est-il suffisant pour éviter tout pop-in visible ?
+// Repeuplement observé en jeu (bug rapporté 2026-07-06) : la densité coupée revenait après
+// quelques minutes, surtout en changeant de quartier (ChangeDensityModifier ne modifie que les
+// communautés déjà chargées, les nouveaux secteurs streamés reçoivent les valeurs par défaut du
+// moteur — confirmé via adamsmasher/cyberpunk et le mod Nexus "No Crowds and Cars" #248).
 //
-// PISTE ALTERNATIVE PLUS ROBUSTE (non implémentée) : l'API CET `GameOptions` (hors RTTI, binding
-// CET pur — absent du dump car non exposé au moteur de réflexion du jeu) permettrait de modifier
-// directement les réglages moteur `[Crowd]`/`[Traffic]` (engine/config/platform/pc/*.ini) que le
-// streaming relit à CHAQUE secteur — plus besoin de réagir à quoi que ce soit. Mods réels utilisant
-// cette voie : "Disabled Crowd" #175, "Realistic Traffic Density" #6457 (ini statiques),
-// "CP77 Ini Tweaker" #15973 (même réglage via GameOptions à la volée). Clés ini exactes non
-// confirmées ici (pages Nexus non accessibles en fetch direct) — à reprendre si le hook réactif
-// ci-dessous s'avère insuffisant (pop-in visible malgré tout).
-@wrapMethod(PreventionSystem)
-protected func OnDistrictAreaEntered(evt: ref<gamemappinsDistrictEnteredEvent>) -> Void {
-  wrappedMethod(evt);
-  Tessera_ApplyPedestrians(GetGameInstance(), DesossageSystem.GetLiveConfig(GetGameInstance()).pedestrians);
-}
+// RÉSOLU AUTREMENT : `engine/config/platform/pc/user.ini` `[Crowd]` (voir ce fichier dans
+// l'overlay) coupe la densité au niveau moteur, relu à CHAQUE secteur streamé — confirmé en jeu
+// par Lucas (2026-07-06, v2.31). C'est la solution retenue, pas un hook réactif.
+//
+// TENTATIVE ABANDONNÉE (2026-07-06) : un hook réactif @wrapMethod(PreventionSystem)
+// OnDistrictAreaEntered(evt: ref<gamemappinsDistrictEnteredEvent>) avait été ajouté en filet de
+// sécurité, mais a fait planter TOUTE la compilation redscript en jeu (confirmé via
+// redscript_rCURRENT.log : "[UNRESOLVED_METHOD] this signature does not match any existing
+// method") — la visibilité `protected` choisie par analogie n'était pas la bonne, et le PIN
+// IN-GAME laissé dans le code annonçait justement ce risque. Retiré plutôt que deviné une
+// deuxième fois à l'aveugle : le fix ini suffit, pas besoin de reprendre cette piste sauf si un
+// vrai pop-in visible est un jour constaté malgré l'ini.
 
 // Recherche confirmée via dump RTTI complet (WopsS/RED4ext.NativeDB) : GameInstance.GetTrafficSystem
 // retourne `worldTrafficScriptInterface`, qui n'expose qu'UNE seule méthode dans tout le jeu :
