@@ -41,14 +41,38 @@ pub fn encode_position_update(pos: [f32; 3]) -> Vec<u8> {
     b.finished_data().to_vec()
 }
 
-/// Décode un `ClientEnvelope` client ; si c'est un `Join`, renvoie son `display_name`.
+/// Longueur max d'un nom de joueur après nettoyage — évite qu'un nom énorme gonfle le journal de
+/// session ou la persistance (le nom sert de clé dans le store JSON, cf. persistence.rs).
+const MAX_DISPLAY_NAME_LEN: usize = 32;
+
+/// Nettoie un nom de joueur reçu du client (non fiable, brut du réseau) avant qu'il n'atteigne les
+/// logs (`tracing::info!` — dont certains sont maintenant lisibles à distance via l'API Dokploy,
+/// cf. gateway.rs) ou le store de persistance. Sans ça, un nom contenant des retours à la ligne ou
+/// des séquences d'échappement ANSI peut forger de fausses lignes de log ou perturber l'affichage
+/// d'un terminal qui les lit (log injection). Ne garde que les caractères imprimables ASCII,
+/// remplace tout le reste par `_`, et tronque à une longueur raisonnable.
+fn sanitize_display_name(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(MAX_DISPLAY_NAME_LEN)
+        .collect()
+}
+
+/// Décode un `ClientEnvelope` client ; si c'est un `Join`, renvoie son `display_name` nettoyé
+/// (voir `sanitize_display_name` — le nom brut n'est jamais fiable, il vient du réseau).
 pub fn extract_join_name(client_payload: &[u8]) -> Option<String> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
     if env.msg_type() != ClientMsg::Join {
         return None;
     }
     let join = env.msg_as_join()?;
-    join.display_name().map(|s| s.to_string())
+    join.display_name().map(sanitize_display_name)
 }
 
 use crate::internal_net::event_to_client_event_frame;
@@ -202,6 +226,40 @@ mod tests {
         assert_eq!(extract_join_name(&client_join()), Some("v".to_string()));
         assert_eq!(extract_join_name(&client_position(1.0, 2.0, 3.0)), None); // pas un Join
         assert_eq!(extract_join_name(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
+    fn sanitize_display_name_strips_control_characters() {
+        // Un nom client n'est jamais fiable : un nom contenant un retour à la ligne pourrait
+        // forger une fausse ligne de log une fois inséré dans tracing::info! (log injection) —
+        // confirmé par une revue de sécurité automatisée sur ce module, 2026-07-06.
+        assert_eq!(
+            sanitize_display_name("lucas\n[ERROR] fake log line"),
+            "lucas_[ERROR] fake log line"
+        );
+    }
+
+    #[test]
+    fn sanitize_display_name_strips_ansi_escape_sequences() {
+        assert_eq!(
+            sanitize_display_name("lucas\x1b[31mred\x1b[0m"),
+            "lucas_[31mred_[0m"
+        );
+    }
+
+    #[test]
+    fn sanitize_display_name_truncates_to_max_length() {
+        let long_name = "a".repeat(200);
+        assert_eq!(
+            sanitize_display_name(&long_name).len(),
+            MAX_DISPLAY_NAME_LEN
+        );
+    }
+
+    #[test]
+    fn sanitize_display_name_leaves_normal_names_untouched() {
+        assert_eq!(sanitize_display_name("lucas"), "lucas");
+        assert_eq!(sanitize_display_name("V 2.0"), "V 2.0");
     }
 
     use crate::framing::FrameReader;
