@@ -487,6 +487,28 @@ pub async fn gateway_main(
                                     SessionEvent::BufferExit { client: cid, shard }
                                 }
                             };
+                            // En plus du journal JSONL (fichier, pas exploitable sans accès au
+                            // volume monté), une ligne tracing pour ce même événement : visible
+                            // dans les logs stdout du conteneur, donc récupérable à distance via
+                            // l'API Dokploy (compose.readLogs) sans SSH — utile pour suivre les
+                            // franchissements de shard en direct pendant un playtest.
+                            let name = keys.get(&cid).map(String::as_str).unwrap_or("?");
+                            match &ev {
+                                crate::session_log::SessionEvent::Handoff { from, to, .. } => {
+                                    tracing::info!(
+                                        client = cid,
+                                        %name,
+                                        "Handoff : {name} passe de {from} à {to} ({x:.1}, {y:.1}, {z:.1})"
+                                    );
+                                }
+                                crate::session_log::SessionEvent::BufferEnter { shard, .. } => {
+                                    tracing::info!(client = cid, %name, "{name} entre en zone tampon de {shard}");
+                                }
+                                crate::session_log::SessionEvent::BufferExit { shard, .. } => {
+                                    tracing::info!(client = cid, %name, "{name} sort de la zone tampon de {shard}");
+                                }
+                                _ => {}
+                            }
                             sl.write(&ev);
                         }
                         prev_placements.insert(cid, next.clone());
