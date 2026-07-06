@@ -89,7 +89,7 @@ mod tests {
             "description": "Serveur de développement TesseraSynth (serveur Rust autoritaire, GameNetworkingSockets). Tranche verticale 0-D.",
             "discordUrl": "",
             "websiteUrl": "https://tesserasynth.net",
-            "requiredModset": "0.1.0-dev9",
+            "requiredModset": "0.1.0-dev10",
             "voiceRequired": false,
             "launchArgs": [
                 "-skipStartScreen",
