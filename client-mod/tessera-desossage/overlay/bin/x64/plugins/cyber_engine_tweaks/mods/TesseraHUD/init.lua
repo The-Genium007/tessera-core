@@ -28,6 +28,12 @@ TesseraHUD.visible = false
 local MOD_DIR = debug.getinfo(1, "S").source:match("^@(.*[/\\])") or ""
 
 local function loadShardMap()
+  -- `pcall(json.decode, content)` évaluerait `json.decode` comme argument AVANT l'appel de
+  -- pcall — si `json` n'existe pas, l'erreur se produit hors de la protection de pcall et fait
+  -- planter le chargement du mod entier. Vérifier `json` d'abord rend ce chemin sûr dans tous
+  -- les cas (que `json` existe ou non pour les mods CET).
+  if type(json) ~= "table" or type(json.decode) ~= "function" then return nil end
+
   local f = io.open(MOD_DIR .. "shard-map.json", "r")
   if f == nil then return nil end
   local content = f:read("*a")
@@ -71,6 +77,55 @@ function TesseraHUD:ComputeShardInfo(x, y)
   return { shardId = currentId, borderDist = nearestDist, inBuffer = inBuffer }
 end
 
+-- Radar 2D top-down (aligné sur les axes monde, ne tourne PAS avec le regard du joueur — plus
+-- simple/fiable qu'un radar orienté). Portée fixe autour du joueur ; la frontière de shard et sa
+-- zone tampon sont dessinées si elles tombent dans cette portée. Alternative choisie (2026-07-06)
+-- à des balises 3D dans le monde (nécessiterait de faire spawn des entités via redscript, plus
+-- risqué) ou des mappins carte (API RegisterMappin difficile à wrapper, cf. spec playtest-shards).
+-- PIN IN-GAME : API de dessin ImGui (GetWindowDrawList/AddLine/AddRectFilled/GetColorU32) confirmée
+-- exister par la doc CET (binding quasi 1:1 avec Dear ImGui) mais jamais testée dans CE jeu — les
+-- signatures exactes (valeurs de retour multiples vs tables Vector2) sont ma meilleure hypothèse,
+-- à corriger si le rendu est incorrect/plante.
+local RADAR_SIZE = 140
+local RADAR_RANGE_M = 100.0
+
+function TesseraHUD:RenderRadar(pos)
+  local map = TesseraHUD.shardMap
+  if map == nil then return end
+
+  local scale = (RADAR_SIZE / 2) / RADAR_RANGE_M
+  ImGui.Text(string.format("Radar (portée %.0fm)", RADAR_RANGE_M))
+
+  local drawList = ImGui.GetWindowDrawList()
+  local originX, originY = ImGui.GetCursorScreenPos()
+  local cx, cy = originX + RADAR_SIZE / 2, originY + RADAR_SIZE / 2
+
+  drawList:AddRectFilled(originX, originY, originX + RADAR_SIZE, originY + RADAR_SIZE, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.35))
+
+  for _, sp in ipairs(map.splits) do
+    local axisIsX = sp.axis == "x"
+    local playerCoord = axisIsX and pos.x or pos.y
+    local offset = (sp.at - playerCoord) * scale
+    if math.abs(offset) <= RADAR_SIZE / 2 then
+      local bufferPx = (map.radius.base or 0) * scale
+      local bufferColor = ImGui.GetColorU32(1.0, 0.7, 0.0, 0.25)
+      local lineColor = ImGui.GetColorU32(1.0, 0.3, 0.3, 1.0)
+      if axisIsX then
+        drawList:AddRectFilled(cx + offset - bufferPx, originY, cx + offset + bufferPx, originY + RADAR_SIZE, bufferColor)
+        drawList:AddLine(cx + offset, originY, cx + offset, originY + RADAR_SIZE, lineColor, 2.0)
+      else
+        drawList:AddRectFilled(originX, cy + offset - bufferPx, originX + RADAR_SIZE, cy + offset + bufferPx, bufferColor)
+        drawList:AddLine(originX, cy + offset, originX + RADAR_SIZE, cy + offset, lineColor, 2.0)
+      end
+    end
+  end
+
+  -- Joueur au centre, dessiné en dernier pour rester au-dessus de la frontière/zone tampon.
+  drawList:AddCircleFilled(cx, cy, 4, ImGui.GetColorU32(0.2, 0.8, 1.0, 1.0))
+
+  ImGui.Dummy(RADAR_SIZE, RADAR_SIZE) -- réserve l'espace du dessin dans le layout ImGui
+end
+
 function TesseraHUD:Render()
   if not TesseraHUD.visible then return end
 
@@ -99,6 +154,7 @@ function TesseraHUD:Render()
       ImGui.TextColored(1.0, 0.7, 0.0, 1.0, "DANS ZONE TAMPON")
     end
   end
+  TesseraHUD:RenderRadar(pos)
 
   ImGui.Separator()
   ImGui.Text("Trafic / piétons")
