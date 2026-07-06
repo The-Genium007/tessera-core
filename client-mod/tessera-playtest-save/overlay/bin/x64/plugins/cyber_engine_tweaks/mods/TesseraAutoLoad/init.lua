@@ -22,7 +22,10 @@
 
 -- Nom (ou sous-chaîne) du dossier de sauvegarde à charger automatiquement. Laisser vide ("") pour
 -- désactiver l'auto-load sans supprimer le mod (fallback : menu normal, aucun risque).
-local TARGET_SAVE_NAME = "ManualSave-20"
+-- "TesseraPlaytest" : nom de dossier volontairement distinctif (pas "ManualSave-N") pour ne
+-- jamais entrer en collision avec les sauvegardes propres du joueur — cf. save/TesseraPlaytest/
+-- (save perso de Lucas, v2.31, StreetKid, fin Acte 2, non moddée).
+local TARGET_SAVE_NAME = "TesseraPlaytest"
 
 local alreadyLoaded = false
 
