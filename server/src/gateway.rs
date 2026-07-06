@@ -240,8 +240,9 @@ pub async fn gateway_main(
     let mut loader = ShardLoader::new();
     // Dernier snapshot reçu de chaque shard, par client : latest[client][shard_addr] = payload.
     let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
-    // Rang par client (stub M4 : tout le monde Player ; surchargeable quand l'auth existera).
-    let ranks: HashMap<u64, Rank> = HashMap::new();
+    // Rang par client (stub M4 : Player par défaut, GameMaster via `gamemaster_names` en
+    // attendant un vrai système d'auth/rôles — voir plus bas).
+    let mut ranks: HashMap<u64, Rank> = HashMap::new();
     // Persistance : clé (display_name), dernière position, et résidence chargée — par client.
     let mut keys: HashMap<u64, String> = HashMap::new();
     let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
@@ -271,6 +272,20 @@ pub async fn gateway_main(
             }
         });
     }
+
+    // Attribution du rang GameMaster (2026-07-06) : en l'absence d'auth/rôles réels (stub M4, cf.
+    // commentaire sur `ranks` ci-dessus), une liste de noms via variable d'environnement fait
+    // temporairement office d'admin — vide par défaut (comportement inchangé hors playtest). Un
+    // GameMaster est exempté de la vérification anti-triche (téléportation CET, vol) ; ne PAS
+    // committer de vrai nom en dur, ça reste une variable d'environnement sur le déploiement de
+    // test uniquement. À remplacer par un vrai système de rôles quand l'auth existera.
+    let gamemaster_names: std::collections::HashSet<String> =
+        std::env::var("TESSERA_GAMEMASTER_NAMES")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
     // Journal de session (spec playtest-shards §#4) : vérité autoritaire des handoffs/stalls.
     let session_log_path =
@@ -408,6 +423,10 @@ pub async fn gateway_main(
                         );
                         residence.insert(cid, record.and_then(|r| r.residence));
                         last_pos.insert(cid, pos); // départ tant qu'aucune position réelle
+                        if gamemaster_names.contains(&name) {
+                            tracing::info!(client = cid, %name, "rang GameMaster attribué (playtest)");
+                            ranks.insert(cid, Rank::GameMaster);
+                        }
                         if let Some(sl) = slog.as_mut() {
                             sl.write(&crate::session_log::SessionEvent::Join {
                                 client: cid,
@@ -418,7 +437,14 @@ pub async fn gateway_main(
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
                     let now = std::time::Instant::now();
-                    let plausible =
+                    let bypassed = matches!(ranks.get(&cid), Some(Rank::GameMaster));
+                    let plausible = if bypassed {
+                        tracing::warn!(
+                            client = cid,
+                            "PositionUpdate accepté sans vérification (contournement anti-triche playtest)"
+                        );
+                        true
+                    } else {
                         match (last_pos.get(&cid).copied(), last_pos_at.get(&cid).copied()) {
                             (Some(prev), Some(at)) => crate::anticheat::is_plausible_move(
                                 prev,
@@ -431,7 +457,8 @@ pub async fn gateway_main(
                             ),
                             // Pas encore de référence temporelle (1re position après Join) : accepté.
                             _ => true,
-                        };
+                        }
+                    };
                     if !plausible {
                         tracing::warn!(client = cid, "PositionUpdate rejeté (vitesse implausible)");
                         continue;
