@@ -40,6 +40,12 @@ pub enum SessionEvent {
     TickStall {
         micros: u64,
     },
+    /// Une commande de gestion admin exécutée avec succès (`/promote`, `/grant`...) — journal
+    /// d'audit (spec admin-mode-permissions, Partie 2). `action` porte le texte tapé tel quel.
+    AdminAction {
+        actor: String,
+        action: String,
+    },
 }
 
 /// Une ligne du journal : horodatage unix (ms) + l'événement aplati (clé "event" + champs).
@@ -221,5 +227,25 @@ mod tests {
         assert_eq!(second["client"], 42);
         assert_eq!(second["from"], "A");
         assert_eq!(second["to"], "B");
+    }
+
+    #[test]
+    fn session_log_writes_admin_action_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        {
+            let mut log = SessionLog::open(&path).unwrap();
+            log.write(&SessionEvent::AdminAction {
+                actor: "Root".into(),
+                action: "/promote Compte1 moderator".into(),
+            });
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2); // session_start + admin_action
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(second["event"], "admin_action");
+        assert_eq!(second["actor"], "Root");
+        assert_eq!(second["action"], "/promote Compte1 moderator");
     }
 }
