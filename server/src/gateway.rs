@@ -262,9 +262,9 @@ pub async fn gateway_main(
 ) -> std::io::Result<()> {
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{extract_admin_command, extract_join_name, extract_position};
-    use crate::permissions::{derive_rank, resolve_permissions};
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
+    use crate::permissions::{derive_rank, resolve_permissions};
     use crate::persistence::{resolve_spawn, PlayerRecord, PlayerStore};
     use crate::rate_limit::{
         check_rate_limit, RateDecision, RateLimitState, DEFAULT_KICK_AFTER_WINDOWS,
@@ -447,6 +447,8 @@ pub async fn gateway_main(
                         last_pos_at.remove(&cid);
                         bypass_warned_at.remove(&cid);
                         residence.remove(&cid);
+                        ranks.remove(&cid);
+                        permissions.remove(&cid);
                         rate_states.remove(&cid);
                         loader.forget(cid);
                         latest.remove(&cid);
@@ -676,6 +678,7 @@ pub async fn gateway_main(
                 last_pos.remove(&cid);
                 last_pos_at.remove(&cid);
                 bypass_warned_at.remove(&cid);
+                ranks.remove(&cid);
                 permissions.remove(&cid);
                 residence.remove(&cid);
                 rate_states.remove(&cid);
