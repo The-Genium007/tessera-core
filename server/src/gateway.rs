@@ -256,10 +256,13 @@ pub async fn gateway_main(
     topology: crate::handoff::ShardTopology,
     radius: crate::handoff::RadiusPolicy,
     mut store: crate::persistence::FileStore,
+    mut admin_store: crate::admin_store::AdminStore,
     spawn: [f32; 3],
     max_players: u32,
 ) -> std::io::Result<()> {
-    use crate::gateway_routing::{extract_join_name, extract_position};
+    use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
+    use crate::gateway_routing::{extract_admin_command, extract_join_name, extract_position};
+    use crate::permissions::{derive_rank, resolve_permissions};
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
     use crate::persistence::{resolve_spawn, PlayerRecord, PlayerStore};
@@ -277,9 +280,15 @@ pub async fn gateway_main(
     let mut loader = ShardLoader::new();
     // Dernier snapshot reçu de chaque shard, par client : latest[client][shard_addr] = payload.
     let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
-    // Rang par client (stub M4 : Player par défaut, GameMaster via `gamemaster_names` en
-    // attendant un vrai système d'auth/rôles — voir plus bas).
+    // Rang par client (Player par défaut, dérivé des permissions résolues via `root_admins`/
+    // `admin_store` au Join — voir plus bas).
     let mut ranks: HashMap<u64, Rank> = HashMap::new();
+    // Cache en mémoire des permissions résolues par client — chargé une fois au Join, jamais
+    // relu du disque à chaque tick (coût nul sur la boucle anti-triche). Servira aux futures
+    // vérifications de capacité (fly, noclip...) une fois ces chantiers choisis dans le
+    // catalogue (spec admin-mode-permissions, Partie 5) — non consommé en phase 1 au-delà de la
+    // dérivation de `Rank` et de l'affichage du menu client.
+    let mut permissions: HashMap<u64, Vec<String>> = HashMap::new();
     // Persistance : clé (display_name), dernière position, et résidence chargée — par client.
     let mut keys: HashMap<u64, String> = HashMap::new();
     let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
@@ -317,19 +326,18 @@ pub async fn gateway_main(
         });
     }
 
-    // Attribution du rang GameMaster (2026-07-06) : en l'absence d'auth/rôles réels (stub M4, cf.
-    // commentaire sur `ranks` ci-dessus), une liste de noms via variable d'environnement fait
-    // temporairement office d'admin — vide par défaut (comportement inchangé hors playtest). Un
-    // GameMaster est exempté de la vérification anti-triche (téléportation CET, vol) ; ne PAS
-    // committer de vrai nom en dur, ça reste une variable d'environnement sur le déploiement de
-    // test uniquement. À remplacer par un vrai système de rôles quand l'auth existera.
-    let gamemaster_names: std::collections::HashSet<String> =
-        std::env::var("TESSERA_GAMEMASTER_NAMES")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+    // Admins racine (spec admin-mode-permissions, Partie 1) : liste de comptes qui reçoivent
+    // implicitement toutes les permissions (`*`), amorcée par variable d'environnement — jamais
+    // stockée en base, jamais rétrogradable par une commande. Remplace le stub
+    // `TESSERA_GAMEMASTER_NAMES` (2026-07-06/07) dont la portée dépassait maintenant le seul
+    // bypass anti-triche. Vide par défaut (comportement inchangé) ; ne PAS committer de vrai nom
+    // en dur, ça reste une variable d'environnement sur le déploiement de test uniquement.
+    let root_admins: std::collections::HashSet<String> = std::env::var("TESSERA_ROOT_ADMINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     // Journal de session (spec playtest-shards §#4) : vérité autoritaire des handoffs/stalls.
     let session_log_path =
@@ -468,10 +476,20 @@ pub async fn gateway_main(
                         );
                         residence.insert(cid, record.and_then(|r| r.residence));
                         last_pos.insert(cid, pos); // départ tant qu'aucune position réelle
-                        if gamemaster_names.contains(&name) {
-                            tracing::info!(client = cid, %name, "rang GameMaster attribué (playtest)");
-                            ranks.insert(cid, Rank::GameMaster);
+                        let is_root = root_admins.contains(&name);
+                        let admin_record =
+                            admin_store.admins.iter().find(|a| a.display_name == name).cloned();
+                        let resolved =
+                            resolve_permissions(is_root, admin_record.as_ref(), &admin_store.groups);
+                        let rank = derive_rank(&resolved);
+                        if rank != Rank::Player {
+                            tracing::info!(client = cid, %name, ?rank, "rang attribué");
+                            ranks.insert(cid, rank);
                         }
+                        if !resolved.is_empty() {
+                            client.send(cid, &encode_permission_sync(&resolved));
+                        }
+                        permissions.insert(cid, resolved);
                         if let Some(sl) = slog.as_mut() {
                             sl.write(&crate::session_log::SessionEvent::Join {
                                 client: cid,
@@ -565,6 +583,63 @@ pub async fn gateway_main(
                         }
                         prev_placements.insert(cid, next.clone());
                     }
+                } else if let Some(text) = extract_admin_command(data) {
+                    let issuer = keys.get(&cid).cloned().unwrap_or_default();
+                    let is_root = root_admins.contains(&issuer);
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let outcome = match parse_admin_command(&text) {
+                        Ok(cmd) => execute_admin_command(
+                            cmd,
+                            is_root,
+                            &mut admin_store.groups,
+                            &mut admin_store.admins,
+                            now_ms,
+                            &issuer,
+                        ),
+                        Err(_) => crate::admin_commands::ExecOutcome {
+                            success: false,
+                            message: "commande invalide".to_string(),
+                            affected_account: None,
+                        },
+                    };
+                    if outcome.success {
+                        admin_store.save_groups();
+                        admin_store.save_admins();
+                        if let Some(sl) = slog.as_mut() {
+                            sl.write(&crate::session_log::SessionEvent::AdminAction {
+                                actor: issuer.clone(),
+                                action: text.clone(),
+                            });
+                        }
+                        tracing::info!(client = cid, actor = %issuer, %text, "commande admin exécutée");
+                    } else {
+                        tracing::warn!(
+                            client = cid, actor = %issuer, %text, message = %outcome.message,
+                            "commande admin refusée"
+                        );
+                    }
+                    client.send(cid, &encode_command_result(outcome.success, &outcome.message));
+                    if let Some(target) = &outcome.affected_account {
+                        if let Some((&target_cid, _)) = keys.iter().find(|(_, n)| *n == target) {
+                            let is_target_root = root_admins.contains(target);
+                            let target_record = admin_store
+                                .admins
+                                .iter()
+                                .find(|a| &a.display_name == target)
+                                .cloned();
+                            let resolved = resolve_permissions(
+                                is_target_root,
+                                target_record.as_ref(),
+                                &admin_store.groups,
+                            );
+                            ranks.insert(target_cid, derive_rank(&resolved));
+                            permissions.insert(target_cid, resolved.clone());
+                            client.send(target_cid, &encode_permission_sync(&resolved));
+                        }
+                    }
                 }
             }
 
@@ -601,6 +676,7 @@ pub async fn gateway_main(
                 last_pos.remove(&cid);
                 last_pos_at.remove(&cid);
                 bypass_warned_at.remove(&cid);
+                permissions.remove(&cid);
                 residence.remove(&cid);
                 rate_states.remove(&cid);
                 loader.forget(cid);
