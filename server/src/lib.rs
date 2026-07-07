@@ -16,6 +16,7 @@ pub mod shard;
 pub mod snapshot_merge;
 pub mod transport;
 pub mod world;
+pub mod world_clock;
 
 #[cfg(feature = "gns")]
 pub mod gns_transport;

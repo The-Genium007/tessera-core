@@ -13,8 +13,20 @@ table Snapshot { tick:ulong; players:[PlayerState]; }
 // explication, juste une coupure muette).
 table Kicked { reason:string; }
 
-union ClientMsg { Join, PositionUpdate }
-union ServerMsg { Snapshot, Kicked }
+// Horloge/météo monde partagée (spec M6 full-inventory §2 — cohérence multi-shard) : diffusé
+// périodiquement à tous les clients connectés, indépendamment du shard. `weather` est une chaîne
+// opaque côté serveur (comme le blob d'apparence des personnages) — relayée telle quelle, le
+// serveur ne l'interprète jamais ; c'est au client de la résoudre en record TweakDB réel.
+table WorldState { hour:ubyte; minute:ubyte; weather:string; }
+
+// Diagnostic playtest (2026-07-07) : le client rapporte l'heure qu'IL observe localement, pour
+// que le serveur compare à sa propre horloge (`world_clock.rs`) et journalise l'écart —
+// détection de dérive, pas un mécanisme correctif. Une dérive de 1-2 secondes est tolérée sans
+// alerte (cf. `TIME_DRIFT_WARN_THRESHOLD_SECS` dans `gateway.rs`).
+table ClientTimeReport { hour:ubyte; minute:ubyte; second:ubyte; }
+
+union ClientMsg { Join, PositionUpdate, ClientTimeReport }
+union ServerMsg { Snapshot, Kicked, WorldState }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }

@@ -5,7 +5,9 @@
 use crate::framing::FrameReader;
 use crate::internal_net::{decode_server_send, event_to_client_event_frame};
 use crate::transport::{Transport, TransportEvent};
-use protocol::{Kicked, KickedArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg};
+use protocol::{
+    Kicked, KickedArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg, WorldState, WorldStateArgs,
+};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -152,6 +154,30 @@ pub fn encode_kicked(reason: &str) -> Vec<u8> {
     b.finished_data().to_vec()
 }
 
+/// Encode un `ServerEnvelope{WorldState}` — horloge/météo monde partagée, diffusée à tous les
+/// clients connectés indépendamment du shard (voir `world_clock.rs`).
+pub fn encode_world_state(hour: u8, minute: u8, weather: &str) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let weather = b.create_string(weather);
+    let state = WorldState::create(
+        &mut b,
+        &WorldStateArgs {
+            hour,
+            minute,
+            weather: Some(weather),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::WorldState,
+            msg: Some(state.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
 /// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
 /// rejouer vers ce shard après une reconnexion. Le shard vient de perdre tout son état (nouveau
 /// `Server::new()` recréé côté Shard à chaque connexion acceptée, cf. `shard_main`) et ne connaît
@@ -222,7 +248,7 @@ pub async fn gateway_main(
     spawn: [f32; 3],
     max_players: u32,
 ) -> std::io::Result<()> {
-    use crate::gateway_routing::{extract_join_name, extract_position};
+    use crate::gateway_routing::{extract_join_name, extract_position, extract_time_report};
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
     use crate::persistence::{resolve_spawn, PlayerRecord, PlayerStore};
@@ -324,6 +350,22 @@ pub async fn gateway_main(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_autosave = std::time::Instant::now();
     let autosave_interval = Duration::from_secs(30);
+
+    // Horloge/météo monde partagée (spec M6 full-inventory §2). Valeurs de départ/échelle/météo
+    // en dur pour l'instant (pas encore exposées au manifeste — amélioration future notée, comme
+    // pour `DesossageConfig` côté client) : PIN IN-GAME, le nom de record météo exact reste à
+    // confirmer avant que ça ait un effet visible (une chaîne invalide échoue proprement côté
+    // client, `SetWeather` renvoie `false`, cf. `world_clock.rs`).
+    let mut world_clock = crate::world_clock::WorldClock::new(12, 0);
+    const WORLD_TIME_SCALE: f64 = 1.0; // 1 minute de jeu par seconde réelle (cycle 24h ~ 24 min réelles)
+    const WORLD_WEATHER: &str = "Weather.Sunny01";
+    const WORLD_TICK_DT: Duration = Duration::from_millis(50); // cadence fixe du ticker ci-dessous
+    let mut last_world_broadcast = std::time::Instant::now();
+    const WORLD_BROADCAST_INTERVAL: Duration = Duration::from_secs(2);
+    // Diagnostic playtest (2026-07-07) : au-delà de cette dérive (secondes), on remonte un
+    // tracing::warn en plus de la ligne session_log — en-deçà, une dérive de 1-2s est tolérée
+    // (attendue : le client ré-applique l'heure toutes les WORLD_BROADCAST_INTERVAL, pas en continu).
+    const TIME_DRIFT_WARN_THRESHOLD_SECS: i32 = 2;
     // Enregistré UNE SEULE FOIS avant la boucle : sur Unix, `tokio::signal::unix::signal(...)`
     // installe une registration OS qui ne bufferise rien tant qu'aucun récepteur n'existe — la
     // recréer à chaque itération (comme le faisait l'ancien `shutdown_signal()` appelé depuis le
@@ -345,6 +387,7 @@ pub async fn gateway_main(
             }
         }
         let iter_start = std::time::Instant::now();
+        world_clock.advance(WORLD_TICK_DT, WORLD_TIME_SCALE);
         for ev in client.poll() {
             let cid = match &ev {
                 TransportEvent::Connected(id) | TransportEvent::Disconnected(id) => *id,
@@ -528,6 +571,29 @@ pub async fn gateway_main(
                         }
                         prev_placements.insert(cid, next.clone());
                     }
+                } else if let Some((h, m, s)) = extract_time_report(data) {
+                    // Diagnostic playtest, pas un mécanisme correctif (cf. constante ci-dessus) :
+                    // compare l'heure rapportée par CE client à l'horloge autoritaire du serveur.
+                    let server_secs = world_clock.total_seconds_since_midnight();
+                    let client_secs = (h as u32) * 3600 + (m as u32) * 60 + (s as u32);
+                    let delta = client_secs as i32 - server_secs as i32;
+                    if delta.unsigned_abs() as i32 > TIME_DRIFT_WARN_THRESHOLD_SECS {
+                        let name = keys.get(&cid).map(String::as_str).unwrap_or("?");
+                        tracing::warn!(
+                            client = cid,
+                            %name,
+                            delta,
+                            "dérive horloge monde au-delà de la tolérance ({TIME_DRIFT_WARN_THRESHOLD_SECS}s)"
+                        );
+                    }
+                    if let Some(sl) = slog.as_mut() {
+                        sl.write(&crate::session_log::SessionEvent::TimeDrift {
+                            client: cid,
+                            server_seconds: server_secs,
+                            client_seconds: client_secs,
+                            delta_seconds: delta,
+                        });
+                    }
                 }
             }
 
@@ -589,6 +655,17 @@ pub async fn gateway_main(
         metrics
             .shards_loaded
             .store(shards.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+        // 3bis) Horloge/météo monde — diffusion périodique à tous les clients connus (pas à
+        // 20 Hz comme les snapshots : l'heure/la météo n'a pas besoin de cette fréquence).
+        if last_world_broadcast.elapsed() >= WORLD_BROADCAST_INTERVAL {
+            let payload =
+                encode_world_state(world_clock.hour(), world_clock.minute(), WORLD_WEATHER);
+            for cid in latest.keys() {
+                client.send(*cid, &payload);
+            }
+            last_world_broadcast = std::time::Instant::now();
+        }
 
         // 4) Autosave périodique — ne dépend pas d'une déconnexion propre.
         if last_autosave.elapsed() >= autosave_interval {
@@ -669,6 +746,17 @@ mod tests {
         assert_eq!(env.msg_type(), ServerMsg::Kicked);
         let kicked = env.msg_as_kicked().unwrap();
         assert_eq!(kicked.reason(), Some("serveur plein"));
+    }
+
+    #[test]
+    fn encode_world_state_carries_hour_minute_and_weather() {
+        let payload = encode_world_state(14, 30, "Weather.Sunny01");
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&payload).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::WorldState);
+        let state = env.msg_as_world_state().unwrap();
+        assert_eq!(state.hour(), 14);
+        assert_eq!(state.minute(), 30);
+        assert_eq!(state.weather(), Some("Weather.Sunny01"));
     }
 
     #[test]

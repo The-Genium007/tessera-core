@@ -5,6 +5,17 @@ use protocol::{
     ClientEnvelope, ClientEnvelopeArgs, ClientMsg, PositionUpdate, PositionUpdateArgs, Vec3,
 };
 
+/// Décode un `ClientEnvelope` client ; si c'est un `ClientTimeReport`, renvoie (heure, minute,
+/// seconde) tels qu'observés localement par le client — diagnostic de dérive d'horloge (playtest).
+pub fn extract_time_report(client_payload: &[u8]) -> Option<(u8, u8, u8)> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::ClientTimeReport {
+        return None;
+    }
+    let report = env.msg_as_client_time_report()?;
+    Some((report.hour(), report.minute(), report.second()))
+}
+
 /// Décode un `ClientEnvelope` client ; si c'est un `PositionUpdate`, renvoie sa position.
 pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
@@ -226,6 +237,37 @@ mod tests {
         assert_eq!(extract_join_name(&client_join()), Some("v".to_string()));
         assert_eq!(extract_join_name(&client_position(1.0, 2.0, 3.0)), None); // pas un Join
         assert_eq!(extract_join_name(&[9, 9, 9]), None); // garbage
+    }
+
+    fn client_time_report(hour: u8, minute: u8, second: u8) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let report = ClientTimeReport::create(
+            &mut b,
+            &ClientTimeReportArgs {
+                hour,
+                minute,
+                second,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::ClientTimeReport,
+                msg: Some(report.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    #[test]
+    fn extract_time_report_reads_hour_minute_second() {
+        assert_eq!(
+            extract_time_report(&client_time_report(14, 30, 5)),
+            Some((14, 30, 5))
+        );
+        assert_eq!(extract_time_report(&client_join()), None); // pas un ClientTimeReport
+        assert_eq!(extract_time_report(&[7, 7, 7]), None); // garbage
     }
 
     #[test]

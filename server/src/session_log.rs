@@ -40,6 +40,15 @@ pub enum SessionEvent {
     TickStall {
         micros: u64,
     },
+    /// Diagnostic playtest (2026-07-07) : écart entre l'horloge autoritaire du serveur et l'heure
+    /// que le client rapporte observer localement — pas un mécanisme correctif, juste une trace
+    /// pour voir si la dérive reste dans une tolérance raisonnable (1-2s, pas grave).
+    TimeDrift {
+        client: u64,
+        server_seconds: u32,
+        client_seconds: u32,
+        delta_seconds: i32,
+    },
 }
 
 /// Une ligne du journal : horodatage unix (ms) + l'événement aplati (clé "event" + champs).
@@ -221,5 +230,28 @@ mod tests {
         assert_eq!(second["client"], 42);
         assert_eq!(second["from"], "A");
         assert_eq!(second["to"], "B");
+    }
+
+    #[test]
+    fn session_log_writes_time_drift_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        {
+            let mut log = SessionLog::open(&path).unwrap();
+            log.write(&SessionEvent::TimeDrift {
+                client: 7,
+                server_seconds: 3600,
+                client_seconds: 3602,
+                delta_seconds: 2,
+            });
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        let line: serde_json::Value =
+            serde_json::from_str(content.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(line["event"], "time_drift");
+        assert_eq!(line["client"], 7);
+        assert_eq!(line["server_seconds"], 3600);
+        assert_eq!(line["client_seconds"], 3602);
+        assert_eq!(line["delta_seconds"], 2);
     }
 }
