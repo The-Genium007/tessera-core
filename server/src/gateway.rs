@@ -5,7 +5,10 @@
 use crate::framing::FrameReader;
 use crate::internal_net::{decode_server_send, event_to_client_event_frame};
 use crate::transport::{Transport, TransportEvent};
-use protocol::{Kicked, KickedArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg};
+use protocol::{
+    CommandResult, CommandResultArgs, Kicked, KickedArgs, PermissionSync, PermissionSyncArgs,
+    ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
+};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -146,6 +149,40 @@ pub fn encode_kicked(reason: &str) -> Vec<u8> {
         &ServerEnvelopeArgs {
             msg_type: ServerMsg::Kicked,
             msg: Some(kicked.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Encode un `ServerEnvelope{CommandResult}` — réponse à une commande admin tapée par le client.
+pub fn encode_command_result(success: bool, message: &str) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let message = b.create_string(message);
+    let cr = CommandResult::create(&mut b, &CommandResultArgs { success, message: Some(message) });
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::CommandResult,
+            msg: Some(cr.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Encode un `ServerEnvelope{PermissionSync}` — poussé au Join puis à chaque changement de
+/// permissions affectant ce compte, pour que le client mette à jour son menu sans reconnexion.
+pub fn encode_permission_sync(nodes: &[String]) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let node_strs: Vec<_> = nodes.iter().map(|s| b.create_string(s)).collect();
+    let nodes_vec = b.create_vector(&node_strs);
+    let sync = PermissionSync::create(&mut b, &PermissionSyncArgs { nodes: Some(nodes_vec) });
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::PermissionSync,
+            msg: Some(sync.as_union_value()),
         },
     );
     b.finish(env, None);
@@ -669,6 +706,26 @@ mod tests {
         assert_eq!(env.msg_type(), ServerMsg::Kicked);
         let kicked = env.msg_as_kicked().unwrap();
         assert_eq!(kicked.reason(), Some("serveur plein"));
+    }
+
+    #[test]
+    fn encode_command_result_round_trips() {
+        let bytes = encode_command_result(true, "Compte1 promu");
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::CommandResult);
+        let cr = env.msg_as_command_result().unwrap();
+        assert!(cr.success());
+        assert_eq!(cr.message().unwrap(), "Compte1 promu");
+    }
+
+    #[test]
+    fn encode_permission_sync_round_trips() {
+        let bytes = encode_permission_sync(&["admin.fly".to_string(), "admin.noclip".to_string()]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::PermissionSync);
+        let sync = env.msg_as_permission_sync().unwrap();
+        let nodes: Vec<&str> = sync.nodes().unwrap().iter().collect();
+        assert_eq!(nodes, vec!["admin.fly", "admin.noclip"]);
     }
 
     #[test]
