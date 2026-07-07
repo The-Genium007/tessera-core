@@ -22,6 +22,19 @@ Au lancement du jeu, le loader RED4ext charge `TesseraClient.dll` et appelle son
 dans `red4ext\logs\TesseraClient-<horodatage>.log` (sous la racine du jeu). Voir ce fichier après
 un lancement = **preuve que le plugin livré par le launcher s'est bien chargé sur 2.31**.
 
+## Désossage natif (phase 1, log-only — 2026-07-07)
+
+5 catégories que le désossage redscript (`tessera-desossage/`) ne peut pas atteindre (cyberpsychos,
+hustles NCPD, gigs/donneurs de quête par proximité, événements aléatoires, PNJ statiques
+"community") sont exécutées nativement via un nœud de graphe de quête. Ce plugin hooke le point
+d'accroche identifié (`QuestPhaseInstance::ExecuteNode`, hash AddressLib `3227858325`) en
+**log-only** — aucun blocage : la sémantique du retour/des sockets de sortie de cette fonction
+n'est pas encore comprise, un blocage prématuré risquerait de geler des graphes de quête. Voir le
+commentaire complet dans `src/main.cpp`. **PIN IN-GAME : jamais testé.** Objectif du test : vérifier
+en jeu que le hook s'attache sans erreur, puis observer les logs `[Tessera/DesossageNative]` pour
+voir quand/à quelle fréquence des nœuds `questSpawnManagerNodeDefinition` passent par `ExecuteNode`
+— avant d'envisager une phase 2 (blocage réel).
+
 ## Build
 
 Compilé en `.dll` **dans le cloud** (GitHub Actions, runner `windows-latest`) — voir
