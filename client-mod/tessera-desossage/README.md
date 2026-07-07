@@ -24,14 +24,14 @@ système**, chacun une `DesossageEntry { active, density }`. Défaut = **tout co
 |---|---|
 | `DesossageConfig.reds` | la config centrale + défauts (monde vide) |
 | `DesossageSystem.reds` | applicateur (`ScriptableSystem`) + déclencheur au chargement (`OnGameAttached`) |
-| `DesossagePopulation.reds` | leviers piétons / trafic / transit |
+| `DesossagePopulation.reds` | leviers piétons (couvre aussi trafic véhicules, doublon retiré 2026-07-07) / transit |
 | `DesossageOrder.reds` | levier police (`PreventionSystem`) + sécurité ambiante |
 | `DesossageDevices.reds` | voyage rapide (kiosques) / vendeurs / distributeurs / interactables |
 | `DesossageEvents.reds` | rencontres (par type) / quêtes / tutoriels |
 | `DesossageWorld.reds` | échelle du cycle jour/nuit |
 | `DesossageConsole.reds` | bascule un levier en jeu via la console CET, sans rebuild (voir « Tester ») |
 
-## État des leviers (mis à jour 2026-07-06)
+## État des leviers (mis à jour 2026-07-07)
 
 Table de suivi — **la** référence pour éviter de re-creuser un levier déjà tranché. Champs :
 mécanisme réel cité, statut, testé en jeu ou non, limites connues. Détails/sources complètes dans
@@ -42,17 +42,19 @@ les commentaires du fichier `.reds` concerné (lien dans « Structure » ci-dess
 | `police` | ✅ Réel | `@wrapMethod(PreventionSystem) OnAttach()` | ✅ 2026-07-05 (plus d'étoiles) | BOOT ONLY (recharge nécessaire pour changer) |
 | `ambientSecurity` | ⚠️ Partiel | `@wrapMethod(SecurityTurretControllerPS) GetActions` | ✅ 2026-07-05 (menu quickhack absent) | Coupe l'interaction, pas la détection IA — tourelle peut rester hostile |
 | `gangHostility` | ✅ Réel | attitude/relations gangs | ✅ 2026-07-05 | Décoché = gangs non hostiles (relations neutres) |
-| `pedestrians` / `traffic` | ✅ Réel | `engine/config/platform/pc/user.ini` `[Crowd]` (`Enabled`/`EnablePedestrians`/`EnableVehicles` = false) — lu au chargement, s'applique à toute la carte, jamais réinitialisé par le streaming | ✅ ini confirmé par Lucas en jeu (2026-07-06, v2.31, plus aucun piéton/véhicule) | `traffic` = doublon confirmé de `pedestrians` côté redscript. **Hook réactif `OnDistrictAreaEntered` retiré (2026-07-06)** : cassait toute la compilation redscript en jeu (`[UNRESOLVED_METHOD]`, visibilité `protected` incorrecte, jamais confirmée par le RTTI comme annoncé lors de son ajout) — l'ini suffit, pas besoin de ce filet de sécurité |
-| `vendors` | ⚠️ Partiel | masque l'icône de rôle PNJ (`GameplayRoleComponent`) | ✅ 2026-07-05 | Masque l'icône, PAS l'interaction. Vendeurs ambiants probablement couverts par `pedestrians` (à confirmer) ; vendeurs/ripperdoc NOMMÉS = système de dialogue NPC, pas de toggle trouvé (`VendorComponent` = getters seulement) |
+| `pedestrians` | ✅ Réel | `engine/config/platform/pc/user.ini` `[Crowd]` (`Enabled`/`EnablePedestrians`/`EnableVehicles` = false) — lu au chargement, s'applique à toute la carte, jamais réinitialisé par le streaming | ✅ ini confirmé par Lucas en jeu (2026-07-06, v2.31, plus aucun piéton/véhicule) | Couvre aussi le trafic véhicules (même nœud de spawn, confirmé en jeu 2026-07-05). Le levier `traffic` dédié (config+UI+console) a été **retiré 2026-07-07** — doublon confirmé, plus de code à maintenir |
+| `vendors` | ⚠️ Partiel | icône masquée (`GameplayRoleComponent`) **+** commerce bloqué (`@wrapMethod(MenuScenario_Vendor) OnEnterScenario` → `GotoIdleState()`, ajouté 2026-07-07) | icône ✅ 2026-07-05 ; blocage commerce ⚠️ jamais testé | Le PNJ reste visible et interactible en dialogue générique (pas de piste pour le despawn), mais son commerce (vendor hub/ripperdoc/craft) ne s'ouvre plus. Vendeurs ambiants probablement couverts par `pedestrians` (hypothèse, à confirmer) |
 | `transit` (métro/NCART) | 🔴 Stub, aucun effet | — | — | **Volontairement laissé sans effet** : le métro doit rester payant/normal (demande 2026-07-06), ne PAS lui donner de comportement — confirmé indépendant de `fastTravel` |
 | `fastTravel` | ✅ Réel | `FastTravelSystem.ManageFastTravelLock` | — | BOOT ONLY. Ne touche pas le métro (système distinct, confirmé) |
-| `vendingDevices` | ✅ Réel | `@wrapMethod(VendingMachineControllerPS) GetActions` | ✅ | Couvre boissons/nourriture. Pas encore fait : distributeurs d'armes, droppoints (classes PS sœurs) |
+| `vendingDevices` | ✅ Réel | `@wrapMethod(VendingMachineControllerPS/WeaponVendingMachineControllerPS/DropPointControllerPS) GetActions` (3 hooks, classes PS sœurs) | boissons/nourriture ✅ ; armes+droppoints ⚠️ jamais testés (ajoutés 2026-07-07) | Les 3 classes ont chacune leur propre override de `GetActions` (pas couvertes par le hook générique `ScriptableDeviceComponentPS`) |
 | `worldInteractables` | ✅ Réel | `@wrapMethod(ScriptableDeviceComponentPS) GetActions` (hook générique, base commune) | ⚠️ jamais testé | Couvre points d'accès/hackables **et**, découvert 2026-07-06, l'écran de statut de loyer d'appartement (`ApartmentScreenControllerPS` hérite de la même base) — gratuit, pas de code dédié nécessaire. Ne couvre PAS l'achat d'un nouvel appartement (classe distincte non trouvée) |
-| `questTriggers` | ⚠️ Partiel | `questPhoneManager.ApplyPhoneCallRestriction` | ✅ (icône radio déverrouillée si décoché) | Bloque les appels fixers, pas les déclencheurs de zone/PNJ ni les quêtes en général |
-| `tutorials` | 🔴 Stub confirmé mort | `questTutorialManager` existe mais ne ferme qu'un overlay déjà ouvert | — | Aucune piste RTTI restante |
-| `ncpdHustles` | 🔴 Stub confirmé mort | — | — | Aucune classe « Hustle »/« CrimeSpawn » dans le jeu (RTTI épuisé) |
-| `randomEncounters` | 🔴 Stub confirmé mort | — | — | Absent du RTTI |
-| `cyberpsychos` | 🔴 Stub confirmé mort | — | — | Absent du RTTI — nécessiterait une édition de données TweakDB, pas un hook |
+| `questTriggers` | ⚠️ Partiel | `questPhoneManager.ApplyPhoneCallRestriction` | ✅ (icône radio déverrouillée si décoché) | Bloque les appels fixers, pas les déclencheurs de proximité (gigs) ni les hustles NCPD — nécessiterait un hook C++ natif sur `questSpawnManagerNodeDefinition`/`ExecuteNode` (recherche 2026-07-07, pas encore décidé) |
+| `tutorials` | ✅ Réel (2026-07-07) | fact save `disable_tutorials` posé via `QuestsSystem.SetFactStr` (retrouvé dans un export CyberCAT réel, non préfixé par un code de quête) | ⚠️ jamais testé | Remplace l'ancienne piste `questTutorialManager` (confirmée insuffisante — ne fermait qu'un overlay déjà ouvert) |
+| `airTraffic` (nouveau 2026-07-07) | ✅ Réel | fact save `air_traffic_off` via `SetFactStr`, même mécanisme que `tutorials` | ⚠️ jamais testé | — |
+| `ncpdHustles` | 🔴 Stub confirmé mort | `questSpawnManagerNodeType`/enum `populationSpawnerObjectCtrlAction` — exécution purement native (nœud de graphe de quête) | — | Nécessiterait un hook C++ natif (`QuestPhaseInstance::ExecuteNode`) |
+| `randomEncounters` | 🔴 Stub confirmé mort | idem `ncpdHustles` | — | idem |
+| `cyberpsychos` | 🔴 Stub confirmé mort | idem `ncpdHustles` | — | idem |
+| **PNJ statiques (groupes qui discutent, ne marchent pas)** | 🔴 Nouveau cas sans levier (signalé 2026-07-07) | Système **Community** (`worldCommunityRegistryNode`, champ `representsCrowd:Bool`) — DISTINCT du système **Crowd** que pilote `ChangeDensityModifier`/`pedestrians`. Contrôle natif seulement, via le même `questSpawnManagerNodeType` que ci-dessus | — | Recherche déléguée (Fable 5, 2026-07-07) confirmée par script décompilé (`communitySystem.script` : 4 méthodes, toutes côté Crowd) + mods publiés (Nova Crowds, No Crowds and Cars, Disabled Crowd — tous confirment ne pas retirer les PNJ fixes). Même hook C++ candidat que `ncpdHustles`/`randomEncounters`/`cyberpsychos` |
 | `mapMarkers` | ⚠️ Partiel | nettoyage ponctuel carte/minimap + masque icône vigilance PNJ | ✅ 2026-07-05 | Nettoyage ponctuel seulement (pas garanti map-wide/persistant) — même famille de risque que le fix district : candidat prioritaire pour la migration ini (2026-07-06) |
 | `dayNightCycleScale` | 🔴 Stub, pas assez sûr | `gameTimeSystem.SetTimeDilation` existe mais affecte aussi le joueur (mauvaise sémantique) | — | Pas codé à l'aveugle, en attente d'une meilleure piste |
 

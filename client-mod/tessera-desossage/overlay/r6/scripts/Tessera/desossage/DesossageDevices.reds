@@ -31,23 +31,47 @@ public func Tessera_ApplyFastTravel(game: GameInstance, e: ref<DesossageEntry>) 
 // HYPOTHÈSE (à tester en jeu, pas encore fait) : les PNJ ambiants EN INTÉRIEUR (clients dans un
 // magasin) sont probablement, comme le trafic, spawnés via le même mécanisme que `pedestrians`
 // (zones `communityArea`/`worldCompiledCommunityAreaNode` vues dans le RTTI), donc potentiellement
-// déjà coupés par le levier `pedestrians` existant, sans code supplémentaire. Seuls les vendeurs
-// NOMMÉS scénarisés (pas ambiants) resteraient un vrai stub sans solution native trouvée.
+// déjà coupés par le levier `pedestrians` existant, sans code supplémentaire.
+//
+// TROU COMBLÉ (2026-07-07) pour les vendeurs NOMMÉS (Wakako, Bill...) : présence physique du PNJ
+// toujours indéboulonnable (aucune piste), mais leur COMMERCE est maintenant coupé par le hook
+// `MenuScenario_Vendor.OnEnterScenario` ci-dessous — recherche déléguée (Fable 5, 2026-07-07),
+// confirmée via le script décompilé officiel (CDPR-Modding-Documentation/Cyberpunk-Scripts,
+// scripts/cyberpunk/UI/fullscreen/vendor/vendorScenario.script) : c'est le point d'entrée UNIQUE
+// de tout le commerce (vendor hub, ripperdoc, craft compris).
 public func Tessera_ApplyVendors(game: GameInstance, e: ref<DesossageEntry>) -> Void {
   if e.active {
+    FTLog(s"[Tessera/Desossage] vendeurs → normaux");
     return;
   }
-  FTLog(s"[Tessera/Desossage] (stub) vendeurs → coupés");
+  FTLog(s"[Tessera/Desossage] vendeurs → icône masquée (GameplayRoleComponent) + commerce bloqué (MenuScenario_Vendor.OnEnterScenario)");
+}
+
+// Point d'entrée unique de l'UI marchande (vendor hub, ripperdoc, crafting inclus) — un seul hook
+// neutralise tous les vendeurs nommés d'un coup. Le PNJ reste visible, le commerce ne s'ouvre
+// jamais : on redirige vers `GotoIdleState()` (méthode déjà déclarée sur la classe, gère
+// proprement le retour en scénario idle) plutôt que de laisser un menu vide ouvert.
+// PIN IN-GAME : jamais testé — risque identifié par la recherche (Fable 5, 2026-07-07) : la scène
+// de dialogue qui a mené à ce scénario attend peut-être un événement de fermeture de menu
+// spécifique ; si `GotoIdleState()` seul ne suffit pas, il faudra investiguer plus loin en jeu.
+@wrapMethod(MenuScenario_Vendor)
+protected event OnEnterScenario(prevScenario: CName, userData: ref<IScriptable>) -> Void {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).vendors.active {
+    this.GotoIdleState();
+    return;
+  }
+  wrappedMethod(prevScenario, userData);
 }
 
 public func Tessera_ApplyWorldDevices(game: GameInstance, vending: ref<DesossageEntry>, inter: ref<DesossageEntry>) -> Void {
   if !vending.active {
-    // Le vrai coupe-circuit vit dans le @wrapMethod(VendingMachineControllerPS) GetActions
-    // ci-dessous (hook partagé, s'applique à toutes les instances). Couvre les distributeurs
-    // boissons/nourriture (VendingMachineControllerPS). PAS encore couvert : distributeurs
-    // d'armes (WeaponVendingMachineControllerPS) et droppoints (DropPointControllerPS) — classes
-    // PS sœurs distinctes, même famille de fix mais pas encore fait.
-    FTLog(s"[Tessera/Desossage] distributeurs (boissons/nourriture) → coupés (GetActions)");
+    // Le vrai coupe-circuit vit dans les 3 @wrapMethod GetActions ci-dessous (hooks partagés,
+    // s'appliquent à toutes les instances) : VendingMachineControllerPS (boissons/nourriture,
+    // confirmé), WeaponVendingMachineControllerPS et DropPointControllerPS (ajoutés 2026-07-07,
+    // même famille de fix, PIN IN-GAME — classes PS sœurs, chacune avec son propre override de
+    // GetActions comme VendingMachineControllerPS, donc pas couvertes par le hook générique
+    // ScriptableDeviceComponentPS ci-dessous).
+    FTLog(s"[Tessera/Desossage] distributeurs (boissons/nourriture/armes) + droppoints → coupés (GetActions)");
   }
   if !inter.active {
     // Le vrai coupe-circuit vit dans le @wrapMethod(ScriptableDeviceComponentPS) GetActions
@@ -90,6 +114,28 @@ protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetAct
 // CORRIGÉ (2026-07-05) : lisait `DesossageConfig.Default()` direct — bug confirmé en jeu, cf.
 // `DesossageSystem.GetLiveConfig`. Utilise maintenant l'état réellement vivant du panneau.
 @wrapMethod(VendingMachineControllerPS)
+protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).vendingDevices.active {
+    return false;
+  }
+  return wrappedMethod(actions, context);
+}
+
+// Distributeurs d'armes — classe PS sœur de VendingMachineControllerPS (2026-07-07), rattachée au
+// même levier `vendingDevices` (demandé explicitement : "distributeurs d'armes ... il faut les
+// activer" avec le même interrupteur que boissons/nourriture, pas un levier séparé).
+// PIN IN-GAME : jamais testé — à confirmer (menu d'achat absent sur un distributeur d'armes).
+@wrapMethod(WeaponVendingMachineControllerPS)
+protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
+  if !DesossageSystem.GetLiveConfig(GetGameInstance()).vendingDevices.active {
+    return false;
+  }
+  return wrappedMethod(actions, context);
+}
+
+// Droppoints — classe PS sœur également, même levier `vendingDevices`.
+// PIN IN-GAME : jamais testé — à confirmer (menu de dépôt absent sur un droppoint).
+@wrapMethod(DropPointControllerPS)
 protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
   if !DesossageSystem.GetLiveConfig(GetGameInstance()).vendingDevices.active {
     return false;

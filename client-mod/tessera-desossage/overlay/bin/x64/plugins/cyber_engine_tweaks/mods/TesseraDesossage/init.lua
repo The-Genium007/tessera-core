@@ -5,21 +5,21 @@
 TesseraDesossage = TesseraDesossage or {}
 
 TesseraDesossage.levers = {
-  { key = "pedestrians", label = "Piétons", note = "Réel — réagit en direct" },
-  { key = "traffic", label = "Trafic véhicules", note = "Stub — doublon confirmé de Piétons (2026-07-05), candidat à retirer" },
-  { key = "vendors", label = "Vendeurs", note = "Partiel (2026-07-05, PIN IN-GAME) — masque l'icône de rôle PNJ (GameplayRoleComponent), pas l'interaction" },
+  { key = "pedestrians", label = "Piétons", note = "Réel — réagit en direct (couvre aussi le trafic véhicules, confirmé même mécanisme, cf. levier retiré 2026-07-07)" },
+  { key = "vendors", label = "Vendeurs", note = "2026-07-07, PIN IN-GAME — icône de rôle masquée (GameplayRoleComponent) ET interaction bloquée (MenuScenario_Vendor.OnEnterScenario, jamais testée)" },
   { key = "transit", label = "Transit (métro)", note = "Stub — aucun effet" },
   { key = "police", label = "Police", note = "Réel — BOOT ONLY, recharge nécessaire" },
   { key = "ambientSecurity", label = "Sécurité ambiante", note = "Réel (menu tourelles) — probable BOOT ONLY, à confirmer" },
   { key = "gangHostility", label = "Hostilité gangs", note = "Nouveau (2026-07-05, PIN IN-GAME) — décoché = relations d'attitude neutres, gangs non hostiles" },
-  { key = "ncpdHustles", label = "Hustles NCPD", note = "Stub — absent du RTTI, aucun effet" },
-  { key = "randomEncounters", label = "Rencontres aléatoires", note = "Stub — absent du RTTI, aucun effet" },
-  { key = "cyberpsychos", label = "Cyberpsychos", note = "Stub — absent du RTTI, aucun effet" },
+  { key = "ncpdHustles", label = "Hustles NCPD", note = "Stub — absent du RTTI, aucun effet (nécessiterait un hook C++ natif)" },
+  { key = "randomEncounters", label = "Rencontres aléatoires", note = "Stub — absent du RTTI, aucun effet (nécessiterait un hook C++ natif)" },
+  { key = "cyberpsychos", label = "Cyberpsychos", note = "Stub — absent du RTTI, aucun effet (nécessiterait un hook C++ natif)" },
   { key = "fastTravel", label = "Voyage rapide", note = "Réel — BOOT ONLY, recharge nécessaire" },
-  { key = "vendingDevices", label = "Distributeurs", note = "Réel — BOOT ONLY, recharge nécessaire" },
+  { key = "vendingDevices", label = "Distributeurs", note = "Réel — BOOT ONLY, recharge nécessaire (boissons/nourriture confirmés ; armes + droppoints ajoutés 2026-07-07, PIN IN-GAME)" },
   { key = "worldInteractables", label = "Interactables monde", note = "Réel — confirmé en jeu 2026-07-05 (drop point), couvre aussi les points d'accès" },
-  { key = "questTriggers", label = "Appels fixers", note = "Réel (partiel) — décoché = icône radio déverrouillée" },
-  { key = "tutorials", label = "Tutoriels", note = "Stub — aucun effet" },
+  { key = "questTriggers", label = "Appels fixers", note = "Réel (partiel) — décoché = icône radio déverrouillée. Donneurs de quête/gigs par proximité hors de portée (hook C++ natif nécessaire)" },
+  { key = "tutorials", label = "Tutoriels", note = "2026-07-07, PIN IN-GAME — pose le fact save disable_tutorials (QuestsSystem.SetFactStr)" },
+  { key = "airTraffic", label = "Trafic aérien", note = "2026-07-07, PIN IN-GAME — pose le fact save air_traffic_off (QuestsSystem.SetFactStr)" },
   { key = "mapMarkers", label = "Marqueurs carte", note = "Nouveau (2026-07-05, PIN IN-GAME) — décoché = nettoyage PONCTUEL carte/minimap + masque l'icône de vigilance/détection PNJ (persistant, celle-ci)" },
 }
 

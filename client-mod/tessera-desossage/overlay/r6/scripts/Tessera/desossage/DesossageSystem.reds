@@ -58,7 +58,6 @@ public class DesossageSystem extends ScriptableSystem {
   public func ApplyPopulation(game: GameInstance) -> Void {
     let c = this.m_config;
     Tessera_ApplyPedestrians(game, c.pedestrians);
-    Tessera_ApplyTraffic(game, c.traffic);
     Tessera_ApplyTransit(game, c.transit);
   }
 
@@ -83,6 +82,7 @@ public class DesossageSystem extends ScriptableSystem {
     Tessera_ApplyEncounterCategory(game, n"cyberpsychos", c.cyberpsychos);
     Tessera_ApplyQuestTriggers(game, c.questTriggers);
     Tessera_ApplyTutorials(game, c.tutorials);
+    Tessera_ApplyAirTraffic(game, c.airTraffic);
   }
 
   public func ApplyWorld(game: GameInstance) -> Void {

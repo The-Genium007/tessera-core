@@ -44,12 +44,32 @@ public func Tessera_ApplyQuestTriggers(game: GameInstance, e: ref<DesossageEntry
   }
 }
 
-// Recherche (script décompilé officiel) : questTutorialManager n'expose que
-// RequestToCloseOverlay(overlayId) — ferme un overlay déjà ouvert, aucun moyen confirmé
-// d'empêcher l'ouverture en premier lieu. Confirmé insuffisant, pas juste non-trouvé.
+// CORRIGÉ (2026-07-07) : l'ancienne piste (questTutorialManager.RequestToCloseOverlay) ne
+// faisait que fermer un overlay déjà ouvert, jamais empêcher son ouverture — confirmé
+// insuffisant. Remplacée par le fact save `disable_tutorials`, retrouvé dans un vrai export
+// CyberCAT (2026-07-06) : non préfixé par un code de quête (donc pas de la progression
+// scénaristique, un simple interrupteur d'état — même famille que `radio_on`/`tv_on` cités en
+// exemple par le wiki officiel RedModding). `QuestsSystem.SetFactStr` est l'API native utilisée
+// pour poser des facts au runtime — confirmée en lisant le code réel du mod publié
+// "Immersive Gigs" (Nexus #24604, `init.lua`) : `Game.GetQuestsSystem():SetFactStr(name, value)`.
+// PIN IN-GAME : jamais testé — à confirmer (plus de popup de tutoriel en jeu).
 public func Tessera_ApplyTutorials(game: GameInstance, e: ref<DesossageEntry>) -> Void {
-  if e.active {
-    return;
-  }
-  FTLog(s"[Tessera/Desossage] (stub) tutoriels → coupés");
+  // e.active = système vanilla ACTIF (tutoriels affichés) ; défaut false = monde vide =
+  // disable_tutorials=1. Ne pas inverser : cf. le même piège corrigé sur ce fichier ci-dessous.
+  let value: Int32 = 1;
+  if e.active { value = 0; }
+  GameInstance.GetQuestsSystem(game).SetFactStr(n"disable_tutorials", value);
+  FTLog(s"[Tessera/Desossage] tutoriels → fact disable_tutorials=\(value) (SetFactStr)");
+}
+
+// Trafic aérien (AVs dans le ciel) : même mécanisme que les tutoriels ci-dessus — fact save
+// `air_traffic_off` retrouvé dans le même export CyberCAT (2026-07-06), non préfixé par un code
+// de quête. Posé au chargement via SetFactStr, pas besoin d'éditer la save partagée à la main.
+// PIN IN-GAME : jamais testé — à confirmer (plus d'AVs visibles dans le ciel).
+public func Tessera_ApplyAirTraffic(game: GameInstance, e: ref<DesossageEntry>) -> Void {
+  // Même polarité que tutorials ci-dessus : e.active=false (défaut, monde vide) → air_traffic_off=1.
+  let value: Int32 = 1;
+  if e.active { value = 0; }
+  GameInstance.GetQuestsSystem(game).SetFactStr(n"air_traffic_off", value);
+  FTLog(s"[Tessera/Desossage] trafic aérien → fact air_traffic_off=\(value) (SetFactStr)");
 }

@@ -34,34 +34,14 @@ public func Tessera_ApplyPedestrians(game: GameInstance, e: ref<DesossageEntry>)
 // deuxième fois à l'aveugle : le fix ini suffit, pas besoin de reprendre cette piste sauf si un
 // vrai pop-in visible est un jour constaté malgré l'ini.
 
-// Recherche confirmée via dump RTTI complet (WopsS/RED4ext.NativeDB) : GameInstance.GetTrafficSystem
-// retourne `worldTrafficScriptInterface`, qui n'expose qu'UNE seule méthode dans tout le jeu :
-// IsPathIntersectingWithTraffic (requête, pas de setter de densité). Parent = IScriptable (rien
-// d'hérité d'utile). AITrafficMovementSystem (la classe interne derrière l'interface scriptée) est
-// tout aussi vide — zéro méthode/champ propre à aucun niveau de sa chaîne de parenté. Piste
-// "système de trafic dédié" définitivement épuisée côté RTTI.
-//
-// HYPOTHÈSE RENFORCÉE (2026-07-03, re-creusée) : `worldPopulationSpawnerNode` (le nœud de spawn
-// placé dans le monde par le level design) a un champ `.isVehicle: Bool` — piétons ET véhicules
-// sont donc le MÊME type de nœud de spawn, juste distingués par ce booléen, pas deux systèmes
-// séparés. Les classes `populationModifier`/`populationSpawnModifier`/
-// `populationPopulationSpawnParameter` qui gravitent autour sont de purs conteneurs de données
-// (zéro méthode), cohérent avec un système consommé en interne par CommunitySystem plutôt qu'une
-// API scriptable parallèle. Ça renforce nettement l'hypothèse que `ChangeDensityModifier` pilote
-// aussi le trafic, sans qu'on ait trouvé de setter dédié séparé pour les véhicules.
-//
-// CONFIRMÉ EN JEU (2026-07-05, cf. tools/nativedb/findings.md) : comparaison avant/après au même
-// endroit — `pedestrians` décoché = 0 véhicule sur la rue ; `pedestrians` coché (rien d'autre
-// changé) = plusieurs véhicules apparaissent. `ChangeDensityModifier` pilote donc bien les deux.
-// Ce stub est un DOUBLON, pas un système à implémenter — candidat à retirer (lever + case UI dans
-// TesseraDesossage/init.lua) dans un prochain nettoyage, laissé en l'état pour ne pas changer le
-// schéma DesossageConfig pendant la session de test.
-public func Tessera_ApplyTraffic(game: GameInstance, e: ref<DesossageEntry>) -> Void {
-  let factor: Float = 0.0;
-  if e.active { factor = e.density; }
-  // PIN IN-GAME : régler la densité du trafic véhicules à `factor`.
-  FTLog(s"[Tessera/Desossage] (stub) trafic → densité \(factor)");
-}
+// Trafic véhicules : PAS un système séparé. Recherche RTTI complète (WopsS/RED4ext.NativeDB) —
+// `GameInstance.GetTrafficSystem` (`worldTrafficScriptInterface`) n'expose qu'une requête
+// (`IsPathIntersectingWithTraffic`), aucun setter de densité ; `worldPopulationSpawnerNode` a un
+// champ `.isVehicle: Bool` — piétons ET véhicules sont le MÊME nœud de spawn, juste distingués par
+// ce booléen. CONFIRMÉ EN JEU (2026-07-05, `tools/nativedb/findings.md`) : `pedestrians` décoché
+// → 0 véhicule ; `pedestrians` coché (rien d'autre changé) → véhicules réapparaissent.
+// `ChangeDensityModifier` (ci-dessus) pilote donc bien les deux. Le levier `traffic` dédié (config
+// + UI + console) a été retiré le 2026-07-07 — pur doublon, pas de code à maintenir en plus.
 
 // Recherche (dump RTTI complet) : seule classe pertinente trouvée pour "métro/NCART" est
 // `NcartTimetableControllerPS` (PS de device, même famille que VendingMachineControllerPS) — mais

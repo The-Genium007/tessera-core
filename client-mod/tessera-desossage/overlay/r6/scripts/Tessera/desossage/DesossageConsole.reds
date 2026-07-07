@@ -35,7 +35,6 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
 
   let e: ref<DesossageEntry>;
   if StrCmp(name, "pedestrians") == 0 { e = c.pedestrians; }
-  else if StrCmp(name, "traffic") == 0 { e = c.traffic; }
   else if StrCmp(name, "vendors") == 0 { e = c.vendors; }
   else if StrCmp(name, "transit") == 0 { e = c.transit; }
   else if StrCmp(name, "police") == 0 { e = c.police; }

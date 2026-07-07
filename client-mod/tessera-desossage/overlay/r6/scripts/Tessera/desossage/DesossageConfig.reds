@@ -22,8 +22,9 @@ public class DesossageEntry {
 
 public class DesossageConfig {
   // A. Population vivante
+  // (traffic retiré 2026-07-07 : confirmé en jeu 2026-07-05 comme un pur doublon de
+  // `pedestrians` — même nœud de spawn, même `ChangeDensityModifier`, cf. DesossagePopulation.reds)
   public let pedestrians: ref<DesossageEntry>;
-  public let traffic: ref<DesossageEntry>;
   public let vendors: ref<DesossageEntry>;
   public let transit: ref<DesossageEntry>;
   // B. Ordre public & hostilité
@@ -41,6 +42,10 @@ public class DesossageConfig {
   // E. Quêtes & progression
   public let questTriggers: ref<DesossageEntry>;
   public let tutorials: ref<DesossageEntry>;
+  // Fact save `air_traffic_off` (posé via QuestsSystem.SetFactStr, pas un système de spawn) —
+  // rattaché ici plutôt qu'à A. car appliqué par le même mécanisme que tutorials, pas par
+  // ChangeDensityModifier.
+  public let airTraffic: ref<DesossageEntry>;
   // F. Monde (gardé, réglable) — 1.0 normal ; 2.0 = jour/nuit 2x plus long ; 0.0 = figé
   public let dayNightCycleScale: Float;
   // G. Marqueurs carte/minimap + icônes de rôle PNJ (vendeurs, donneurs de mission)
@@ -52,7 +57,6 @@ public class DesossageConfig {
     let c = new DesossageConfig();
     // A.
     c.pedestrians = DesossageEntry.New(false, 0.0);
-    c.traffic = DesossageEntry.New(false, 0.0);
     c.vendors = DesossageEntry.New(false, 0.0);
     c.transit = DesossageEntry.New(false, 0.0);
     // B.
@@ -70,6 +74,7 @@ public class DesossageConfig {
     // E.
     c.questTriggers = DesossageEntry.New(false, 0.0);
     c.tutorials = DesossageEntry.New(false, 0.0);
+    c.airTraffic = DesossageEntry.New(false, 0.0);
     // F.
     c.dayNightCycleScale = 1.0;
     // G.
