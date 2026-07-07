@@ -1,5 +1,6 @@
 //! Squelette du serveur autoritaire. Constantes de simulation (voir spec §6).
 
+pub mod admin_commands;
 pub mod admin_store;
 pub mod anticheat;
 pub mod framing;
