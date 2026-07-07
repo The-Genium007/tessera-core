@@ -13,8 +13,18 @@ table Snapshot { tick:ulong; players:[PlayerState]; }
 // explication, juste une coupure muette).
 table Kicked { reason:string; }
 
-union ClientMsg { Join, PositionUpdate }
-union ServerMsg { Snapshot, Kicked }
+// Commande texte générique tapée en jeu (ex. "/promote Compte1 moderator") — un seul message
+// pour toutes les commandes admin actuelles et futures, pour ne jamais retoucher ce schéma
+// à chaque nouvelle commande (spec admin-mode-permissions, Partie 3).
+table AdminCommand { text:string; }
+// Réponse à un AdminCommand : succès/échec + message lisible pour l'émetteur.
+table CommandResult { success:bool; message:string; }
+// Ensemble des nœuds de permission effectifs d'un compte — poussé au Join puis à chaque
+// changement affectant ce compte, sans reconnexion nécessaire.
+table PermissionSync { nodes:[string]; }
+
+union ClientMsg { Join, PositionUpdate, AdminCommand }
+union ServerMsg { Snapshot, Kicked, CommandResult, PermissionSync }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }
