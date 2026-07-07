@@ -26,9 +26,18 @@ table Join { display_name:string; }
 table PositionUpdate { position:Vec3; yaw:float; }
 table PlayerState { id:ulong; position:Vec3; yaw:float; }
 table Snapshot { tick:ulong; players:[PlayerState]; }
-union ClientMsg { Join, PositionUpdate }   // root: ClientEnvelope{ msg }
-union ServerMsg { Snapshot }               // root: ServerEnvelope{ msg }
+table Kicked { reason:string; }
+table WorldState { hour:ubyte; minute:ubyte; weather:string; }
+table ClientTimeReport { hour:ubyte; minute:ubyte; second:ubyte; }
+union ClientMsg { Join, PositionUpdate, ClientTimeReport }   // root: ClientEnvelope{ msg }
+union ServerMsg { Snapshot, Kicked, WorldState }             // root: ServerEnvelope{ msg }
 ```
+
+**État réel au 2026-07-07** : `Kicked` (motif de déconnexion) est envoyé par le serveur mais
+**PAS ENCORE géré côté client** (`PollIncomingMessages` n'a pas de branche `ServerMsg_Kicked`) — un
+client rejeté (serveur plein, flood) reste donc coupé sans explication visible, malgré le message
+qui existe sur le fil. Signalé, pas corrigé (hors périmètre de la session qui a ajouté `WorldState`/
+`ClientTimeReport`). `WorldState`/`ClientTimeReport`, eux, **sont câblés** (voir §Diagnostic ci-dessous).
 
 Chaque message sur le fil = un `ClientEnvelope` (client→serveur) ou `ServerEnvelope` (serveur→client)
 fini comme buffer FlatBuffers racine. Côté C++, générer les en-têtes avec
@@ -59,6 +68,24 @@ Le port **remplace** la couche zpp_bits par FlatBuffers, à un point unique et i
   puis router `Snapshot` vers la logique spawn/update/despawn ci-dessus.
 - **Réutiliser tel quel** : la connexion GNS (`ConnectByIPAddress`), la boucle dans le tick
   `IGameSystem` (`NetworkGameSystem::OnRegisterUpdates`), et les helpers RTTI de `Utils.h`.
+
+## Diagnostic horloge monde partagée (2026-07-07, câblé dans le fork `port/2.31`)
+
+**Serveur → client**, toutes les 2s (indépendant du tick 20Hz des snapshots) : `WorldState{hour,
+minute, weather}` diffusé à tous les clients connectés (`gateway.rs::encode_world_state`,
+`world_clock.rs`). Côté fork : `NetworkGameSystem::PollIncomingMessages` route vers
+`HandleWorldState`, qui délègue à `NetworkGameSystem::ApplyWorldState` (redscript) →
+`Tessera_ApplyWorldState` (module `tessera-desossage`, `SetGameTimeByHMS`/`SetWeather`).
+
+**Client → serveur**, toutes les 5s : `ClientTimeReport{hour,minute,second}` — l'heure que le
+client observe localement, pour que le serveur journalise l'écart avec sa propre horloge
+(diagnostic playtest, PAS un mécanisme correctif ; tolérance 1-2s). Côté fork :
+`NetworkGameSystem::TrackWorldTimeReport` lit l'heure via `GetLocalGameSecondsSinceMidnight`
+(redscript, délègue à `Tessera_ReadLocalTime`) et encode/envoie via `SendClientTimeReport`.
+
+**PIN IN-GAME partout dans cette section** : jamais testé en jeu. Vérifier dans les logs
+`[Tessera/Desossage]`/`[TesseraSynth]` que le hook s'attache, que l'heure avance, et dans
+`session.jsonl` (événement `time_drift`) que l'écart reste dans la tolérance.
 
 ## Hors-scope de cette tranche (à NE PAS implémenter maintenant — YAGNI)
 
