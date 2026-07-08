@@ -1,0 +1,22 @@
+[package]
+name = "tessera-authority"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+description = "Génère l'artefact de partitionnement d'autorité serveur (tessellation Voronoï hybride)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tessera-authority"
+path = "src/main.rs"
