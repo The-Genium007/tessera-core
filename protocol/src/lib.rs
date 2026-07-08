@@ -51,6 +51,80 @@ mod tests {
     }
 
     #[test]
+    fn admin_command_round_trip() {
+        let mut b = FlatBufferBuilder::new();
+        let text = b.create_string("/promote Compte1 moderator");
+        let cmd = AdminCommand::create(&mut b, &AdminCommandArgs { text: Some(text) });
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::AdminCommand,
+                msg: Some(cmd.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let bytes = b.finished_data().to_vec();
+
+        let env = flatbuffers::root::<ClientEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), ClientMsg::AdminCommand);
+        let cmd = env.msg_as_admin_command().unwrap();
+        assert_eq!(cmd.text().unwrap(), "/promote Compte1 moderator");
+    }
+
+    #[test]
+    fn command_result_round_trip() {
+        let mut b = FlatBufferBuilder::new();
+        let message = b.create_string("Compte1 promu");
+        let cr = CommandResult::create(
+            &mut b,
+            &CommandResultArgs {
+                success: true,
+                message: Some(message),
+            },
+        );
+        let env = ServerEnvelope::create(
+            &mut b,
+            &ServerEnvelopeArgs {
+                msg_type: ServerMsg::CommandResult,
+                msg: Some(cr.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let bytes = b.finished_data().to_vec();
+
+        let env = flatbuffers::root::<ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::CommandResult);
+        let cr = env.msg_as_command_result().unwrap();
+        assert!(cr.success());
+        assert_eq!(cr.message().unwrap(), "Compte1 promu");
+    }
+
+    #[test]
+    fn permission_sync_round_trip() {
+        let mut b = FlatBufferBuilder::new();
+        let node_strs = vec![
+            b.create_string("admin.fly"),
+            b.create_string("admin.noclip"),
+        ];
+        let nodes = b.create_vector(&node_strs);
+        let sync = PermissionSync::create(&mut b, &PermissionSyncArgs { nodes: Some(nodes) });
+        let env = ServerEnvelope::create(
+            &mut b,
+            &ServerEnvelopeArgs {
+                msg_type: ServerMsg::PermissionSync,
+                msg: Some(sync.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let bytes = b.finished_data().to_vec();
+
+        let env = flatbuffers::root::<ServerEnvelope>(&bytes).unwrap();
+        let sync = env.msg_as_permission_sync().unwrap();
+        let nodes: Vec<&str> = sync.nodes().unwrap().iter().collect();
+        assert_eq!(nodes, vec!["admin.fly", "admin.noclip"]);
+    }
+
+    #[test]
     fn internal_client_event_round_trip() {
         use crate::internal::*;
         use flatbuffers::FlatBufferBuilder;

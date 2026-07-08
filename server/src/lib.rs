@@ -1,5 +1,7 @@
 //! Squelette du serveur autoritaire. Constantes de simulation (voir spec §6).
 
+pub mod admin_commands;
+pub mod admin_store;
 pub mod anticheat;
 pub mod framing;
 pub mod gateway;
@@ -8,6 +10,7 @@ pub mod handoff;
 pub mod internal_net;
 pub mod manifest;
 pub mod metrics;
+pub mod permissions;
 pub mod persistence;
 pub mod rate_limit;
 pub mod server_loop;

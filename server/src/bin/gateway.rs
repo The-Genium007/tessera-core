@@ -29,8 +29,13 @@ async fn main() -> std::io::Result<()> {
         });
     let listen = manifest.runtime.gateway.listen_addr.clone();
     let store = server::persistence::FileStore::open(&store_path);
+    let admin_store = server::admin_store::AdminStore::open(
+        std::path::Path::new(&store_path).with_file_name("permission_groups.json"),
+        std::path::Path::new(&store_path).with_file_name("server_admins.json"),
+    );
     let max_players = manifest.identity.max_players;
-    server::gateway::gateway_main(&listen, topology, radius, store, spawn, max_players).await
+    server::gateway::gateway_main(&listen, topology, radius, store, admin_store, spawn, max_players)
+        .await
 }
 
 #[cfg(not(feature = "gns"))]

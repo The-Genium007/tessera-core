@@ -86,6 +86,17 @@ pub fn extract_join_name(client_payload: &[u8]) -> Option<String> {
     join.display_name().map(sanitize_display_name)
 }
 
+/// Décode un `ClientEnvelope` client ; si c'est un `AdminCommand`, renvoie son texte brut
+/// (le parsing/la validation vivent dans `admin_commands::parse`, pas ici).
+pub fn extract_admin_command(client_payload: &[u8]) -> Option<String> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::AdminCommand {
+        return None;
+    }
+    let cmd = env.msg_as_admin_command()?;
+    cmd.text().map(|s| s.to_string())
+}
+
 use crate::internal_net::event_to_client_event_frame;
 use crate::transport::{ClientId, TransportEvent};
 use std::collections::HashMap;
@@ -216,6 +227,21 @@ mod tests {
         b.finished_data().to_vec()
     }
 
+    fn client_admin_command(text: &str) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let t = b.create_string(text);
+        let cmd = AdminCommand::create(&mut b, &AdminCommandArgs { text: Some(t) });
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::AdminCommand,
+                msg: Some(cmd.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
     #[test]
     fn encode_position_update_round_trips_through_extract_position() {
         let payload = encode_position_update([2387.0, -1295.0, 63.0]);
@@ -268,6 +294,16 @@ mod tests {
         );
         assert_eq!(extract_time_report(&client_join()), None); // pas un ClientTimeReport
         assert_eq!(extract_time_report(&[7, 7, 7]), None); // garbage
+    }
+
+    #[test]
+    fn extract_admin_command_reads_text() {
+        assert_eq!(
+            extract_admin_command(&client_admin_command("/promote Compte1 moderator")),
+            Some("/promote Compte1 moderator".to_string())
+        );
+        assert_eq!(extract_admin_command(&client_join()), None); // pas un AdminCommand
+        assert_eq!(extract_admin_command(&[9, 9, 9]), None); // garbage
     }
 
     #[test]
