@@ -102,3 +102,18 @@ bat toutes les 30 s vers `PLATFORM_URL` (défaut `https://platform.tesserasynth.
 d'identité Ed25519 est créée au premier lancement dans le volume (`/data/server_identity.b64`)
 — la sauvegarder : c'est elle qui prouve l'identité du serveur auprès du registre. Sans
 heartbeat depuis 90 s, le serveur disparaît de la liste publique (`GET /v1/servers`).
+
+## Pipeline de release (canaux dev/playtest/main)
+
+Depuis l'introduction du pipeline unifié (`.github/workflows/release.yml`, voir
+`docs/superpowers/specs/2026-07-08-server-release-channels-design.md`), le serveur est publié
+par version/canal signée sur `The-Genium007/tessera-core`, synchronisée avec le modset client.
+
+**Prérequis opérateur (une fois) :**
+
+- Secret de dépôt `CORE_RELEASE_TOKEN` : token avec droits push + Releases sur
+  `The-Genium007/tessera-core` (équivalent de `DISTRIBUTION_TOKEN` pour l'ancien pipeline modset).
+- Le canal `main` publie une image `ghcr.io/the-genium007/tessera-server:main` (tag flottant,
+  repoussé uniquement à la promotion `playtest→main`). **Reconfigurer Dokploy** pour tirer ce tag
+  au lieu de `:latest` — Dokploy n'est pas piloté depuis ce dépôt, ce changement se fait dans son
+  interface/état, hors CI.
