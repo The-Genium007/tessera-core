@@ -6,3 +6,4 @@ pub mod geometry;
 pub mod params;
 pub mod periphery;
 pub mod prng;
+pub mod raster;
