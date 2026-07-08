@@ -4,4 +4,5 @@ pub mod cluster;
 pub mod districts;
 pub mod geometry;
 pub mod params;
+pub mod periphery;
 pub mod prng;
