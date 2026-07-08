@@ -653,7 +653,7 @@ pub async fn gateway_main(
                         tracing::info!(client = cid, actor = %issuer, ?text, "commande admin exécutée");
                     } else {
                         tracing::warn!(
-                            client = cid, actor = %issuer, ?text, message = %outcome.message,
+                            client = cid, actor = %issuer, ?text, message = ?outcome.message,
                             "commande admin refusée"
                         );
                     }
