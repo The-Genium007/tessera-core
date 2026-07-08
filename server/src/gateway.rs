@@ -183,7 +183,13 @@ pub fn encode_world_state(hour: u8, minute: u8, weather: &str) -> Vec<u8> {
 pub fn encode_command_result(success: bool, message: &str) -> Vec<u8> {
     let mut b = flatbuffers::FlatBufferBuilder::new();
     let message = b.create_string(message);
-    let cr = CommandResult::create(&mut b, &CommandResultArgs { success, message: Some(message) });
+    let cr = CommandResult::create(
+        &mut b,
+        &CommandResultArgs {
+            success,
+            message: Some(message),
+        },
+    );
     let env = ServerEnvelope::create(
         &mut b,
         &ServerEnvelopeArgs {
@@ -201,7 +207,12 @@ pub fn encode_permission_sync(nodes: &[String]) -> Vec<u8> {
     let mut b = flatbuffers::FlatBufferBuilder::new();
     let node_strs: Vec<_> = nodes.iter().map(|s| b.create_string(s)).collect();
     let nodes_vec = b.create_vector(&node_strs);
-    let sync = PermissionSync::create(&mut b, &PermissionSyncArgs { nodes: Some(nodes_vec) });
+    let sync = PermissionSync::create(
+        &mut b,
+        &PermissionSyncArgs {
+            nodes: Some(nodes_vec),
+        },
+    );
     let env = ServerEnvelope::create(
         &mut b,
         &ServerEnvelopeArgs {
@@ -237,6 +248,20 @@ pub fn accounts_to_resync(
             .collect();
     }
     Vec::new()
+}
+
+/// Vrai si `issuer` doit être traité comme admin racine (`*`, `Rank::GameMaster`) — soit listé
+/// explicitement dans `root_admins` (`TESSERA_ROOT_ADMINS`), soit le bypass temporaire de
+/// playtest est actif (`TESSERA_PLAYTEST_ALL_ADMIN=true`) : dans ce cas TOUT compte connecté est
+/// root, sans lister le moindre `display_name` — pratique pour un petit groupe de testeurs, à
+/// retirer de la variable d'environnement une fois le playtest terminé (jamais persisté, même
+/// discipline que `root_admins`).
+pub fn resolve_is_root(
+    issuer: &str,
+    root_admins: &std::collections::HashSet<String>,
+    playtest_all_admin: bool,
+) -> bool {
+    playtest_all_admin || root_admins.contains(issuer)
 }
 
 /// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
@@ -390,6 +415,14 @@ pub async fn gateway_main(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+
+    // Bypass temporaire de playtest (2026-07-08) : tout compte connecté devient admin racine,
+    // sans lister le moindre `display_name` — pratique le temps d'un petit groupe de testeurs.
+    // Vide/absent par défaut (comportement inchangé) ; à retirer de l'environnement du
+    // déploiement une fois le playtest terminé, même discipline que `TESSERA_ROOT_ADMINS`.
+    let playtest_all_admin = std::env::var("TESSERA_PLAYTEST_ALL_ADMIN")
+        .map(|v| v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     // Journal de session (spec playtest-shards §#4) : vérité autoritaire des handoffs/stalls.
     let session_log_path =
@@ -547,11 +580,17 @@ pub async fn gateway_main(
                         );
                         residence.insert(cid, record.and_then(|r| r.residence));
                         last_pos.insert(cid, pos); // départ tant qu'aucune position réelle
-                        let is_root = root_admins.contains(&name);
-                        let admin_record =
-                            admin_store.admins.iter().find(|a| a.display_name == name).cloned();
-                        let resolved =
-                            resolve_permissions(is_root, admin_record.as_ref(), &admin_store.groups);
+                        let is_root = resolve_is_root(&name, &root_admins, playtest_all_admin);
+                        let admin_record = admin_store
+                            .admins
+                            .iter()
+                            .find(|a| a.display_name == name)
+                            .cloned();
+                        let resolved = resolve_permissions(
+                            is_root,
+                            admin_record.as_ref(),
+                            &admin_store.groups,
+                        );
                         let rank = derive_rank(&resolved);
                         if rank != Rank::Player {
                             tracing::info!(client = cid, %name, ?rank, "rang attribué");
@@ -679,7 +718,7 @@ pub async fn gateway_main(
                     }
                 } else if let Some(text) = extract_admin_command(data) {
                     let issuer = keys.get(&cid).cloned().unwrap_or_default();
-                    let is_root = root_admins.contains(&issuer);
+                    let is_root = resolve_is_root(&issuer, &root_admins, playtest_all_admin);
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
@@ -723,12 +762,19 @@ pub async fn gateway_main(
                             "commande admin refusée"
                         );
                     }
-                    client.send(cid, &encode_command_result(outcome.success, &outcome.message));
-                    let to_resync =
-                        accounts_to_resync(&outcome, group_affected.as_deref(), &admin_store.admins);
+                    client.send(
+                        cid,
+                        &encode_command_result(outcome.success, &outcome.message),
+                    );
+                    let to_resync = accounts_to_resync(
+                        &outcome,
+                        group_affected.as_deref(),
+                        &admin_store.admins,
+                    );
                     for target in &to_resync {
                         if let Some((&target_cid, _)) = keys.iter().find(|(_, n)| *n == target) {
-                            let is_target_root = root_admins.contains(target);
+                            let is_target_root =
+                                resolve_is_root(target, &root_admins, playtest_all_admin);
                             let target_record = admin_store
                                 .admins
                                 .iter()
@@ -1384,8 +1430,14 @@ mod tests {
             message: "x".into(),
             affected_account: Some("Compte1".to_string()),
         };
-        let admins = vec![resync_test_admin("Compte1", "moderator"), resync_test_admin("Compte2", "moderator")];
-        assert_eq!(accounts_to_resync(&outcome, None, &admins), vec!["Compte1".to_string()]);
+        let admins = vec![
+            resync_test_admin("Compte1", "moderator"),
+            resync_test_admin("Compte2", "moderator"),
+        ];
+        assert_eq!(
+            accounts_to_resync(&outcome, None, &admins),
+            vec!["Compte1".to_string()]
+        );
     }
 
     #[test]
@@ -1414,6 +1466,33 @@ mod tests {
         };
         let admins = vec![resync_test_admin("Compte1", "admin")];
         assert!(accounts_to_resync(&outcome, Some("moderator"), &admins).is_empty());
+    }
+
+    #[test]
+    fn resolve_is_root_grants_listed_root_admins() {
+        let root_admins: std::collections::HashSet<String> =
+            ["Compte1".to_string()].into_iter().collect();
+        assert!(resolve_is_root("Compte1", &root_admins, false));
+    }
+
+    #[test]
+    fn resolve_is_root_denies_unlisted_accounts_by_default() {
+        let root_admins: std::collections::HashSet<String> =
+            ["Compte1".to_string()].into_iter().collect();
+        assert!(!resolve_is_root("Compte2", &root_admins, false));
+    }
+
+    #[test]
+    fn resolve_is_root_grants_everyone_when_playtest_bypass_is_active() {
+        let root_admins: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert!(resolve_is_root("AnyoneAtAll", &root_admins, true));
+    }
+
+    #[test]
+    fn resolve_is_root_bypass_does_not_remove_the_listed_root_admins() {
+        let root_admins: std::collections::HashSet<String> =
+            ["Compte1".to_string()].into_iter().collect();
+        assert!(resolve_is_root("Compte1", &root_admins, true));
     }
 
     #[test]

@@ -50,6 +50,10 @@ services:
       # vitesse/téléportation). Positionner via l'environnement du déploiement (.env / export),
       # pas en dur ici.
       TESSERA_ROOT_ADMINS: ${TESSERA_ROOT_ADMINS:-}
+      # Vide/absent par défaut (comportement inchangé) — "true" rend TOUT compte connecté admin
+      # racine, sans lister le moindre display_name. Bypass temporaire de playtest uniquement :
+      # à retirer de l'environnement du déploiement une fois le playtest terminé.
+      TESSERA_PLAYTEST_ALL_ADMIN: ${TESSERA_PLAYTEST_ALL_ADMIN:-}
     depends_on:
       - shard-a
       - shard-b
