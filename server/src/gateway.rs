@@ -189,6 +189,32 @@ pub fn encode_permission_sync(nodes: &[String]) -> Vec<u8> {
     b.finished_data().to_vec()
 }
 
+/// Comptes à re-synchroniser (nouveau `PermissionSync`) après une commande admin réussie — soit
+/// le compte directement visé (`/promote`, `/grant`...), soit tous les comptes du groupe édité
+/// (`/groupgrant`, `/grouprevoke` — leur ensemble effectif de permissions change sans qu'aucun
+/// `affected_account` individuel ne soit rapporté par `execute()`). `/deletegroup` n'a jamais
+/// besoin de resync : `execute()` le refuse tant qu'un compte porte encore ce groupe.
+pub fn accounts_to_resync(
+    outcome: &crate::admin_commands::ExecOutcome,
+    group_affected: Option<&str>,
+    admins: &[crate::permissions::AdminRecord],
+) -> Vec<String> {
+    if !outcome.success {
+        return Vec::new();
+    }
+    if let Some(account) = &outcome.affected_account {
+        return vec![account.clone()];
+    }
+    if let Some(group) = group_affected {
+        return admins
+            .iter()
+            .filter(|a| a.group == group)
+            .map(|a| a.display_name.clone())
+            .collect();
+    }
+    Vec::new()
+}
+
 /// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
 /// rejouer vers ce shard après une reconnexion. Le shard vient de perdre tout son état (nouveau
 /// `Server::new()` recréé côté Shard à chaque connexion acceptée, cf. `shard_main`) et ne connaît
@@ -592,7 +618,15 @@ pub async fn gateway_main(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    let outcome = match parse_admin_command(&text) {
+                    let parsed = parse_admin_command(&text);
+                    let group_affected: Option<String> = match &parsed {
+                        Ok(crate::admin_commands::ParsedCommand::GroupGrant { group, .. })
+                        | Ok(crate::admin_commands::ParsedCommand::GroupRevoke { group, .. }) => {
+                            Some(group.clone())
+                        }
+                        _ => None,
+                    };
+                    let outcome = match parsed {
                         Ok(cmd) => execute_admin_command(
                             cmd,
                             is_root,
@@ -616,15 +650,17 @@ pub async fn gateway_main(
                                 action: text.clone(),
                             });
                         }
-                        tracing::info!(client = cid, actor = %issuer, %text, "commande admin exécutée");
+                        tracing::info!(client = cid, actor = %issuer, ?text, "commande admin exécutée");
                     } else {
                         tracing::warn!(
-                            client = cid, actor = %issuer, %text, message = %outcome.message,
+                            client = cid, actor = %issuer, ?text, message = %outcome.message,
                             "commande admin refusée"
                         );
                     }
                     client.send(cid, &encode_command_result(outcome.success, &outcome.message));
-                    if let Some(target) = &outcome.affected_account {
+                    let to_resync =
+                        accounts_to_resync(&outcome, group_affected.as_deref(), &admin_store.admins);
+                    for target in &to_resync {
                         if let Some((&target_cid, _)) = keys.iter().find(|(_, n)| *n == target) {
                             let is_target_root = root_admins.contains(target);
                             let target_record = admin_store
@@ -1229,6 +1265,67 @@ mod tests {
             .expect("la reconnexion automatique doit réussir");
         assert!(shards.contains_key(&addr));
         accept2.await.unwrap();
+    }
+
+    fn resync_test_admin(name: &str, group: &str) -> crate::permissions::AdminRecord {
+        crate::permissions::AdminRecord {
+            display_name: name.to_string(),
+            group: group.to_string(),
+            extra_permissions: vec![],
+            revoked_permissions: vec![],
+            granted_at: 0,
+            granted_by: "Root".to_string(),
+        }
+    }
+
+    #[test]
+    fn accounts_to_resync_returns_nothing_on_failed_outcome() {
+        let outcome = crate::admin_commands::ExecOutcome {
+            success: false,
+            message: "x".into(),
+            affected_account: None,
+        };
+        let admins = vec![resync_test_admin("A", "moderator")];
+        assert!(accounts_to_resync(&outcome, Some("moderator"), &admins).is_empty());
+    }
+
+    #[test]
+    fn accounts_to_resync_returns_only_the_directly_affected_account() {
+        let outcome = crate::admin_commands::ExecOutcome {
+            success: true,
+            message: "x".into(),
+            affected_account: Some("Compte1".to_string()),
+        };
+        let admins = vec![resync_test_admin("Compte1", "moderator"), resync_test_admin("Compte2", "moderator")];
+        assert_eq!(accounts_to_resync(&outcome, None, &admins), vec!["Compte1".to_string()]);
+    }
+
+    #[test]
+    fn accounts_to_resync_returns_every_member_of_an_edited_group() {
+        let outcome = crate::admin_commands::ExecOutcome {
+            success: true,
+            message: "x".into(),
+            affected_account: None,
+        };
+        let admins = vec![
+            resync_test_admin("Compte1", "moderator"),
+            resync_test_admin("Compte2", "moderator"),
+            resync_test_admin("Compte3", "admin"),
+        ];
+        let mut resynced = accounts_to_resync(&outcome, Some("moderator"), &admins);
+        resynced.sort();
+        assert_eq!(resynced, vec!["Compte1".to_string(), "Compte2".to_string()]);
+    }
+
+    #[test]
+    fn accounts_to_resync_returns_nothing_when_no_account_matches_the_edited_group() {
+        let outcome = crate::admin_commands::ExecOutcome {
+            success: true,
+            message: "x".into(),
+            affected_account: None,
+        };
+        let admins = vec![resync_test_admin("Compte1", "admin")];
+        assert!(accounts_to_resync(&outcome, Some("moderator"), &admins).is_empty());
     }
 
     #[test]
