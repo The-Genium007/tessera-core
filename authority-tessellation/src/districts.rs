@@ -1,6 +1,12 @@
-use crate::geometry::{area, centroid, Point};
+use crate::geometry::{area, bbox, centroid, Point};
 use crate::params::{Regime, DENSE_AREA_THRESHOLD, EXCLUDED_CODES};
 use serde::Deserialize;
+
+/// Étendue minimale (mètres) pour qu'un `Districts.*` compte comme quartier géographique.
+/// En dessous, c'est un marqueur d'intérieur/POI (étage de tour, boutique, club) — exclu de la
+/// topologie d'autorité, sinon il pollue le clustering et déforme les cellules. Les zones
+/// manuelles (`synthetic`, ex. la station orbitale) échappent au filtre.
+pub const MIN_DISTRICT_SPAN: f64 = 50.0;
 
 #[derive(Debug, Clone)]
 pub struct District {
@@ -29,6 +35,11 @@ struct RawFile {
 
 fn build(raw: RawEntry) -> Option<District> {
     if EXCLUDED_CODES.contains(&raw.code.as_str()) || raw.polygon.len() < 3 {
+        return None;
+    }
+    let (min_x, max_x, min_y, max_y) = bbox(&raw.polygon);
+    let span = (max_x - min_x).max(max_y - min_y);
+    if !raw.synthetic && span < MIN_DISTRICT_SPAN {
         return None;
     }
     let a = area(&raw.polygon);
@@ -113,5 +124,37 @@ mod tests {
         let ds = load(SAMPLE, Some(manual)).unwrap();
         let orb = ds.iter().find(|d| d.code == "ORB").unwrap();
         assert!(orb.synthetic);
+    }
+
+    #[test]
+    fn excludes_small_poi_by_span() {
+        // Marqueur d'intérieur (bbox 30x30 < 50) — exclu ; le vrai quartier reste.
+        let json = r#"{"entries":[
+          {"id":"p","tweakdb_path":"Districts.MistysShop","code":"MS","has_transform":true,
+           "polygon":[[0,0],[30,0],[30,30],[0,30]]},
+          {"id":"k","tweakdb_path":"Districts.Kabuki","code":"KAB","has_transform":true,
+           "polygon":[[0,0],[500,0],[500,500],[0,500]]}
+        ],"warnings":[]}"#;
+        let ds = load(json, None).unwrap();
+        assert!(
+            ds.iter().all(|d| d.code != "MS"),
+            "le POI MS aurait dû être exclu"
+        );
+        assert!(
+            ds.iter().any(|d| d.code == "KAB"),
+            "le vrai quartier KAB doit rester"
+        );
+    }
+
+    #[test]
+    fn synthetic_small_zone_is_kept_despite_span() {
+        // Une zone manuelle petite ne doit PAS être filtrée par la taille.
+        let manual = r#"[{"id":"s","tweakdb_path":"Manual.Tiny","code":"TNY",
+          "synthetic":true,"polygon":[[0,0],[20,0],[20,20],[0,20]]}]"#;
+        let ds = load(r#"{"entries":[],"warnings":[]}"#, Some(manual)).unwrap();
+        assert!(
+            ds.iter().any(|d| d.code == "TNY"),
+            "zone synthétique petite conservée"
+        );
     }
 }
