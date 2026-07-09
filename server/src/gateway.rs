@@ -533,6 +533,9 @@ pub async fn gateway_main(
                     }
                     RateDecision::Kick => {
                         tracing::warn!(client = cid, "kick : flood soutenu (rate-limit)");
+                        metrics
+                            .rejected_messages_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         client.send(cid, &encode_kicked("flood"));
                         client.disconnect(cid);
                         if let Some(name) = keys.remove(&cid) {
@@ -569,6 +572,9 @@ pub async fn gateway_main(
                     if !name.is_empty() {
                         if !keys.contains_key(&cid) && keys.len() >= max_players as usize {
                             tracing::warn!(client = cid, max_players, "kick : serveur plein");
+                            metrics
+                                .rejected_messages_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             client.send(cid, &encode_kicked("serveur plein"));
                             client.disconnect(cid);
                             rate_states.remove(&cid);
@@ -642,6 +648,9 @@ pub async fn gateway_main(
                     };
                     if !plausible {
                         tracing::warn!(client = cid, "PositionUpdate rejeté (vitesse implausible)");
+                        metrics
+                            .rejected_messages_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
                     last_pos.insert(cid, [x, y, z]);

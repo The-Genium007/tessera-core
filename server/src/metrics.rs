@@ -14,6 +14,7 @@ pub struct Metrics {
     pub players: AtomicU64,
     pub shards_loaded: AtomicU64,
     pub last_tick_micros: AtomicI64,
+    pub rejected_messages_total: AtomicU64,
 }
 
 impl Metrics {
@@ -33,10 +34,14 @@ impl Metrics {
              tessera_shards_loaded {}\n\
              # HELP tessera_last_tick_micros Durée du dernier tick, en microsecondes (Shard ; 0 pour un Gateway).\n\
              # TYPE tessera_last_tick_micros gauge\n\
-             tessera_last_tick_micros {}\n",
+             tessera_last_tick_micros {}\n\
+             # HELP tessera_rejected_messages_total Total cumulé de messages rejetés (flood, anti-triche, serveur plein).\n\
+             # TYPE tessera_rejected_messages_total counter\n\
+             tessera_rejected_messages_total {}\n",
             self.players.load(Ordering::Relaxed),
             self.shards_loaded.load(Ordering::Relaxed),
             self.last_tick_micros.load(Ordering::Relaxed),
+            self.rejected_messages_total.load(Ordering::Relaxed),
         )
     }
 }
@@ -77,6 +82,14 @@ mod tests {
         assert!(text.contains("tessera_last_tick_micros 1234"));
     }
 
+    #[test]
+    fn render_includes_rejected_messages_total() {
+        let m = Metrics::default();
+        m.rejected_messages_total.fetch_add(3, Ordering::Relaxed);
+        let out = m.render();
+        assert!(out.contains("tessera_rejected_messages_total 3"));
+    }
+
     #[tokio::test]
     async fn serve_responds_with_prometheus_text_containing_current_values() {
         use tokio::net::TcpStream;
@@ -108,5 +121,41 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("200 OK"));
         assert!(text.contains("tessera_players 3"));
+    }
+
+    #[tokio::test]
+    async fn rejected_messages_metric_increases_on_server_full_kick() {
+        use tokio::net::TcpStream;
+
+        let metrics = Metrics::new();
+        // Simulate 5 rejections happening in the gateway (e.g., server full kicks, rate limits, anticheat)
+        metrics
+            .rejected_messages_total
+            .fetch_add(5, Ordering::Relaxed);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        let m = metrics.clone();
+        let addr_clone = addr.clone();
+        tokio::spawn(async move { serve(&addr_clone, m).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut sock = TcpStream::connect(&addr).await.unwrap();
+        sock.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sock.read_to_end(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("200 OK"));
+        assert!(text.contains("tessera_rejected_messages_total 5"));
     }
 }
