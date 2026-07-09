@@ -106,9 +106,32 @@ impl PostgresStore {
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
 
-        Ok(row.map(|(last_position, residence)| PlayerRecord {
-            last_position: last_position.try_into().unwrap_or([0.0; 3]),
-            residence: residence.map(|v| v.try_into().unwrap_or([0.0; 3])),
+        let (last_position, residence) = match row {
+            Some(row) => row,
+            None => return Ok(None),
+        };
+
+        let last_position: [f32; 3] = last_position.try_into().map_err(|v: Vec<f32>| {
+            StoreError::Database(format!(
+                "malformed last_position array: expected length 3, got {}",
+                v.len()
+            ))
+        })?;
+        let residence: Option<[f32; 3]> = match residence {
+            Some(v) => {
+                let len = v.len();
+                Some(v.try_into().map_err(|_| {
+                    StoreError::Database(format!(
+                        "malformed residence array: expected length 3, got {len}"
+                    ))
+                })?)
+            }
+            None => None,
+        };
+
+        Ok(Some(PlayerRecord {
+            last_position,
+            residence,
         }))
     }
 }
@@ -232,5 +255,27 @@ mod tests {
         );
         // Le deuxième subject n'a jamais été inséré.
         assert_eq!(store.load_async("sub-b").await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn load_errors_on_malformed_last_position_array_length(pool: PgPool) {
+        // Postgres n'impose pas réellement la longueur `REAL[3]` déclarée dans la
+        // migration (annotation cosmétique) — une ligne avec un tableau de mauvaise
+        // longueur (bug futur, édition manuelle...) doit faire échouer `load_async`
+        // explicitement, pas décoder silencieusement en `[0.0; 3]`.
+        sqlx::query(
+            "INSERT INTO player_records (subject, display_name, last_position)
+             VALUES ($1, $2, $3)",
+        )
+        .bind("sub-malformed")
+        .bind("MalformedName")
+        .bind(&[1.0f32, 2.0][..])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let store = PostgresStore::new(pool);
+        let result = store.load_async("sub-malformed").await;
+        assert!(matches!(result, Err(StoreError::Database(_))));
     }
 }
