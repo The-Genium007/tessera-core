@@ -2,7 +2,10 @@ namespace cyberpunk_rp.protocol;
 
 struct Vec3 { x:float; y:float; z:float; }
 
-table Join { display_name:string; }
+// `token` : JWT ZITADEL optionnel (chaîne vide par défaut FlatBuffers si absent) — ignoré
+// intégralement par un serveur privé (`identity.public = false`, défaut), exigé et vérifié via
+// `JwksCache::verify` par un serveur public (design 2026-07-09, launcher-server-auth).
+table Join { display_name:string; token:string; }
 table PositionUpdate { position:Vec3; yaw:float; }
 
 table PlayerState { id:ulong; position:Vec3; yaw:float; }

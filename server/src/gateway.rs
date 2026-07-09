@@ -264,6 +264,36 @@ pub fn resolve_is_root(
     playtest_all_admin || root_admins.contains(issuer)
 }
 
+/// Décide, au moment du `Join`, la clé effective de persistance (`store.load`/`store.save`) pour
+/// ce client (design 2026-07-09, launcher-server-auth §4) :
+/// - Serveur privé (`identity_public = false`, défaut) : comportement historique inchangé, le
+///   `display_name` fourni devient la clé, `token` est ignoré intégralement.
+/// - Serveur public (`identity_public = true`) : un token JWT non vide est exigé et vérifié via
+///   `JwksCache::verify` (Task C1) ; le `sub` OIDC vérifié devient la clé — jamais le
+///   `display_name` libre non vérifié, root cause du bug playtest 1 (deux comptes distincts avec
+///   le même display_name partageaient silencieusement un enregistrement).
+///
+/// `Err` porte le message `Kicked` à renvoyer au client avant de couper la connexion (token
+/// absent ou invalide) — jamais un timeout silencieux.
+pub fn resolve_join_key(
+    identity_public: bool,
+    name: &str,
+    token: &str,
+    jwks_cache: &crate::jwks::JwksCache,
+) -> Result<String, &'static str> {
+    if !identity_public {
+        return Ok(name.to_string());
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("compte requis sur ce serveur");
+    }
+    match jwks_cache.verify(token, "launcher") {
+        Ok(claims) => Ok(claims.sub),
+        Err(_) => Err("session invalide, reconnectez-vous"),
+    }
+}
+
 /// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
 /// rejouer vers ce shard après une reconnexion. Le shard vient de perdre tout son état (nouveau
 /// `Server::new()` recréé côté Shard à chaque connexion acceptée, cf. `shard_main`) et ne connaît
@@ -326,6 +356,7 @@ pub fn apply_shard_frame_to_client<T: Transport>(body: &[u8], client: &mut T) {
 /// ses shards chargés, et **fusionne** les snapshots reçus de ces shards en un seul avant de les
 /// renvoyer au client. Le double-chargement près d'une frontière élimine les saccades au transfert.
 #[cfg(feature = "gns")]
+#[allow(clippy::too_many_arguments)] // config de boot (manifeste éclaté en paramètres), pas un point d'appel répété
 pub async fn gateway_main(
     listen_addr: &str,
     topology: crate::handoff::ShardTopology,
@@ -334,10 +365,12 @@ pub async fn gateway_main(
     mut admin_store: crate::admin_store::AdminStore,
     spawn: [f32; 3],
     max_players: u32,
+    jwks_cache: std::sync::Arc<crate::jwks::JwksCache>,
+    identity_public: bool,
 ) -> std::io::Result<()> {
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
-        extract_admin_command, extract_join_name, extract_position, extract_time_report,
+        extract_admin_command, extract_join_fields, extract_position, extract_time_report,
     };
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
@@ -565,8 +598,19 @@ pub async fn gateway_main(
             // PositionUpdate → placement (topologie + rang) et mémorisation de la dernière position.
             let mut placement = None;
             if let TransportEvent::Message { data, .. } = &ev {
-                if let Some(name) = extract_join_name(data) {
-                    if !name.is_empty() {
+                if let Some((name, token)) = extract_join_fields(data) {
+                    if !name.is_empty() || !token.is_empty() {
+                        let effective_key =
+                            match resolve_join_key(identity_public, &name, &token, &jwks_cache) {
+                                Ok(key) => key,
+                                Err(reason) => {
+                                    tracing::warn!(client = cid, %reason, "kick : Join refusé");
+                                    client.send(cid, &encode_kicked(reason));
+                                    client.disconnect(cid);
+                                    rate_states.remove(&cid);
+                                    continue;
+                                }
+                            };
                         if !keys.contains_key(&cid) && keys.len() >= max_players as usize {
                             tracing::warn!(client = cid, max_players, "kick : serveur plein");
                             client.send(cid, &encode_kicked("serveur plein"));
@@ -574,7 +618,7 @@ pub async fn gateway_main(
                             rate_states.remove(&cid);
                             continue;
                         }
-                        let record = store.load(&name);
+                        let record = store.load(&effective_key);
                         let (pos, source) = resolve_spawn(record.as_ref(), spawn);
                         tracing::info!(
                             "Connexion de {name} : placement décidé {pos:?} (source: {source:?})"
@@ -607,7 +651,7 @@ pub async fn gateway_main(
                                 name: name.clone(),
                             });
                         }
-                        keys.insert(cid, name);
+                        keys.insert(cid, effective_key);
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
                     let now = std::time::Instant::now();
@@ -987,6 +1031,7 @@ mod tests {
             &mut b,
             &protocol::JoinArgs {
                 display_name: Some(name),
+                token: None,
             },
         );
         let env = protocol::ClientEnvelope::create(
@@ -1448,6 +1493,157 @@ mod tests {
         let root_admins: std::collections::HashSet<String> =
             ["Compte1".to_string()].into_iter().collect();
         assert!(resolve_is_root("Compte1", &root_admins, true));
+    }
+
+    // --- resolve_join_key (Task C2, vérification JWT au Join) -------------------------------
+    //
+    // `JwksCache` (Task C1, `crate::jwks`) n'expose délibérément aucun constructeur de test
+    // pré-rempli en dehors de son propre module — cette tâche n'a pas à toucher jwks.rs. La
+    // seule voie publique pour peupler un cache de test est donc `refresh()` contre un mini
+    // serveur HTTP mocké, exactement comme le fait déjà le test
+    // `refresh_populates_cache_from_jwks_endpoint` dans jwks.rs — dupliqué ici à dessein plutôt
+    // que rendu public depuis jwks.rs (hors périmètre C2).
+
+    const JOIN_TEST_KID: &str = "gateway-join-test-key-1";
+
+    struct JoinTestRsaKeyMaterial {
+        encoding_key: jsonwebtoken::EncodingKey,
+        n_b64: String,
+        e_b64: String,
+    }
+
+    fn generate_join_test_rsa_key_material() -> JoinTestRsaKeyMaterial {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        use rsa::traits::PublicKeyParts;
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+
+        let mut rng = rand::rngs::OsRng;
+        let private_key =
+            RsaPrivateKey::new(&mut rng, 2048).expect("génération de la clé RSA de test");
+        let public_key = RsaPublicKey::from(&private_key);
+        let pem = private_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .expect("encodage PKCS1 PEM de la clé de test");
+        let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes())
+            .expect("clé RSA de test illisible par jsonwebtoken");
+        let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
+        let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+        JoinTestRsaKeyMaterial {
+            encoding_key,
+            n_b64,
+            e_b64,
+        }
+    }
+
+    fn encode_join_test_token(
+        claims: &crate::jwks::Claims,
+        key: &jsonwebtoken::EncodingKey,
+    ) -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(JOIN_TEST_KID.to_string());
+        jsonwebtoken::encode(&header, claims, key).expect("échec de l'encodage du token de test")
+    }
+
+    fn far_future_timestamp() -> u64 {
+        9_999_999_999 // an. 2286 — largement suffisant pour ne jamais expirer en test
+    }
+
+    /// Démarre un serveur HTTP mocké servant un unique document JWKS ({ "keys": [...] }) et
+    /// rafraîchit un `JwksCache` neuf contre lui. Renvoie le cache peuplé + la clé d'encodage
+    /// correspondante (pour signer des tokens "valides" dans les tests).
+    async fn join_test_jwks_cache_with_valid_key(
+    ) -> (crate::jwks::JwksCache, JoinTestRsaKeyMaterial) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let material = generate_join_test_rsa_key_material();
+        let body = format!(
+            "{{\"keys\":[{{\"kid\":\"{kid}\",\"kty\":\"RSA\",\"n\":\"{n}\",\"e\":\"{e}\"}}]}}",
+            kid = JOIN_TEST_KID,
+            n = material.n_b64,
+            e = material.e_b64,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind du serveur JWKS mocké");
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept du client HTTP");
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("écriture de la réponse JWKS mockée");
+            socket.shutdown().await.ok();
+        });
+
+        let jwks_cache = crate::jwks::JwksCache::new();
+        jwks_cache
+            .refresh(&format!("http://{addr}/jwks"))
+            .await
+            .expect("refresh doit réussir contre le serveur mocké");
+
+        (jwks_cache, material)
+    }
+
+    #[tokio::test]
+    async fn join_rejected_when_public_server_receives_no_token() {
+        // Serveur public, display_name rempli mais token vide : rejet propre, jamais un timeout.
+        let jwks_cache = crate::jwks::JwksCache::new();
+        let result = resolve_join_key(true, "SomeDisplayName", "", &jwks_cache);
+        assert_eq!(result, Err("compte requis sur ce serveur"));
+    }
+
+    #[tokio::test]
+    async fn join_rejected_when_token_signature_invalid() {
+        // Le cache ne connaît que la clé "légitime" ; le token est signé par une AUTRE paire —
+        // simule un tiers non autorisé (ou une clé ZITADEL déjà rotée hors du cache).
+        let (jwks_cache, _legit_material) = join_test_jwks_cache_with_valid_key().await;
+        let other_material = generate_join_test_rsa_key_material();
+        let claims = crate::jwks::Claims {
+            sub: "user-attacker".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &other_material.encoding_key);
+
+        let result = resolve_join_key(true, "SomeDisplayName", &token, &jwks_cache);
+        assert_eq!(result, Err("session invalide, reconnectez-vous"));
+    }
+
+    #[tokio::test]
+    async fn join_accepted_with_valid_token_uses_sub_as_key() {
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let claims = crate::jwks::Claims {
+            sub: "oidc-user-abc".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &material.encoding_key);
+
+        // Le display_name fourni ("DisplayNameLibre") n'est PAS la clé retenue : la clé
+        // effective doit être le `sub` vérifié, jamais le texte libre non vérifié (root cause
+        // du bug playtest 1).
+        let result = resolve_join_key(true, "DisplayNameLibre", &token, &jwks_cache);
+        assert_eq!(result, Ok("oidc-user-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn private_server_accepts_join_without_token_unchanged() {
+        // identity.public = false (ou absent) : comportement historique, token ignoré
+        // intégralement, même vide, même si le JwksCache est vide/jamais rafraîchi.
+        let jwks_cache = crate::jwks::JwksCache::new();
+        let result = resolve_join_key(false, "Lucas", "", &jwks_cache);
+        assert_eq!(result, Ok("Lucas".to_string()));
     }
 
     #[test]

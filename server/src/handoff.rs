@@ -292,6 +292,7 @@ mod tests {
             &mut b,
             &JoinArgs {
                 display_name: Some(name),
+                token: None,
             },
         );
         let env = ClientEnvelope::create(

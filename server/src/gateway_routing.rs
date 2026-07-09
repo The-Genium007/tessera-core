@@ -75,15 +75,24 @@ fn sanitize_display_name(raw: &str) -> String {
         .collect()
 }
 
-/// Décode un `ClientEnvelope` client ; si c'est un `Join`, renvoie son `display_name` nettoyé
-/// (voir `sanitize_display_name` — le nom brut n'est jamais fiable, il vient du réseau).
-pub fn extract_join_name(client_payload: &[u8]) -> Option<String> {
+/// Décode un `ClientEnvelope` client ; si c'est un `Join`, renvoie `(display_name nettoyé,
+/// token)` (voir `sanitize_display_name` — le nom brut n'est jamais fiable, il vient du réseau).
+/// `token` est renvoyé tel quel, chaîne vide si absent (défaut FlatBuffers) — sa vérification
+/// (JWT ZITADEL, requise seulement si `identity.public = true`) vit dans
+/// `gateway::resolve_join_key`, pas ici : ce module reste pur décodage, sans connaissance du
+/// `JwksCache`.
+pub fn extract_join_fields(client_payload: &[u8]) -> Option<(String, String)> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
     if env.msg_type() != ClientMsg::Join {
         return None;
     }
     let join = env.msg_as_join()?;
-    join.display_name().map(sanitize_display_name)
+    let name = join
+        .display_name()
+        .map(sanitize_display_name)
+        .unwrap_or_default();
+    let token = join.token().unwrap_or_default().to_string();
+    Some((name, token))
 }
 
 /// Décode un `ClientEnvelope` client ; si c'est un `AdminCommand`, renvoie son texte brut
@@ -208,12 +217,18 @@ mod tests {
     }
 
     fn client_join() -> Vec<u8> {
+        client_join_with_token("v", None)
+    }
+
+    fn client_join_with_token(name: &str, token: Option<&str>) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
-        let name = b.create_string("v");
+        let name = b.create_string(name);
+        let token = token.map(|t| b.create_string(t));
         let join = Join::create(
             &mut b,
             &JoinArgs {
                 display_name: Some(name),
+                token,
             },
         );
         let env = ClientEnvelope::create(
@@ -259,10 +274,17 @@ mod tests {
     }
 
     #[test]
-    fn extract_join_name_reads_display_name() {
-        assert_eq!(extract_join_name(&client_join()), Some("v".to_string()));
-        assert_eq!(extract_join_name(&client_position(1.0, 2.0, 3.0)), None); // pas un Join
-        assert_eq!(extract_join_name(&[9, 9, 9]), None); // garbage
+    fn extract_join_fields_reads_display_name_and_token() {
+        assert_eq!(
+            extract_join_fields(&client_join()),
+            Some(("v".to_string(), String::new()))
+        );
+        assert_eq!(
+            extract_join_fields(&client_join_with_token("v", Some("jwt-abc"))),
+            Some(("v".to_string(), "jwt-abc".to_string()))
+        );
+        assert_eq!(extract_join_fields(&client_position(1.0, 2.0, 3.0)), None); // pas un Join
+        assert_eq!(extract_join_fields(&[9, 9, 9]), None); // garbage
     }
 
     fn client_time_report(hour: u8, minute: u8, second: u8) -> Vec<u8> {
