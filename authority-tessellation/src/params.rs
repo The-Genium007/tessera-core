@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-pub const DENSE_AREA_THRESHOLD: f64 = 2_000_000.0;
+// 3.2 km² : au-dessus = grand quartier ouvert (Badlands) → périphérie ; en dessous = quartier
+// urbain/semi-urbain (dont Northside, ~3.0 km²) → dense, clusterisé avec la ville.
+pub const DENSE_AREA_THRESHOLD: f64 = 3_200_000.0;
 pub const EXCLUDED_CODES: [&str; 6] = ["AF2", "AW", "RA", "FWBS", "VT", "QC"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,12 +41,12 @@ impl Default for Params {
             v_max: 55.0,
             rtt_handoff: 0.25,
             aoi_dense: 120.0,
-            aoi_open: 600.0,
+            aoi_open: 350.0,
             w1: 1.0,
             w2: 0.5,
             seed: 0x5E55E5A,
             grid_step: 200.0,
-            dense_seed_count: 4,
+            dense_seed_count: 7,
             lloyd_iters: 50,
             world_bbox: Bbox {
                 min_x: -8400.0,
@@ -86,9 +88,10 @@ mod tests {
     }
 
     #[test]
-    fn r_min_periphery_is_3069() {
+    fn r_min_periphery_reflects_populated_badlands() {
+        // AOI périphérie = 350 m (Badlands peuplés, lignes de vue courtes) → r_min ≈ 1819.
         let p = Params::default();
-        assert!((p.r_min(Regime::Periphery) - 3069.0).abs() < 1.0);
+        assert!((p.r_min(Regime::Periphery) - 1818.75).abs() < 1.0);
     }
 
     #[test]
