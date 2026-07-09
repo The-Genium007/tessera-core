@@ -73,6 +73,8 @@ pub async fn write_to_shard(
 pub async fn read_from_shards(
     shards: &mut HashMap<String, ShardLink>,
     latest: &mut HashMap<u64, HashMap<String, Vec<u8>>>,
+    current_tick: u64,
+    snapshot_ticks: &mut HashMap<u64, HashMap<String, u64>>,
 ) {
     use crate::internal_net::decode_server_send;
 
@@ -104,6 +106,10 @@ pub async fn read_from_shards(
                     while let Some(body) = link.reader.next_frame() {
                         if let Some((cid, payload)) = decode_server_send(&body) {
                             latest.entry(cid).or_default().insert(addr.clone(), payload);
+                            snapshot_ticks
+                                .entry(cid)
+                                .or_default()
+                                .insert(addr.clone(), current_tick);
                         }
                     }
                     // Continue la boucle : peut-être encore plus à lire sur ce même shard.
@@ -119,6 +125,9 @@ pub async fn read_from_shards(
     for addr in &dead {
         shards.remove(addr);
         for per_shard in latest.values_mut() {
+            per_shard.remove(addr);
+        }
+        for per_shard in snapshot_ticks.values_mut() {
             per_shard.remove(addr);
         }
     }
@@ -357,6 +366,8 @@ pub async fn gateway_main(
     let mut loader = ShardLoader::new();
     // Dernier snapshot reçu de chaque shard, par client : latest[client][shard_addr] = payload.
     let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+    // Tick numéro de chaque snapshot : snapshot_ticks[client][shard_addr] = tick_received.
+    let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
     // Rang par client (Player par défaut, dérivé des permissions résolues via `root_admins`/
     // `admin_store` au Join — voir plus bas).
     let mut ranks: HashMap<u64, Rank> = HashMap::new();
@@ -477,9 +488,10 @@ pub async fn gateway_main(
     // l'itération (après le drop de l'ancien flux, avant la création du nouveau) est perdu — le
     // process attend alors un 2e signal. Le flux persistant survit à toutes les itérations.
     let mut shutdown = ShutdownSignal::new();
+    let mut current_tick: u64 = 0;
     loop {
         // 1) Lire chaque shard connecté (évacue et laisse reconnecter les connexions mortes).
-        read_from_shards(&mut shards, &mut latest).await;
+        read_from_shards(&mut shards, &mut latest, current_tick, &mut snapshot_ticks).await;
 
         // 2) Tick, avec une course contre le signal d'arrêt propre (SIGTERM/SIGINT).
         tokio::select! {
@@ -839,11 +851,15 @@ pub async fn gateway_main(
                 rate_states.remove(&cid);
                 loader.forget(cid);
                 latest.remove(&cid);
+                snapshot_ticks.remove(&cid);
                 prev_placements.remove(&cid);
             } else if let Some(per_shard) = latest.get_mut(&cid) {
                 // Élaguer les snapshots des shards qui ne sont plus chargés pour ce client.
                 let loaded = loader.loaded_shards(cid);
                 per_shard.retain(|s, _| loaded.contains(s));
+                if let Some(ticks) = snapshot_ticks.get_mut(&cid) {
+                    ticks.retain(|s, _| loaded.contains(s));
+                }
             }
         }
 
@@ -860,6 +876,18 @@ pub async fn gateway_main(
         metrics
             .shards_loaded
             .store(shards.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+        // Calculer l'âge du plus vieux snapshot rediffusé — détecte un shard gelé mais toujours
+        // connecté (bug non couvert par la purge sur lien mort existante).
+        let max_snapshot_age_ticks = snapshot_ticks
+            .values()
+            .flat_map(|per_shard| per_shard.values())
+            .map(|&tick| current_tick.saturating_sub(tick))
+            .max()
+            .unwrap_or(0);
+        metrics
+            .max_snapshot_age_ticks
+            .store(max_snapshot_age_ticks, std::sync::atomic::Ordering::Relaxed);
 
         // 3bis) Horloge/météo monde — diffusion périodique à tous les clients connus (pas à
         // 20 Hz comme les snapshots : l'heure/la météo n'a pas besoin de cette fréquence).
@@ -888,6 +916,8 @@ pub async fn gateway_main(
                 });
             }
         }
+
+        current_tick += 1;
     }
 }
 
@@ -1180,7 +1210,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
-        read_from_shards(&mut shards, &mut latest).await;
+        let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
+        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
 
         assert_eq!(
             latest.len(),
@@ -1223,7 +1254,8 @@ mod tests {
             .insert(addr.clone(), b"perime-2".to_vec());
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        read_from_shards(&mut shards, &mut latest).await;
+        let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
+        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
 
         assert!(
             !latest.get(&1).unwrap().contains_key(&addr),
@@ -1289,7 +1321,8 @@ mod tests {
         // Le shard n°1 meurt : EOF détecté, connexion évacuée.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
-        read_from_shards(&mut shards, &mut latest).await;
+        let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
+        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
         assert!(!shards.contains_key(&addr));
 
         // Le shard redémarre sur la MÊME adresse et capture tout ce qu'il reçoit. Le Gateway
@@ -1378,6 +1411,7 @@ mod tests {
 
         let mut shards: HashMap<String, ShardLink> = HashMap::new();
         let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+        let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
 
         write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
             .await
@@ -1386,7 +1420,7 @@ mod tests {
 
         // Laisse le "shard" fermer, puis détecte l'EOF côté lecture.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        read_from_shards(&mut shards, &mut latest).await;
+        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
         assert!(
             !shards.contains_key(&addr),
             "la connexion morte doit être évacuée après EOF"
@@ -1528,6 +1562,95 @@ mod tests {
             store.load("Bob"),
             None,
             "un client sans position connue ne doit pas être sauvé"
+        );
+    }
+
+    /// Teste qu'un shard gelé (connecté mais sans nouvelles données) est détecté via la métrique
+    /// de péremption des snapshots — cas non couvert par la purge existante sur lien mort.
+    #[tokio::test]
+    async fn snapshot_age_metric_increases_when_shard_stops_updating() {
+        use crate::internal_net::InternalTransport;
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        // Le "shard" envoie un seul snapshot puis s'arrête sans fermer la connexion.
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+
+            // Envoyer un snapshot pour le client 1
+            let mut it = InternalTransport::new();
+            it.send(1, &[42u8; 32]); // snapshot simple
+            for frame in it.take_outbound() {
+                sock.write_all(&frame).await.unwrap();
+            }
+
+            // Garder la connexion ouverte sans envoyer d'autres données (le shard est gelé)
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+
+        let mut shards: HashMap<String, ShardLink> = HashMap::new();
+        let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+        let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
+
+        // Tick 0 : lire le snapshot initial
+        write_to_shard(&mut shards, &addr, &[]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
+
+        // Vérifier que nous avons le snapshot
+        assert!(latest.contains_key(&1), "snapshot devrait être reçu");
+        assert_eq!(
+            snapshot_ticks
+                .get(&1)
+                .unwrap()
+                .get(&addr)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "snapshot devrait être marqué avec le tick 0"
+        );
+
+        // Ticks suivants : relire sans recevoir de nouvelles données
+        // Le snapshot devient plus ancien à chaque tick
+        for tick in 1..=5 {
+            read_from_shards(&mut shards, &mut latest, tick, &mut snapshot_ticks).await;
+
+            // Le snapshot doit toujours être présent (pas de EOF, juste pas de nouvelles données)
+            assert!(
+                latest.contains_key(&1),
+                "snapshot ne doit pas être purgé juste parce qu'il est vieux"
+            );
+
+            let snapshot_tick = snapshot_ticks
+                .get(&1)
+                .and_then(|per_shard| per_shard.get(&addr))
+                .copied()
+                .unwrap_or(0);
+            assert_eq!(
+                snapshot_tick, 0,
+                "snapshot ne doit pas être mis à jour sans nouvelles données"
+            );
+        }
+
+        // Calculer l'âge du plus vieux snapshot après tick 5
+        let max_age = snapshot_ticks
+            .values()
+            .flat_map(|per_shard| per_shard.values())
+            .map(|&tick| 5u64.saturating_sub(tick))
+            .max()
+            .unwrap_or(0);
+
+        assert!(
+            max_age > 0,
+            "snapshot age should be > 0 after 5 ticks without updates (got {max_age})"
+        );
+        assert_eq!(
+            max_age, 5,
+            "snapshot age should be exactly 5 ticks (tick 5 - tick 0)"
         );
     }
 }
