@@ -2,7 +2,7 @@
 //! config runtime privée (topologie/spawn/rayons/store) consommée au boot du Gateway.
 
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
@@ -42,30 +42,25 @@ pub struct GatewayConfig {
     pub advertise_addr: String,
 }
 
+/// Topologie d'autorité : référence l'artefact de tessellation Voronoï (`tessera-authority`,
+/// voir `tools/district-topology/authority.json`) plutôt que de décrire un arbre de splits/shards
+/// à la main (ancien schéma BSP, remplacement net — voir
+/// `docs/superpowers/specs/2026-07-09-authority-tessellation-runtime-wiring-design.md`).
+/// `server_count` sélectionne le groupement `assignment_patterns[server_count]` de l'artefact ;
+/// `radius_overrides` permet de surcharger, par code de cellule, le rayon de tampon `b` calculé
+/// par le générateur (optionnel — absent par défaut).
 #[derive(Debug, Clone, Deserialize)]
 pub struct TopologyConfig {
-    pub active_preset: String,
+    pub authority_artifact: String,
+    pub server_count: usize,
     #[serde(default)]
-    pub splits: Vec<SplitConfig>,
-    pub shards: Vec<ShardConfig>,
+    pub radius_overrides: HashMap<String, f32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SplitConfig {
-    pub id: String,
-    pub axis: Axis,
-    pub at: f32,
-    pub left: String,
-    pub right: String,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Axis {
-    X,
-    Y,
-}
-
+/// Un shard nommé avec son adresse d'écoute et ses spawn points. Conservé pour compatibilité
+/// avec le crate `directory` (dérivation de `servers.json`, rendu topologique) ; n'est plus
+/// imbriqué dans `TopologyConfig` — la géométrie d'autorité vient désormais de l'artefact
+/// (`TopologyConfig::authority_artifact`), pas d'un arbre de splits/shards déclaré ici.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ShardConfig {
     pub id: String,
@@ -93,15 +88,17 @@ pub enum ManifestError {
     UnsupportedFormatVersion(u32),
     EmptyField(&'static str),
     InvalidMaxPlayers,
-    DuplicateId(String),
-    DanglingReference(String),
-    TreeNotConnected(String),
-    NoRootShardOrSplit,
-    DefaultEntryCount(usize),
-    NoSpawnPointForDefaultEntry,
     RadiusOutOfOrder,
     NegativeAoiRadius,
     InvalidAddress(String, String),
+    /// `TopologyConfig::server_count` ne correspond à aucun groupement de
+    /// `artifact.assignment_patterns` (clé absente du `BTreeMap`).
+    UnknownServerCount(usize),
+    /// Le fichier désigné par `TopologyConfig::authority_artifact` (résolu depuis le répertoire
+    /// du manifeste) n'a pas pu être lu.
+    AuthorityArtifactUnreadable(std::path::PathBuf, String),
+    /// Le fichier a été lu mais son contenu n'est pas un `Artifact` JSON valide.
+    AuthorityArtifactInvalid(String),
 }
 
 impl std::fmt::Display for ManifestError {
@@ -115,25 +112,6 @@ impl std::fmt::Display for ManifestError {
             }
             Self::EmptyField(name) => write!(f, "champ {name} vide"),
             Self::InvalidMaxPlayers => write!(f, "identity.max_players doit être > 0"),
-            Self::DuplicateId(id) => write!(f, "id dupliqué dans la topologie: {id}"),
-            Self::DanglingReference(id) => write!(f, "référence vers un id inconnu: {id}"),
-            Self::TreeNotConnected(id) => {
-                write!(
-                    f,
-                    "id non atteint depuis root ou référencé plus d'une fois: {id}"
-                )
-            }
-            Self::NoRootShardOrSplit => write!(f, "topologie vide : aucun shard ni split"),
-            Self::DefaultEntryCount(n) => write!(
-                f,
-                "il doit y avoir exactement un shard default_entry=true (trouvé {n})"
-            ),
-            Self::NoSpawnPointForDefaultEntry => {
-                write!(
-                    f,
-                    "le shard default_entry doit avoir au moins un spawn_point"
-                )
-            }
             Self::RadiusOutOfOrder => write!(
                 f,
                 "runtime.radius doit vérifier base <= moderator <= game_master"
@@ -143,6 +121,22 @@ impl std::fmt::Display for ManifestError {
             }
             Self::InvalidAddress(field, value) => {
                 write!(f, "{field} n'est pas une adresse valide: {value}")
+            }
+            Self::UnknownServerCount(n) => {
+                write!(
+                    f,
+                    "aucun assignment_pattern pour server_count={n} dans l'artefact d'autorité"
+                )
+            }
+            Self::AuthorityArtifactUnreadable(path, msg) => {
+                write!(
+                    f,
+                    "artefact d'autorité illisible ({}): {msg}",
+                    path.display()
+                )
+            }
+            Self::AuthorityArtifactInvalid(msg) => {
+                write!(f, "artefact d'autorité invalide: {msg}")
             }
         }
     }
@@ -164,154 +158,59 @@ fn validate_scalars(m: &Manifest) -> Result<(), ManifestError> {
     Ok(())
 }
 
-fn validate_topology_structure(topo: &TopologyConfig) -> Result<(), ManifestError> {
-    let mut split_by_id: HashMap<&str, &SplitConfig> = HashMap::new();
-    let mut shard_by_id: HashMap<&str, &ShardConfig> = HashMap::new();
-
-    for s in &topo.splits {
-        if split_by_id.insert(&s.id, s).is_some() {
-            return Err(ManifestError::DuplicateId(s.id.clone()));
-        }
-    }
-    for s in &topo.shards {
-        if shard_by_id.contains_key(s.id.as_str()) || split_by_id.contains_key(s.id.as_str()) {
-            return Err(ManifestError::DuplicateId(s.id.clone()));
-        }
-        shard_by_id.insert(&s.id, s);
-    }
-
-    if split_by_id.is_empty() && shard_by_id.is_empty() {
-        return Err(ManifestError::NoRootShardOrSplit);
-    }
-
-    if split_by_id.is_empty() {
-        if shard_by_id.len() != 1 {
-            return Err(ManifestError::NoRootShardOrSplit);
-        }
-        return Ok(());
-    }
-
-    let mut visited: HashSet<String> = HashSet::new();
-    fn walk(
-        id: &str,
-        split_by_id: &HashMap<&str, &SplitConfig>,
-        shard_by_id: &HashMap<&str, &ShardConfig>,
-        visited: &mut HashSet<String>,
-    ) -> Result<(), ManifestError> {
-        if !visited.insert(id.to_string()) {
-            return Err(ManifestError::TreeNotConnected(id.to_string()));
-        }
-        if let Some(split) = split_by_id.get(id) {
-            walk(&split.left, split_by_id, shard_by_id, visited)?;
-            walk(&split.right, split_by_id, shard_by_id, visited)?;
-            Ok(())
-        } else if shard_by_id.contains_key(id) {
-            Ok(())
-        } else {
-            Err(ManifestError::DanglingReference(id.to_string()))
-        }
-    }
-    walk("root", &split_by_id, &shard_by_id, &mut visited)?;
-
-    for id in split_by_id.keys().chain(shard_by_id.keys()) {
-        if !visited.contains(*id) {
-            return Err(ManifestError::TreeNotConnected(id.to_string()));
-        }
-    }
-    Ok(())
-}
-
-pub fn flatten_topology(
-    topo: &TopologyConfig,
+/// Construit les zones d'autorité (une par groupe de `assignment_patterns[config.server_count]`)
+/// à partir d'un `Artifact` déjà en mémoire — logique pure, testable sans système de fichiers.
+/// `load_authority_topology` (I/O) désérialise l'artefact puis délègue ici.
+pub fn load_authority_topology_from_artifact(
+    config: &TopologyConfig,
+    artifact: &tessera_authority::artifact::Artifact,
 ) -> Result<Vec<crate::handoff::ShardZone>, ManifestError> {
-    use crate::handoff::{Aabb, ShardZone};
+    let groups = artifact
+        .assignment_patterns
+        .get(&config.server_count)
+        .ok_or(ManifestError::UnknownServerCount(config.server_count))?;
 
-    let mut split_by_id: HashMap<&str, &SplitConfig> = HashMap::new();
-    let mut shard_by_id: HashMap<&str, &ShardConfig> = HashMap::new();
-    for s in &topo.splits {
-        split_by_id.insert(&s.id, s);
-    }
-    for s in &topo.shards {
-        shard_by_id.insert(&s.id, s);
-    }
-
-    let whole = Aabb {
-        min_x: f32::NEG_INFINITY,
-        max_x: f32::INFINITY,
-        min_y: f32::NEG_INFINITY,
-        max_y: f32::INFINITY,
-    };
-
-    if split_by_id.is_empty() {
-        let shard = topo
-            .shards
-            .first()
-            .ok_or(ManifestError::NoRootShardOrSplit)?;
-        return Ok(vec![ShardZone {
-            addr: shard.listen_addr.clone(),
-            zone: whole,
-        }]);
-    }
-
-    fn walk(
-        id: &str,
-        bounds: crate::handoff::Aabb,
-        split_by_id: &HashMap<&str, &SplitConfig>,
-        shard_by_id: &HashMap<&str, &ShardConfig>,
-        zones: &mut Vec<crate::handoff::ShardZone>,
-    ) -> Result<(), ManifestError> {
-        use crate::handoff::{Aabb, ShardZone};
-        if let Some(split) = split_by_id.get(id) {
-            let (left_bounds, right_bounds) = match split.axis {
-                Axis::X => (
-                    Aabb {
-                        max_x: split.at,
-                        ..bounds
-                    },
-                    Aabb {
-                        min_x: split.at,
-                        ..bounds
-                    },
-                ),
-                Axis::Y => (
-                    Aabb {
-                        max_y: split.at,
-                        ..bounds
-                    },
-                    Aabb {
-                        min_y: split.at,
-                        ..bounds
-                    },
-                ),
-            };
-            walk(&split.left, left_bounds, split_by_id, shard_by_id, zones)?;
-            walk(&split.right, right_bounds, split_by_id, shard_by_id, zones)?;
-            Ok(())
-        } else if let Some(shard) = shard_by_id.get(id) {
-            zones.push(ShardZone {
-                addr: shard.listen_addr.clone(),
-                zone: bounds,
-            });
-            Ok(())
-        } else {
-            Err(ManifestError::DanglingReference(id.to_string()))
-        }
-    }
-
-    let mut zones = Vec::new();
-    walk("root", whole, &split_by_id, &shard_by_id, &mut zones)?;
-    Ok(zones)
+    Ok(groups
+        .iter()
+        .enumerate()
+        .map(|(group_idx, cell_ids)| {
+            let cells = cell_ids
+                .iter()
+                .map(|&cid| {
+                    let cell = &artifact.cells[cid];
+                    let radius = config
+                        .radius_overrides
+                        .get(&cell.code)
+                        .copied()
+                        .unwrap_or(cell.b as f32);
+                    (
+                        crate::handoff::CellZone {
+                            boundary_rings: cell.boundary_rings.clone(),
+                        },
+                        radius,
+                    )
+                })
+                .collect();
+            crate::handoff::ShardZone {
+                addr: format!("group-{group_idx}"), // adresse réelle assignée en Task G4
+                cells,
+            }
+        })
+        .collect())
 }
 
-fn validate_default_entry(topo: &TopologyConfig) -> Result<(), ManifestError> {
-    let defaults: Vec<&ShardConfig> = topo.shards.iter().filter(|s| s.default_entry).collect();
-    if defaults.len() != 1 {
-        return Err(ManifestError::DefaultEntryCount(defaults.len()));
-    }
-    if defaults[0].spawn_points.is_empty() {
-        return Err(ManifestError::NoSpawnPointForDefaultEntry);
-    }
-    Ok(())
+/// Lit `config.authority_artifact` depuis `manifest_dir` (répertoire du fichier manifeste) et
+/// construit les zones d'autorité. Seul point d'entrée qui touche le disque de ce module.
+pub fn load_authority_topology(
+    config: &TopologyConfig,
+    manifest_dir: &std::path::Path,
+) -> Result<Vec<crate::handoff::ShardZone>, ManifestError> {
+    let path = manifest_dir.join(&config.authority_artifact);
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| ManifestError::AuthorityArtifactUnreadable(path.clone(), e.to_string()))?;
+    let artifact: tessera_authority::artifact::Artifact = serde_json::from_str(&raw)
+        .map_err(|e| ManifestError::AuthorityArtifactInvalid(e.to_string()))?;
+    load_authority_topology_from_artifact(config, &artifact)
 }
 
 fn validate_radius(r: &RadiusConfig) -> Result<(), ManifestError> {
@@ -383,9 +282,6 @@ fn validate_addr(field: &str, value: &str) -> Result<(), ManifestError> {
 
 fn validate(m: &Manifest) -> Result<(), ManifestError> {
     validate_scalars(m)?;
-    validate_topology_structure(&m.runtime.topology)?;
-    flatten_topology(&m.runtime.topology)?;
-    validate_default_entry(&m.runtime.topology)?;
     validate_radius(&m.runtime.radius)?;
     validate_aoi(&m.runtime.aoi)?;
     validate_addr(
@@ -396,45 +292,7 @@ fn validate(m: &Manifest) -> Result<(), ManifestError> {
         "runtime.gateway.advertise_addr",
         &m.runtime.gateway.advertise_addr,
     )?;
-    for s in &m.runtime.topology.shards {
-        validate_addr(
-            &format!("runtime.topology.shards[{}].listen_addr", s.id),
-            &s.listen_addr,
-        )?;
-    }
     Ok(())
-}
-
-pub fn to_runtime(
-    m: &Manifest,
-) -> Result<
-    (
-        crate::handoff::ShardTopology,
-        crate::handoff::RadiusPolicy,
-        [f32; 3],
-        String,
-    ),
-    ManifestError,
-> {
-    let zones = flatten_topology(&m.runtime.topology)?;
-    let topology = crate::handoff::ShardTopology { shards: zones };
-    let radius = crate::handoff::RadiusPolicy {
-        base: m.runtime.radius.base,
-        moderator: m.runtime.radius.moderator,
-        game_master: m.runtime.radius.game_master,
-    };
-    let default_shard = m
-        .runtime
-        .topology
-        .shards
-        .iter()
-        .find(|s| s.default_entry)
-        .ok_or(ManifestError::DefaultEntryCount(0))?;
-    let spawn = *default_shard
-        .spawn_points
-        .first()
-        .ok_or(ManifestError::NoSpawnPointForDefaultEntry)?;
-    Ok((topology, radius, spawn, m.runtime.store_path.clone()))
 }
 
 pub fn shard_aoi_radius(m: &Manifest) -> f32 {
@@ -455,6 +313,8 @@ pub fn load(path: &std::path::Path) -> Result<Manifest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tessera_authority::artifact::{Artifact, Cell, RasterIndex};
+    use tessera_authority::params::{Params, Regime};
 
     const MINIMAL_TOML: &str = r#"
         format_version = 1
@@ -481,13 +341,8 @@ mod tests {
         advertise_addr = "51.38.189.234:27020"
 
         [runtime.topology]
-        active_preset = "1-shard"
-
-        [[runtime.topology.shards]]
-        id = "shard-a"
-        listen_addr = "127.0.0.1:27030"
-        default_entry = true
-        spawn_points = [[0.0, 0.0, 0.0]]
+        authority_artifact = "authority.json"
+        server_count = 1
 
         [runtime.radius]
         base = 25.0
@@ -534,213 +389,6 @@ mod tests {
         assert_eq!(validate_scalars(&m), Err(ManifestError::InvalidMaxPlayers));
     }
 
-    fn two_shard_topology() -> TopologyConfig {
-        TopologyConfig {
-            active_preset: "2-shards".into(),
-            splits: vec![SplitConfig {
-                id: "root".into(),
-                axis: Axis::X,
-                at: 1000.0,
-                left: "shard-a".into(),
-                right: "shard-b".into(),
-            }],
-            shards: vec![
-                ShardConfig {
-                    id: "shard-a".into(),
-                    listen_addr: "127.0.0.1:27030".into(),
-                    default_entry: true,
-                    spawn_points: vec![[2387.0, -1295.0, 63.0]],
-                },
-                ShardConfig {
-                    id: "shard-b".into(),
-                    listen_addr: "127.0.0.1:27031".into(),
-                    default_entry: false,
-                    spawn_points: vec![],
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn valid_two_shard_tree_passes_structural_validation() {
-        assert_eq!(validate_topology_structure(&two_shard_topology()), Ok(()));
-    }
-
-    #[test]
-    fn rejects_dangling_reference() {
-        let mut topo = two_shard_topology();
-        topo.splits[0].right = "shard-ghost".into();
-        assert_eq!(
-            validate_topology_structure(&topo),
-            Err(ManifestError::DanglingReference("shard-ghost".into()))
-        );
-    }
-
-    #[test]
-    fn rejects_duplicate_id() {
-        let mut topo = two_shard_topology();
-        topo.shards[1].id = "shard-a".into();
-        assert_eq!(
-            validate_topology_structure(&topo),
-            Err(ManifestError::DuplicateId("shard-a".into()))
-        );
-    }
-
-    #[test]
-    fn rejects_node_referenced_twice() {
-        let mut topo = two_shard_topology();
-        topo.splits.push(SplitConfig {
-            id: "extra".into(),
-            axis: Axis::Y,
-            at: 0.0,
-            left: "shard-a".into(),
-            right: "shard-b".into(),
-        });
-        topo.splits[0].right = "extra".into();
-        assert!(matches!(
-            validate_topology_structure(&topo),
-            Err(ManifestError::TreeNotConnected(_))
-        ));
-    }
-
-    #[test]
-    fn single_shard_topology_with_no_splits_is_valid() {
-        let topo = TopologyConfig {
-            active_preset: "1-shard".into(),
-            splits: vec![],
-            shards: vec![ShardConfig {
-                id: "shard-a".into(),
-                listen_addr: "127.0.0.1:27030".into(),
-                default_entry: true,
-                spawn_points: vec![[0.0, 0.0, 0.0]],
-            }],
-        };
-        assert_eq!(validate_topology_structure(&topo), Ok(()));
-    }
-
-    #[test]
-    fn flattens_two_shard_tree_to_expected_aabbs() {
-        let zones = flatten_topology(&two_shard_topology()).unwrap();
-        assert_eq!(zones.len(), 2);
-        let a = zones.iter().find(|z| z.addr == "127.0.0.1:27030").unwrap();
-        assert_eq!(a.zone.min_x, f32::NEG_INFINITY);
-        assert_eq!(a.zone.max_x, 1000.0);
-        assert_eq!(a.zone.min_y, f32::NEG_INFINITY);
-        assert_eq!(a.zone.max_y, f32::INFINITY);
-        let b = zones.iter().find(|z| z.addr == "127.0.0.1:27031").unwrap();
-        assert_eq!(b.zone.min_x, 1000.0);
-        assert_eq!(b.zone.max_x, f32::INFINITY);
-    }
-
-    #[test]
-    fn merging_four_shard_tree_matches_two_shard_tree() {
-        let four = TopologyConfig {
-            active_preset: "4-shards".into(),
-            splits: vec![
-                SplitConfig {
-                    id: "root".into(),
-                    axis: Axis::X,
-                    at: 1000.0,
-                    left: "split-a".into(),
-                    right: "split-b".into(),
-                },
-                SplitConfig {
-                    id: "split-a".into(),
-                    axis: Axis::Y,
-                    at: 0.0,
-                    left: "shard-a1".into(),
-                    right: "shard-a2".into(),
-                },
-                SplitConfig {
-                    id: "split-b".into(),
-                    axis: Axis::Y,
-                    at: 0.0,
-                    left: "shard-b1".into(),
-                    right: "shard-b2".into(),
-                },
-            ],
-            shards: vec![
-                ShardConfig {
-                    id: "shard-a1".into(),
-                    listen_addr: "a1".into(),
-                    default_entry: true,
-                    spawn_points: vec![[0.0, 0.0, 0.0]],
-                },
-                ShardConfig {
-                    id: "shard-a2".into(),
-                    listen_addr: "a2".into(),
-                    default_entry: false,
-                    spawn_points: vec![],
-                },
-                ShardConfig {
-                    id: "shard-b1".into(),
-                    listen_addr: "b1".into(),
-                    default_entry: false,
-                    spawn_points: vec![],
-                },
-                ShardConfig {
-                    id: "shard-b2".into(),
-                    listen_addr: "b2".into(),
-                    default_entry: false,
-                    spawn_points: vec![],
-                },
-            ],
-        };
-        let zones = flatten_topology(&four).unwrap();
-        let a1 = zones.iter().find(|z| z.addr == "a1").unwrap();
-        let a2 = zones.iter().find(|z| z.addr == "a2").unwrap();
-        let b1 = zones.iter().find(|z| z.addr == "b1").unwrap();
-        let b2 = zones.iter().find(|z| z.addr == "b2").unwrap();
-
-        assert_eq!(a1.zone.min_x, f32::NEG_INFINITY);
-        assert_eq!(a1.zone.max_x, 1000.0);
-        assert_eq!(a2.zone.min_x, f32::NEG_INFINITY);
-        assert_eq!(a2.zone.max_x, 1000.0);
-        assert_eq!(a1.zone.min_y, f32::NEG_INFINITY);
-        assert_eq!(a1.zone.max_y, 0.0);
-        assert_eq!(a2.zone.min_y, 0.0);
-        assert_eq!(a2.zone.max_y, f32::INFINITY);
-
-        assert_eq!(b1.zone.min_x, 1000.0);
-        assert_eq!(b1.zone.max_x, f32::INFINITY);
-        assert_eq!(b2.zone.min_x, 1000.0);
-        assert_eq!(b2.zone.max_x, f32::INFINITY);
-
-        let two = flatten_topology(&two_shard_topology()).unwrap();
-        let shard_a = two.iter().find(|z| z.addr == "127.0.0.1:27030").unwrap();
-        assert_eq!(a1.zone.min_x, shard_a.zone.min_x);
-        assert_eq!(a1.zone.max_x, shard_a.zone.max_x);
-        assert_eq!(a1.zone.min_y, shard_a.zone.min_y);
-        assert_eq!(a2.zone.max_y, shard_a.zone.max_y);
-    }
-
-    #[test]
-    fn validates_exactly_one_default_entry() {
-        let mut topo = two_shard_topology();
-        topo.shards[1].default_entry = true;
-        assert_eq!(
-            validate_default_entry(&topo),
-            Err(ManifestError::DefaultEntryCount(2))
-        );
-
-        topo.shards[0].default_entry = false;
-        topo.shards[1].default_entry = false;
-        assert_eq!(
-            validate_default_entry(&topo),
-            Err(ManifestError::DefaultEntryCount(0))
-        );
-    }
-
-    #[test]
-    fn rejects_default_entry_with_no_spawn_point() {
-        let mut topo = two_shard_topology();
-        topo.shards[0].spawn_points = vec![];
-        assert_eq!(
-            validate_default_entry(&topo),
-            Err(ManifestError::NoSpawnPointForDefaultEntry)
-        );
-    }
-
     #[test]
     fn rejects_radius_out_of_order() {
         let toml_str = MINIMAL_TOML.replace("game_master = 75.0", "game_master = 10.0");
@@ -780,11 +428,13 @@ mod tests {
 
     #[test]
     fn accepts_docker_service_name_addr() {
-        // Valeur exacte utilisée par server/server.docker.toml pour le listen_addr du shard :
-        // un nom de service Docker Compose n'est pas un littéral SocketAddr.
+        // validate_addr doit accepter un nom d'hôte:port (ex. nom de service Docker Compose),
+        // pas seulement un littéral SocketAddr — la topologie ne portant plus d'adresses de
+        // shard (remplacée par l'artefact d'autorité), ce comportement se vérifie désormais sur
+        // runtime.gateway.advertise_addr.
         let toml_str = MINIMAL_TOML.replace(
-            r#"listen_addr = "127.0.0.1:27030""#,
-            r#"listen_addr = "shard-a:27030""#,
+            r#"advertise_addr = "51.38.189.234:27020""#,
+            r#"advertise_addr = "gateway:27020""#,
         );
         parse_and_validate(&toml_str).expect("hostname:port devrait être accepté");
     }
@@ -819,73 +469,6 @@ mod tests {
         assert!(err.contains("advertise_addr"));
     }
 
-    fn full_two_shard_toml() -> String {
-        r#"
-        format_version = 1
-
-        [identity]
-        id = "tessera-dev-01"
-        name = "Tessera Dev"
-        description = "desc"
-        region = "EU"
-        language = "FR"
-        max_players = 16
-        tags = ["dev"]
-        discord_url = ""
-        website_url = ""
-        required_modset = "0.1.0"
-        voice_required = false
-
-        [runtime]
-        whitelist = false
-        store_path = "players.json"
-
-        [runtime.gateway]
-        listen_addr = "0.0.0.0:27020"
-        advertise_addr = "51.38.189.234:27020"
-
-        [runtime.topology]
-        active_preset = "2-shards"
-
-        [[runtime.topology.splits]]
-        id = "root"
-        axis = "x"
-        at = 1000.0
-        left = "shard-a"
-        right = "shard-b"
-
-        [[runtime.topology.shards]]
-        id = "shard-a"
-        listen_addr = "127.0.0.1:27030"
-        default_entry = true
-        spawn_points = [[2387.0, -1295.0, 63.0]]
-
-        [[runtime.topology.shards]]
-        id = "shard-b"
-        listen_addr = "127.0.0.1:27031"
-        spawn_points = []
-
-        [runtime.radius]
-        base = 25.0
-        moderator = 50.0
-        game_master = 75.0
-
-        [runtime.aoi]
-        visibility_radius = 100.0
-        "#
-        .to_string()
-    }
-
-    #[test]
-    fn parses_and_validates_full_two_shard_manifest() {
-        let m = parse_and_validate(&full_two_shard_toml()).expect("should validate");
-        let (topology, radius, spawn, store_path) = to_runtime(&m).expect("should translate");
-        assert_eq!(topology.shards.len(), 2);
-        assert_eq!(radius.base, 25.0);
-        assert_eq!(spawn, [2387.0, -1295.0, 63.0]);
-        assert_eq!(store_path, "players.json");
-    }
-
     #[test]
     fn load_reports_missing_file_clearly() {
         let err = load(std::path::Path::new("/nonexistent/server.toml")).unwrap_err();
@@ -897,5 +480,174 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("server.example.toml");
         let m = load(&path).expect("example manifest should be valid");
         assert_eq!(m.identity.id, "tessera-dev-01");
+    }
+
+    // --- TopologyConfig : nouveau schéma (authority_artifact + server_count + radius_overrides) ---
+
+    #[test]
+    fn topology_config_parses_authority_artifact_and_server_count() {
+        let toml = r#"
+            authority_artifact = "authority.json"
+            server_count = 4
+        "#;
+        let config: TopologyConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.authority_artifact, "authority.json");
+        assert_eq!(config.server_count, 4);
+        assert!(config.radius_overrides.is_empty());
+    }
+
+    #[test]
+    fn topology_config_parses_optional_radius_overrides() {
+        let toml = r#"
+            authority_artifact = "authority.json"
+            server_count = 4
+            [radius_overrides]
+            "CC-CP-DOW-GLE-WEL" = 150.0
+        "#;
+        let config: TopologyConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.radius_overrides.get("CC-CP-DOW-GLE-WEL"),
+            Some(&150.0)
+        );
+    }
+
+    // --- load_authority_topology[_from_artifact] : fixture minimale en mémoire ---
+
+    /// `Artifact` minimal à 2 cellules, adjacentes, avec des groupements pour N=1 et N=2
+    /// seulement — suffisant pour tester la résolution de groupe/rayon sans dépendre du vrai
+    /// `authority.json` (couvert séparément par le test d'intégration ci-dessous).
+    fn minimal_two_cell_artifact() -> Artifact {
+        fn square(min_x: f64, min_y: f64, side: f64) -> Vec<tessera_authority::geometry::Point> {
+            vec![
+                [min_x, min_y],
+                [min_x + side, min_y],
+                [min_x + side, min_y + side],
+                [min_x, min_y + side],
+                [min_x, min_y],
+            ]
+        }
+
+        fn cell(id: usize, code: &str, min_x: f64) -> Cell {
+            Cell {
+                id,
+                code: code.to_string(),
+                regime: Regime::Dense,
+                authority_type: "cell".to_string(),
+                district_codes: vec![code.to_string()],
+                seed: Some([min_x, 0.0]),
+                b: 25.0,
+                r_min: 125.0,
+                r_inscribed: 5.0,
+                area: 100.0,
+                estimated_load: 0.5,
+                boundary_rings: vec![square(min_x, 0.0, 10.0)],
+            }
+        }
+
+        Artifact {
+            schema_version: 1,
+            params: Params::default(),
+            cells: vec![cell(0, "cell-0-code", 0.0), cell(1, "cell-1-code", 100.0)],
+            adjacency: vec![(0, 1)],
+            portal_points: vec![],
+            assignment_patterns: [(1, vec![vec![0, 1]]), (2, vec![vec![0], vec![1]])]
+                .into_iter()
+                .collect(),
+            raster: RasterIndex {
+                origin: [0.0, 0.0],
+                step: 1.0,
+                nx: 0,
+                ny: 0,
+                cells: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn load_authority_topology_builds_shard_zones_from_pattern() {
+        let artifact = minimal_two_cell_artifact();
+        let config = TopologyConfig {
+            authority_artifact: "unused".into(),
+            server_count: 2,
+            radius_overrides: HashMap::new(),
+        };
+
+        let zones = load_authority_topology_from_artifact(&config, &artifact).unwrap();
+        assert_eq!(zones.len(), 2); // server_count=2 → chaque cellule seule dans son groupe
+        assert_eq!(zones.iter().map(|z| z.cells.len()).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn load_authority_topology_errors_on_unknown_server_count() {
+        let artifact = minimal_two_cell_artifact(); // n'a que des patterns pour N=1,2
+        let config = TopologyConfig {
+            authority_artifact: "unused".into(),
+            server_count: 99,
+            radius_overrides: HashMap::new(),
+        };
+
+        assert_eq!(
+            load_authority_topology_from_artifact(&config, &artifact).unwrap_err(),
+            ManifestError::UnknownServerCount(99)
+        );
+    }
+
+    #[test]
+    fn load_authority_topology_applies_radius_override_per_cell() {
+        let artifact = minimal_two_cell_artifact(); // cellules avec b=25.0 par défaut
+        let mut overrides = HashMap::new();
+        overrides.insert("cell-0-code".to_string(), 150.0);
+        let config = TopologyConfig {
+            authority_artifact: "unused".into(),
+            server_count: 2,
+            radius_overrides: overrides,
+        };
+
+        let zones = load_authority_topology_from_artifact(&config, &artifact).unwrap();
+        let all_cells: Vec<(f32, &str)> = zones
+            .iter()
+            .flat_map(|z| z.cells.iter())
+            .map(|(cell, radius)| {
+                (
+                    *radius,
+                    if cell.boundary_rings[0][0][0] == 0.0 {
+                        "cell-0-code"
+                    } else {
+                        "cell-1-code"
+                    },
+                )
+            })
+            .collect();
+        let cell0_radius = all_cells
+            .iter()
+            .find(|(_, code)| *code == "cell-0-code")
+            .unwrap()
+            .0;
+        let cell1_radius = all_cells
+            .iter()
+            .find(|(_, code)| *code == "cell-1-code")
+            .unwrap()
+            .0;
+        assert_eq!(cell0_radius, 150.0); // override appliqué
+        assert_eq!(cell1_radius, 25.0); // pas d'override → b de l'artefact
+    }
+
+    // --- Intégration : le vrai authority.json v3 (10 cellules, voir tools/district-topology) ---
+
+    #[test]
+    fn load_authority_topology_works_with_real_v3_artifact() {
+        let manifest_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/district-topology");
+        let config = TopologyConfig {
+            authority_artifact: "authority.json".into(),
+            server_count: 4,
+            radius_overrides: HashMap::new(),
+        };
+        let zones = load_authority_topology(&config, &manifest_dir).unwrap();
+        assert!(!zones.is_empty());
+        // Couverture totale : aucune cellule oubliée, aucune dupliquée entre groupes (10 dans
+        // le vrai artefact v3, confirmé via `python3 -c "json.load(...)"` avant d'écrire ce test).
+        let total_cells: usize = zones.iter().map(|z| z.cells.len()).sum();
+        assert_eq!(total_cells, 10);
     }
 }
