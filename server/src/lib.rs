@@ -8,6 +8,7 @@ pub mod gateway;
 pub mod gateway_routing;
 pub mod handoff;
 pub mod internal_net;
+pub mod jwks;
 pub mod manifest;
 pub mod metrics;
 pub mod permissions;
