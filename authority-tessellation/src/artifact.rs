@@ -74,6 +74,12 @@ pub fn generate(
     }
     protos.sort_by(|a, b| a.district_codes[0].cmp(&b.district_codes[0]));
 
+    // Sans proto-cellule, la rastérisation attribuerait le vide à une cellule inexistante
+    // (index hors bornes plus bas) : on échoue proprement plutôt que de paniquer.
+    if protos.is_empty() {
+        anyhow::bail!("aucun quartier exploitable après filtrage — rien à tesseller");
+    }
+
     let grid: Grid = rasterize(&protos, &districts, p);
     let adj = adjacency(&grid, protos.len());
     let patterns = assignment_patterns(protos.len(), &adj);
@@ -191,5 +197,11 @@ mod tests {
             n,
             "un quartier apparaît dans plusieurs cellules"
         );
+    }
+
+    #[test]
+    fn empty_input_returns_err_not_panic() {
+        let err = generate(r#"{"entries":[],"warnings":[]}"#, None, &Params::default());
+        assert!(err.is_err(), "générer sans quartier doit échouer proprement, pas paniquer");
     }
 }
