@@ -24,6 +24,8 @@ pub struct Identity {
     pub website_url: String,
     pub required_modset: String,
     pub voice_required: bool,
+    #[serde(default)]
+    pub public: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -897,5 +899,98 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("server.example.toml");
         let m = load(&path).expect("example manifest should be valid");
         assert_eq!(m.identity.id, "tessera-dev-01");
+    }
+
+    #[test]
+    fn identity_public_defaults_to_false_when_absent() {
+        let toml = r#"
+            format_version = 1
+            [identity]
+            id = "tessera-dev-01"
+            name = "Tessera Dev"
+            description = "desc"
+            region = "EU"
+            language = "FR"
+            max_players = 16
+            tags = ["dev"]
+            discord_url = ""
+            website_url = ""
+            required_modset = "0.1.0"
+            voice_required = false
+
+            [runtime]
+            whitelist = false
+            store_path = "players.json"
+
+            [runtime.gateway]
+            listen_addr = "0.0.0.0:27020"
+            advertise_addr = "51.38.189.234:27020"
+
+            [runtime.topology]
+            active_preset = "1-shard"
+
+            [[runtime.topology.shards]]
+            id = "shard-a"
+            listen_addr = "127.0.0.1:27030"
+            default_entry = true
+            spawn_points = [[0.0, 0.0, 0.0]]
+
+            [runtime.radius]
+            base = 25.0
+            moderator = 50.0
+            game_master = 75.0
+
+            [runtime.aoi]
+            visibility_radius = 100.0
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("should parse");
+        assert_eq!(m.identity.public, false);
+    }
+
+    #[test]
+    fn identity_public_true_when_declared() {
+        let toml = r#"
+            format_version = 1
+            [identity]
+            id = "tessera-dev-01"
+            name = "Tessera Dev"
+            description = "desc"
+            region = "EU"
+            language = "FR"
+            max_players = 16
+            tags = ["dev"]
+            discord_url = ""
+            website_url = ""
+            required_modset = "0.1.0"
+            voice_required = false
+            public = true
+
+            [runtime]
+            whitelist = false
+            store_path = "players.json"
+
+            [runtime.gateway]
+            listen_addr = "0.0.0.0:27020"
+            advertise_addr = "51.38.189.234:27020"
+
+            [runtime.topology]
+            active_preset = "1-shard"
+
+            [[runtime.topology.shards]]
+            id = "shard-a"
+            listen_addr = "127.0.0.1:27030"
+            default_entry = true
+            spawn_points = [[0.0, 0.0, 0.0]]
+
+            [runtime.radius]
+            base = 25.0
+            moderator = 50.0
+            game_master = 75.0
+
+            [runtime.aoi]
+            visibility_radius = 100.0
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("should parse");
+        assert_eq!(m.identity.public, true);
     }
 }
