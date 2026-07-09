@@ -2,6 +2,8 @@
 //! (shard autoritaire + shards en zone tampon), rayon par rang, et machine de chargement.
 //! Pur et testable sans GNS/TCP.
 
+use tessera_authority::geometry::{dist_point_polygon, point_in_polygon, Point};
+
 /// Boîte alignée sur les axes (zone d'un shard sur le plan X/Y ; Z ignoré pour le sharding).
 #[derive(Debug, Clone, Copy)]
 pub struct Aabb {
@@ -36,6 +38,36 @@ impl Aabb {
             0.0
         };
         (dx * dx + dy * dy).sqrt()
+    }
+}
+
+/// Zone d'une cellule d'autorité, définie par une géométrie polygonale (issue de la
+/// tessellation Voronoï d'autorité, `tessera-authority`). Une cellule peut porter plusieurs
+/// anneaux (quartiers non contigus) — pas de fusion géométrique, appartenance testée anneau
+/// par anneau (D4 de la spec district-topology, toujours valide).
+#[derive(Debug, Clone)]
+pub struct CellZone {
+    pub boundary_rings: Vec<Vec<Point>>,
+}
+
+impl CellZone {
+    /// Le point appartient à la cellule s'il est dans AU MOINS UN des anneaux.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        let p: Point = [x as f64, y as f64];
+        self.boundary_rings
+            .iter()
+            .any(|ring| point_in_polygon(p, ring))
+    }
+
+    /// Distance euclidienne du point à la cellule : le minimum, sur tous les anneaux, de la
+    /// distance au polygone (`dist_point_polygon` — distance au segment le plus proche, PAS 0
+    /// quand le point est dedans ; voir les tests `cellzone_dist_*` pour la convention exacte).
+    pub fn dist(&self, x: f32, y: f32) -> f32 {
+        let p: Point = [x as f64, y as f64];
+        self.boundary_rings
+            .iter()
+            .map(|ring| dist_point_polygon(p, ring))
+            .fold(f64::MAX, f64::min) as f32
     }
 }
 
@@ -654,5 +686,95 @@ mod tests {
         assert_eq!(pol.radius_for(Rank::Player), 25.0);
         assert_eq!(pol.radius_for(Rank::Moderator), 50.0);
         assert_eq!(pol.radius_for(Rank::GameMaster), 75.0);
+    }
+
+    #[test]
+    fn cellzone_contains_point_inside_simple_square() {
+        // Carré [0,0]-[10,0]-[10,10]-[0,10]-[0,0] (anneau fermé, premier==dernier point).
+        let zone = CellZone {
+            boundary_rings: vec![vec![
+                [0.0, 0.0],
+                [10.0, 0.0],
+                [10.0, 10.0],
+                [0.0, 10.0],
+                [0.0, 0.0],
+            ]],
+        };
+        assert!(zone.contains(5.0, 5.0));
+        assert!(!zone.contains(15.0, 5.0));
+    }
+
+    #[test]
+    fn cellzone_contains_checks_all_rings_for_multi_polygon_cell() {
+        // Une cellule à deux quartiers disjoints (deux anneaux séparés) — le point appartient à la
+        // cellule s'il est dans AU MOINS UN des anneaux (D4 de l'ancienne spec district-topology,
+        // toujours valide : pas de fusion géométrique).
+        let zone = CellZone {
+            boundary_rings: vec![
+                vec![
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0, 10.0],
+                    [0.0, 10.0],
+                    [0.0, 0.0],
+                ],
+                vec![
+                    [100.0, 100.0],
+                    [110.0, 100.0],
+                    [110.0, 110.0],
+                    [100.0, 110.0],
+                    [100.0, 100.0],
+                ],
+            ],
+        };
+        assert!(zone.contains(5.0, 5.0));
+        assert!(zone.contains(105.0, 105.0));
+        assert!(!zone.contains(50.0, 50.0));
+    }
+
+    #[test]
+    fn cellzone_dist_is_distance_to_nearest_edge_even_when_point_is_inside() {
+        // Convention réelle de `dist_point_polygon` (tools/authority-tessellation/src/geometry.rs) :
+        // distance au segment le plus proche du polygone, PAS 0 quand le point est dedans (ce
+        // n'est pas une distance signée). Vérifié en lisant l'implémentation + son test
+        // `dist_to_polygon_edge` (point à 5 unités au-dessus d'un carré 10x10 → dist == 5.0), qui
+        // s'applique symétriquement à un point à l'intérieur équidistant des 4 bords.
+        let zone = CellZone {
+            boundary_rings: vec![vec![
+                [0.0, 0.0],
+                [10.0, 0.0],
+                [10.0, 10.0],
+                [0.0, 10.0],
+                [0.0, 0.0],
+            ]],
+        };
+        // Centre du carré : équidistant des 4 bords, chacun à 5.0.
+        assert!((zone.dist(5.0, 5.0) - 5.0).abs() < 1e-6);
+        // Point hors du polygone : distance normale au bord le plus proche.
+        assert!((zone.dist(15.0, 5.0) - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cellzone_dist_takes_the_min_across_all_rings_for_multi_polygon_cell() {
+        let zone = CellZone {
+            boundary_rings: vec![
+                vec![
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0, 10.0],
+                    [0.0, 10.0],
+                    [0.0, 0.0],
+                ],
+                vec![
+                    [100.0, 100.0],
+                    [110.0, 100.0],
+                    [110.0, 110.0],
+                    [100.0, 110.0],
+                    [100.0, 100.0],
+                ],
+            ],
+        };
+        // Point à x=50 : dist au 1er anneau (bord x=10) = 40 ; au 2e (bord x=100) = 50 → min = 40.
+        assert!((zone.dist(50.0, 5.0) - 40.0).abs() < 1e-6);
     }
 }
