@@ -11,4 +11,5 @@ pub mod periphery;
 pub mod prng;
 pub mod raster;
 pub mod report;
+pub mod svg;
 pub mod validate;
