@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod metrics;
 pub mod permissions;
 pub mod persistence;
+pub mod postgres_store;
 pub mod rate_limit;
 pub mod server_loop;
 pub mod session_log;
