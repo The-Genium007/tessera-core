@@ -1,0 +1,195 @@
+use crate::adjacency::adjacency;
+use crate::cluster::{cluster_dense, ProtoCell};
+use crate::districts::{event_weight, load, District};
+use crate::geometry::{inscribed_radius, Point};
+use crate::params::{Params, Regime};
+use crate::patterns::assignment_patterns;
+use crate::periphery::proto_cells_periphery;
+use crate::raster::{rasterize, trace_boundary, Grid};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cell {
+    pub id: usize,
+    pub code: String,
+    pub regime: Regime,
+    pub authority_type: String,
+    pub district_codes: Vec<String>,
+    pub seed: Option<Point>,
+    pub b: f64,
+    pub r_min: f64,
+    pub r_inscribed: f64,
+    pub area: f64,
+    pub estimated_load: f64,
+    pub boundary_rings: Vec<Vec<Point>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RasterIndex {
+    pub origin: Point,
+    pub step: f64,
+    pub nx: usize,
+    pub ny: usize,
+    pub cells: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artifact {
+    pub schema_version: u32,
+    pub params: Params,
+    pub cells: Vec<Cell>,
+    pub adjacency: Vec<(usize, usize)>,
+    pub portal_points: Vec<Point>,
+    pub assignment_patterns: BTreeMap<usize, Vec<Vec<usize>>>,
+    pub raster: RasterIndex,
+}
+
+fn cell_code(codes: &[String]) -> String {
+    codes.join("-")
+}
+
+pub fn generate(
+    districts_json: &str,
+    manual_json: Option<&str>,
+    p: &Params,
+) -> anyhow::Result<Artifact> {
+    let districts = load(districts_json, manual_json)?;
+    let dense: Vec<District> = districts
+        .iter()
+        .filter(|d| d.regime == Regime::Dense)
+        .cloned()
+        .collect();
+    let periph: Vec<District> = districts
+        .iter()
+        .filter(|d| d.regime == Regime::Periphery)
+        .cloned()
+        .collect();
+
+    let mut protos: Vec<ProtoCell> = cluster_dense(&dense, p);
+    protos.extend(proto_cells_periphery(&periph));
+    // Ordre stable global.
+    for c in &mut protos {
+        c.district_codes.sort();
+    }
+    protos.sort_by(|a, b| a.district_codes[0].cmp(&b.district_codes[0]));
+
+    let grid: Grid = rasterize(&protos, &districts, p);
+    let adj = adjacency(&grid, protos.len());
+    let patterns = assignment_patterns(protos.len(), &adj);
+
+    // event_weight par code (pour estimated_load)
+    let w_by_code: BTreeMap<&str, f64> = districts
+        .iter()
+        .map(|d| (d.code.as_str(), event_weight(d)))
+        .collect();
+    let total_w: f64 = w_by_code.values().sum();
+
+    let cell_area = grid.step * grid.step;
+    let mut counts = vec![0usize; protos.len()];
+    for &o in &grid.owner {
+        counts[o] += 1;
+    }
+
+    let mut cells = Vec::new();
+    for (i, proto) in protos.iter().enumerate() {
+        let rings = trace_boundary(&grid, i);
+        // r_inscribed sur l'anneau le plus grand (territoire final, vide inclus)
+        let r_inscribed = rings
+            .iter()
+            .map(|r| inscribed_radius(r, 30))
+            .fold(0.0, f64::max);
+        let load: f64 = proto
+            .district_codes
+            .iter()
+            .filter_map(|c| w_by_code.get(c.as_str()))
+            .sum::<f64>()
+            / if total_w > 0.0 { total_w } else { 1.0 };
+        cells.push(Cell {
+            id: i,
+            code: cell_code(&proto.district_codes),
+            regime: proto.regime,
+            authority_type: "cell".to_string(),
+            district_codes: proto.district_codes.clone(),
+            seed: proto.seed,
+            b: p.b(proto.regime),
+            r_min: p.r_min(proto.regime),
+            r_inscribed,
+            area: counts[i] as f64 * cell_area,
+            estimated_load: load,
+            boundary_rings: rings,
+        });
+    }
+
+    let raster = RasterIndex {
+        origin: grid.origin,
+        step: grid.step,
+        nx: grid.nx,
+        ny: grid.ny,
+        cells: grid.owner,
+    };
+
+    Ok(Artifact {
+        schema_version: 1,
+        params: p.clone(),
+        cells,
+        adjacency: adj,
+        portal_points: Vec::new(),
+        assignment_patterns: patterns,
+        raster,
+    })
+}
+
+pub fn to_json(art: &Artifact) -> String {
+    serde_json::to_string_pretty(art).expect("artefact sérialisable")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"{"entries":[
+      {"id":"a","tweakdb_path":"Districts.Kabuki","code":"KAB","has_transform":true,
+       "polygon":[[-1500,-1500],[-500,-1500],[-500,-500],[-1500,-500]]},
+      {"id":"b","tweakdb_path":"Districts.LittleChina","code":"LC","has_transform":true,
+       "polygon":[[-500,-1500],[500,-1500],[500,-500],[-500,-500]]},
+      {"id":"c","tweakdb_path":"Districts.BiotechnicaFlats","code":"BF","has_transform":true,
+       "polygon":[[2000,2000],[6000,2000],[6000,6000],[2000,6000]]}
+    ],"warnings":[]}"#;
+
+    #[test]
+    fn generate_produces_cells_and_full_partition() {
+        let p = Params::default();
+        let art = generate(SAMPLE, None, &p).unwrap();
+        assert!(!art.cells.is_empty());
+        // raster couvre 100 % : chaque owner < nombre de cellules
+        assert!(art.raster.cells.iter().all(|&o| o < art.cells.len()));
+        assert_eq!(art.raster.cells.len(), art.raster.nx * art.raster.ny);
+    }
+
+    #[test]
+    fn generation_is_deterministic() {
+        let p = Params::default();
+        let a = to_json(&generate(SAMPLE, None, &p).unwrap());
+        let b = to_json(&generate(SAMPLE, None, &p).unwrap());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn each_district_in_exactly_one_cell() {
+        let art = generate(SAMPLE, None, &Params::default()).unwrap();
+        let mut seen: Vec<String> = art
+            .cells
+            .iter()
+            .flat_map(|c| c.district_codes.clone())
+            .collect();
+        let n = seen.len();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            n,
+            "un quartier apparaît dans plusieurs cellules"
+        );
+    }
+}
