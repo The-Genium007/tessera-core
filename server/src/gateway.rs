@@ -347,6 +347,7 @@ pub async fn gateway_main(
         check_rate_limit, RateDecision, RateLimitState, DEFAULT_KICK_AFTER_WINDOWS,
         DEFAULT_LIMIT_PER_WINDOW,
     };
+    use crate::shutdown::ShutdownSignal;
     use crate::snapshot_merge::merge_snapshots;
     use crate::transport::{Transport, TransportEvent};
     use std::collections::HashMap;
@@ -881,52 +882,6 @@ pub async fn gateway_main(
                 });
             }
         }
-    }
-}
-
-/// Détecteur d'arrêt propre : SIGINT (Ctrl+C) partout, plus SIGTERM (docker stop) sous Unix.
-/// Utilisé uniquement depuis `gateway_main`, qui est déjà gns-gated.
-///
-/// Doit être construit UNE SEULE FOIS avant la boucle principale et réutilisé (via `&mut`) à
-/// chaque itération. Sur Unix, `recv()` réutilise le même flux `tokio::signal::unix::Signal` —
-/// reconstruire ce flux à chaque itération (comme le faisait un appel `shutdown_signal()` frais
-/// dans le `select!` de la boucle) rouvre une fenêtre où un signal arrivé entre deux itérations
-/// (après le drop de l'ancien flux, avant la création du nouveau) n'est délivré à personne et est
-/// silencieusement perdu — tokio ne bufferise pas un signal pour un récepteur qui n'existe pas
-/// encore. `tokio::signal::ctrl_c()`, lui, n'a pas ce problème (canal partagé installé une seule
-/// fois en interne par tokio dès le premier appel) : il reste donc appelé frais à chaque `recv()`.
-#[cfg(feature = "gns")]
-struct ShutdownSignal {
-    #[cfg(unix)]
-    sigterm: tokio::signal::unix::Signal,
-}
-
-#[cfg(feature = "gns")]
-impl ShutdownSignal {
-    #[cfg(unix)]
-    fn new() -> Self {
-        use tokio::signal::unix::{signal, SignalKind};
-        Self {
-            sigterm: signal(SignalKind::terminate()).expect("SIGTERM handler"),
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn new() -> Self {
-        Self {}
-    }
-
-    #[cfg(unix)]
-    async fn recv(&mut self) {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = self.sigterm.recv() => {}
-        }
-    }
-
-    #[cfg(not(unix))]
-    async fn recv(&mut self) {
-        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
