@@ -801,9 +801,15 @@ pub async fn gateway_main(
                     // le Gateway sait chargé sur ce shard, sinon ils y restent invisibles pour
                     // toujours (bug A.1, audit prod 2026-07-03). Idempotent : `World::add_player`
                     // (`or_default`) et `set_pose` tolèrent un double envoi sans effet de bord.
-                    for (_, seed_frames) in
-                        reseed_frames_for_reconnected_shard(&loader, &shard, &last_pos)
-                    {
+                    let reseed_frames = reseed_frames_for_reconnected_shard(&loader, &shard, &last_pos);
+                    if !reseed_frames.is_empty() {
+                        tracing::warn!(
+                            shard = %shard,
+                            reseeded_clients = reseed_frames.len(),
+                            "shard réinitialisé après reconnexion : clients re-semés"
+                        );
+                    }
+                    for (_, seed_frames) in reseed_frames {
                         let _ = write_to_shard(&mut shards, &shard, &seed_frames).await;
                     }
                 }
