@@ -202,6 +202,9 @@ mod tests {
     #[test]
     fn empty_input_returns_err_not_panic() {
         let err = generate(r#"{"entries":[],"warnings":[]}"#, None, &Params::default());
-        assert!(err.is_err(), "générer sans quartier doit échouer proprement, pas paniquer");
+        assert!(
+            err.is_err(),
+            "générer sans quartier doit échouer proprement, pas paniquer"
+        );
     }
 }
