@@ -133,6 +133,27 @@ pub async fn read_from_shards(
     }
 }
 
+/// Calcule l'âge (en ticks) du plus vieux snapshot connu de `snapshot_ticks` par rapport à
+/// `current_tick`, et le publie dans `metrics.max_snapshot_age_ticks` — détecte un shard gelé
+/// mais toujours connecté (bug non couvert par la purge sur lien mort existante). Extrait en
+/// fonction indépendante (plutôt qu'inlinée dans la boucle de `gateway_main`) pour être exercée
+/// directement par les tests d'intégration contre le vrai `Metrics`, sans dupliquer le calcul.
+pub fn update_snapshot_age_metric(
+    snapshot_ticks: &HashMap<u64, HashMap<String, u64>>,
+    current_tick: u64,
+    metrics: &crate::metrics::Metrics,
+) {
+    let max_snapshot_age_ticks = snapshot_ticks
+        .values()
+        .flat_map(|per_shard| per_shard.values())
+        .map(|&tick| current_tick.saturating_sub(tick))
+        .max()
+        .unwrap_or(0);
+    metrics
+        .max_snapshot_age_ticks
+        .store(max_snapshot_age_ticks, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Poll le transport client et renvoie les frames `ClientEvent` à écrire au Shard.
 pub fn drain_client_to_shard<T: Transport>(client: &mut T) -> Vec<Vec<u8>> {
     client
@@ -879,15 +900,7 @@ pub async fn gateway_main(
 
         // Calculer l'âge du plus vieux snapshot rediffusé — détecte un shard gelé mais toujours
         // connecté (bug non couvert par la purge sur lien mort existante).
-        let max_snapshot_age_ticks = snapshot_ticks
-            .values()
-            .flat_map(|per_shard| per_shard.values())
-            .map(|&tick| current_tick.saturating_sub(tick))
-            .max()
-            .unwrap_or(0);
-        metrics
-            .max_snapshot_age_ticks
-            .store(max_snapshot_age_ticks, std::sync::atomic::Ordering::Relaxed);
+        update_snapshot_age_metric(&snapshot_ticks, current_tick, &metrics);
 
         // 3bis) Horloge/météo monde — diffusion périodique à tous les clients connus (pas à
         // 20 Hz comme les snapshots : l'heure/la météo n'a pas besoin de cette fréquence).
@@ -1636,13 +1649,15 @@ mod tests {
             );
         }
 
-        // Calculer l'âge du plus vieux snapshot après tick 5
-        let max_age = snapshot_ticks
-            .values()
-            .flat_map(|per_shard| per_shard.values())
-            .map(|&tick| 5u64.saturating_sub(tick))
-            .max()
-            .unwrap_or(0);
+        // Exercer le vrai chemin de code de production : le même `update_snapshot_age_metric`
+        // appelé depuis la boucle de `gateway_main`, contre un vrai `Metrics`. Un test qui
+        // recalculerait l'âge localement ici ne détecterait pas une régression dans le calcul
+        // réel (mauvais `Ordering`, mauvais champ, min/max inversé, `.store()` supprimé...).
+        let metrics = crate::metrics::Metrics::new();
+        update_snapshot_age_metric(&snapshot_ticks, 5, &metrics);
+        let max_age = metrics
+            .max_snapshot_age_ticks
+            .load(std::sync::atomic::Ordering::Relaxed);
 
         assert!(
             max_age > 0,
