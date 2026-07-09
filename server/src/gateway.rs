@@ -400,8 +400,17 @@ pub async fn gateway_main(
     // catalogue (spec admin-mode-permissions, Partie 5) — non consommé en phase 1 au-delà de la
     // dérivation de `Rank` et de l'affichage du menu client.
     let mut permissions: HashMap<u64, Vec<String>> = HashMap::new();
-    // Persistance : clé (display_name), dernière position, et résidence chargée — par client.
+    // Persistance : clé EFFECTIVE (display_name sur serveur privé, `sub` OIDC vérifié sur
+    // serveur public — Task C2), dernière position, et résidence chargée — par client. Alimente
+    // `store.load`/`store.save`/`save_all_known` : NE PAS lire cette map pour résoudre une
+    // identité admin (cf. `display_names` ci-dessous).
     let mut keys: HashMap<u64, String> = HashMap::new();
+    // Pseudo affiché / identité admin (display_name) — toujours le nom brut du Join, jamais le
+    // `sub` OIDC vérifié même sur un serveur public. `admin_store`/`root_admins` restent indexés
+    // par display_name tant que Task D3 (migration de l'indexation admin vers `sub`) n'est pas
+    // faite ; `keys` (au-dessus) porte la clé de PERSISTANCE (effective_key), qui elle diffère du
+    // display_name sur un serveur public — ne pas confondre les deux usages.
+    let mut display_names: HashMap<u64, String> = HashMap::new();
     let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
     // Horodatage de la dernière PositionUpdate ACCEPTÉE par client (absent tant qu'aucune
     // position n'a encore été acceptée depuis le Join — sert de garde anti-triche).
@@ -579,6 +588,7 @@ pub async fn gateway_main(
                                 );
                             }
                         }
+                        display_names.remove(&cid);
                         last_pos.remove(&cid);
                         last_pos_at.remove(&cid);
                         bypass_warned_at.remove(&cid);
@@ -652,6 +662,7 @@ pub async fn gateway_main(
                             });
                         }
                         keys.insert(cid, effective_key);
+                        display_names.insert(cid, name);
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
                     let now = std::time::Instant::now();
@@ -717,7 +728,7 @@ pub async fn gateway_main(
                             // dans les logs stdout du conteneur, donc récupérable à distance via
                             // l'API Dokploy (compose.readLogs) sans SSH — utile pour suivre les
                             // franchissements de shard en direct pendant un playtest.
-                            let name = keys.get(&cid).map(String::as_str).unwrap_or("?");
+                            let name = display_names.get(&cid).map(String::as_str).unwrap_or("?");
                             match &ev {
                                 crate::session_log::SessionEvent::Handoff { from, to, .. } => {
                                     tracing::info!(
@@ -745,7 +756,7 @@ pub async fn gateway_main(
                     let client_secs = (h as u32) * 3600 + (m as u32) * 60 + (s as u32);
                     let delta = client_secs as i32 - server_secs as i32;
                     if delta.unsigned_abs() as i32 > TIME_DRIFT_WARN_THRESHOLD_SECS {
-                        let name = keys.get(&cid).map(String::as_str).unwrap_or("?");
+                        let name = display_names.get(&cid).map(String::as_str).unwrap_or("?");
                         tracing::warn!(
                             client = cid,
                             %name,
@@ -762,7 +773,11 @@ pub async fn gateway_main(
                         });
                     }
                 } else if let Some(text) = extract_admin_command(data) {
-                    let issuer = keys.get(&cid).cloned().unwrap_or_default();
+                    // Résolution d'identité admin : `display_names` (display_name brut), jamais
+                    // `keys` (clé de persistance = `sub` OIDC sur serveur public depuis Task C2) —
+                    // `root_admins`/`admin_store` restent indexés par display_name tant que
+                    // Task D3 n'a pas migré cette indexation vers `sub`.
+                    let issuer = display_names.get(&cid).cloned().unwrap_or_default();
                     let is_root = resolve_is_root(&issuer, &root_admins, playtest_all_admin);
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -817,7 +832,9 @@ pub async fn gateway_main(
                         &admin_store.admins,
                     );
                     for target in &to_resync {
-                        if let Some((&target_cid, _)) = keys.iter().find(|(_, n)| *n == target) {
+                        if let Some((&target_cid, _)) =
+                            display_names.iter().find(|(_, n)| *n == target)
+                        {
                             let is_target_root =
                                 resolve_is_root(target, &root_admins, playtest_all_admin);
                             let target_record = admin_store
@@ -868,6 +885,7 @@ pub async fn gateway_main(
                         tracing::info!("Sauvegarde de {name} à {pos:?}");
                     }
                 }
+                display_names.remove(&cid);
                 last_pos.remove(&cid);
                 last_pos_at.remove(&cid);
                 bypass_warned_at.remove(&cid);
@@ -1644,6 +1662,77 @@ mod tests {
         let jwks_cache = crate::jwks::JwksCache::new();
         let result = resolve_join_key(false, "Lucas", "", &jwks_cache);
         assert_eq!(result, Ok("Lucas".to_string()));
+    }
+
+    // --- Régression : identité admin reste indexée par display_name sur serveur public --------
+    //
+    // Task C2 a fait de `keys` la clé de PERSISTANCE effective (le `sub` OIDC vérifié sur un
+    // serveur public). Mais `root_admins`/`admin_store` restent indexés par `display_name`
+    // jusqu'à la migration Task D3 — ce test reproduit exactement le pipeline de la boucle
+    // Gateway (Join → maps `keys`/`display_names` → AdminCommand) et prouve que la résolution
+    // d'autorité admin utilise bien `display_names` (display_name brut), pas `keys` (le `sub`).
+    #[tokio::test]
+    async fn admin_command_resolves_issuer_from_display_name_not_sub_on_public_server() {
+        use crate::admin_commands::{
+            execute as execute_admin_command, parse as parse_admin_command,
+        };
+
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let claims = crate::jwks::Claims {
+            sub: "oidc-user-xyz".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &material.encoding_key);
+        let display_name = "AdminDisplayName";
+
+        // Join sur un serveur public : la clé effective (persistance) est le `sub` vérifié, pas
+        // le display_name — exactement ce que fait `resolve_join_key` (Task C2) dans la boucle.
+        let effective_key = resolve_join_key(true, display_name, &token, &jwks_cache)
+            .expect("token valide, join accepté");
+        assert_ne!(
+            effective_key, display_name,
+            "précondition du test : le sub doit diverger du display_name"
+        );
+
+        // Reproduit ce que le Join fait dans la boucle : `keys` reçoit la clé effective,
+        // `display_names` (le fix) reçoit toujours le display_name brut.
+        let cid = 42u64;
+        let mut keys: HashMap<u64, String> = HashMap::new();
+        let mut display_names: HashMap<u64, String> = HashMap::new();
+        keys.insert(cid, effective_key.clone());
+        display_names.insert(cid, display_name.to_string());
+
+        // `root_admins` (TESSERA_ROOT_ADMINS) liste le display_name, jamais le sub.
+        let root_admins: std::collections::HashSet<String> =
+            [display_name.to_string()].into_iter().collect();
+
+        // Bug reproduit : résoudre l'autorité depuis `keys` (le sub) échoue toujours.
+        let issuer_from_keys = keys.get(&cid).cloned().unwrap_or_default();
+        assert!(
+            !resolve_is_root(&issuer_from_keys, &root_admins, false),
+            "le sub OIDC ne doit jamais être reconnu comme root admin"
+        );
+
+        // Fix : résoudre depuis `display_names` reconnaît bien le root admin.
+        let issuer = display_names.get(&cid).cloned().unwrap_or_default();
+        assert_eq!(issuer, display_name);
+        let is_root = resolve_is_root(&issuer, &root_admins, false);
+        assert!(
+            is_root,
+            "le display_name doit être reconnu comme root admin"
+        );
+
+        // Et la commande admin s'exécute réellement avec cet issuer (comme au call site
+        // `gateway.rs` de la boucle événementielle) : `/creategroup` réservé aux admins racine.
+        let mut groups = Vec::new();
+        let mut admins = Vec::new();
+        let parsed = parse_admin_command("/creategroup moderators").expect("commande valide");
+        let outcome = execute_admin_command(parsed, is_root, &mut groups, &mut admins, 0, &issuer);
+        assert!(
+            outcome.success,
+            "la commande admin doit réussir : issuer = display_name, reconnu root admin"
+        );
     }
 
     #[test]
