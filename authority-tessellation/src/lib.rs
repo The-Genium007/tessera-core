@@ -10,3 +10,4 @@ pub mod patterns;
 pub mod periphery;
 pub mod prng;
 pub mod raster;
+pub mod validate;
