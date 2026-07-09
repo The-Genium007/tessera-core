@@ -7,6 +7,7 @@ pub mod framing;
 pub mod gateway;
 pub mod gateway_routing;
 pub mod handoff;
+pub mod hot_state_cache;
 pub mod internal_net;
 pub mod manifest;
 pub mod metrics;
