@@ -14,6 +14,7 @@ pub struct Metrics {
     pub players: AtomicU64,
     pub shards_loaded: AtomicU64,
     pub last_tick_micros: AtomicI64,
+    pub max_snapshot_age_ticks: AtomicU64,
 }
 
 impl Metrics {
@@ -33,10 +34,14 @@ impl Metrics {
              tessera_shards_loaded {}\n\
              # HELP tessera_last_tick_micros Durée du dernier tick, en microsecondes (Shard ; 0 pour un Gateway).\n\
              # TYPE tessera_last_tick_micros gauge\n\
-             tessera_last_tick_micros {}\n",
+             tessera_last_tick_micros {}\n\
+             # HELP tessera_snapshot_age_ticks Âge du plus vieux snapshot rediffusé depuis un shard (0 = frais).\n\
+             # TYPE tessera_snapshot_age_ticks gauge\n\
+             tessera_snapshot_age_ticks {}\n",
             self.players.load(Ordering::Relaxed),
             self.shards_loaded.load(Ordering::Relaxed),
             self.last_tick_micros.load(Ordering::Relaxed),
+            self.max_snapshot_age_ticks.load(Ordering::Relaxed),
         )
     }
 }
@@ -75,6 +80,14 @@ mod tests {
         assert!(text.contains("tessera_players 5"));
         assert!(text.contains("tessera_shards_loaded 2"));
         assert!(text.contains("tessera_last_tick_micros 1234"));
+    }
+
+    #[test]
+    fn render_includes_max_snapshot_age_ticks() {
+        let m = Metrics::default();
+        m.max_snapshot_age_ticks.store(7, Ordering::Relaxed);
+        let out = m.render();
+        assert!(out.contains("tessera_snapshot_age_ticks 7"));
     }
 
     #[tokio::test]
