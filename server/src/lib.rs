@@ -17,6 +17,7 @@ pub mod rate_limit;
 pub mod server_loop;
 pub mod session_log;
 pub mod shard;
+pub mod shutdown;
 pub mod snapshot_merge;
 pub mod transport;
 pub mod world;
