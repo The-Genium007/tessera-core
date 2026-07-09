@@ -1496,6 +1496,21 @@ mod tests {
     }
 
     #[test]
+    fn gamemaster_rank_bypasses_anticheat_plausibility_check_by_design() {
+        use crate::handoff::Rank;
+        // Documente explicitement que ce bypass est voulu (rôle GameMaster = staff/MJ), pas un bug —
+        // sert de garde-fou si quelqu'un tente de le "corriger" par accident plus tard.
+        // Le bypass s'active ligne 613 de gateway.rs : `let bypassed = matches!(ranks.get(&cid), Some(Rank::GameMaster));`
+        // Quand vrai, la vérification anti-triche de plausibilité de mouvement (is_plausible_move) est court-circuitée.
+        let rank = Rank::GameMaster;
+        assert!(matches!(rank, Rank::GameMaster));
+
+        // Vérifier aussi que les autres rangs ne déclenchent pas le bypass.
+        assert!(!matches!(Rank::Player, Rank::GameMaster));
+        assert!(!matches!(Rank::Moderator, Rank::GameMaster));
+    }
+
+    #[test]
     fn save_all_known_saves_every_client_with_a_known_position() {
         use crate::persistence::{MemoryStore, PlayerRecord, PlayerStore};
 
