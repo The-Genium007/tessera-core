@@ -45,7 +45,7 @@ use gns::{
     sys::ESteamNetworkingConnectionState as State, GnsGlobal, GnsSocket, IsClient, SendFlags,
 };
 use protocol::*;
-use server::handoff::{Aabb, RadiusPolicy, ShardTopology, ShardZone};
+use server::handoff::{CellZone, RadiusPolicy, ShardTopology, ShardZone};
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -53,26 +53,46 @@ use std::time::{Duration, Instant};
 /// Même topologie que `two_shards()` dans `handoff.rs` (tests purs) : frontière à x=1000,
 /// A = x<1000, B = x>=1000. Adresses paramétrées ici (au lieu des littéraux "A"/"B") car ce sont
 /// de vraies adresses TCP internes Gateway→Shard.
+///
+/// `Aabb`/rayon global ont été remplacés par la tessellation Voronoï (Groupe G) : chaque
+/// `ShardZone` porte désormais des `CellZone` polygonales + un rayon de tampon par cellule. Les
+/// bornes "infinies" de l'ancien `Aabb` sont approximées par un grand rectangle fini (le
+/// point-in-polygon n'a pas de notion d'infini) — largement suffisant pour ce test, qui ne place
+/// des clients qu'à proximité immédiate de x=1000 (990/1010).
+const FAR: f64 = 1_000_000.0;
+
 fn two_shards(addr_a: &str, addr_b: &str) -> ShardTopology {
     ShardTopology {
         shards: vec![
             ShardZone {
                 addr: addr_a.to_string(),
-                zone: Aabb {
-                    min_x: f32::NEG_INFINITY,
-                    max_x: 1000.0,
-                    min_y: f32::NEG_INFINITY,
-                    max_y: f32::INFINITY,
-                },
+                cells: vec![(
+                    CellZone {
+                        boundary_rings: vec![vec![
+                            [-FAR, -FAR],
+                            [1000.0, -FAR],
+                            [1000.0, FAR],
+                            [-FAR, FAR],
+                            [-FAR, -FAR],
+                        ]],
+                    },
+                    BUFFER_RADIUS,
+                )],
             },
             ShardZone {
                 addr: addr_b.to_string(),
-                zone: Aabb {
-                    min_x: 1000.0,
-                    max_x: f32::INFINITY,
-                    min_y: f32::NEG_INFINITY,
-                    max_y: f32::INFINITY,
-                },
+                cells: vec![(
+                    CellZone {
+                        boundary_rings: vec![vec![
+                            [1000.0, -FAR],
+                            [FAR, -FAR],
+                            [FAR, FAR],
+                            [1000.0, FAR],
+                            [1000.0, -FAR],
+                        ]],
+                    },
+                    BUFFER_RADIUS,
+                )],
             },
         ],
     }
@@ -90,6 +110,8 @@ fn encode_join(name: &str) -> Vec<u8> {
         &mut b,
         &JoinArgs {
             display_name: Some(n),
+            token: None,
+            protocol_version: server::gateway_routing::CURRENT_PROTOCOL_VERSION,
         },
     );
     let env = ClientEnvelope::create(
@@ -258,6 +280,9 @@ async fn run_test() {
         tmp.path().join("server_admins.json"),
     );
     let gateway_addr_owned = gateway_addr.to_string();
+    // Serveur privé (identity_public=false) pour ce test : le Join utilise display_name seul,
+    // comme avant Task C2/C3 — aucun token/JWKS réel nécessaire pour exercer le handoff.
+    let jwks_cache = std::sync::Arc::new(server::jwks::JwksCache::new());
     tokio::task::spawn_local(async move {
         server::gateway::gateway_main(
             &gateway_addr_owned,
@@ -267,6 +292,10 @@ async fn run_test() {
             admin_store,
             [990.0, 0.0, 0.0],
             16,
+            jwks_cache,
+            false,
+            false,
+            std::collections::HashSet::new(),
         )
         .await
         .expect("gateway ne devrait pas échouer");
