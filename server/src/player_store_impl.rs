@@ -79,9 +79,11 @@ impl PlayerStore for PlayerStoreImpl {
                     .cloned()
                     .unwrap_or_else(|| key.to_string());
                 let key = key.to_string();
-                if let Err(e) = tokio::runtime::Handle::current()
-                    .block_on(store.save_async(&key, &display_name, record))
-                {
+                if let Err(e) = tokio::runtime::Handle::current().block_on(store.save_async(
+                    &key,
+                    &display_name,
+                    record,
+                )) {
                     tracing::warn!("PostgresStore::save_async échoué (subject={key}): {e}");
                 }
             }

@@ -324,6 +324,38 @@ pub fn resolve_join_key(
     }
 }
 
+/// Décide, au moment du `Join`, la position de spawn d'un client — en essayant D'ABORD le
+/// `HotStateCache` (état chaud, reprise rapide après un redémarrage/reconnexion du Gateway,
+/// Décision 3 du design stockage 2026-07-09) avant de retomber sur le store froid
+/// (`store.load` → `resolve_spawn`, comportement historique inchangé).
+///
+/// Une entrée hot-cache présente pour `effective_key` GAGNE toujours sur le store froid : elle
+/// est par construction plus récente (écrite en continu à chaque `PositionUpdate` accepté,
+/// TTL 120s) alors que le store froid n'est mis à jour qu'au Join/Leave/déconnexion/autosave.
+/// Absence de hot-cache (jamais écrit, expiré, ou erreur Redis quelconque — connexion perdue,
+/// etc.) dégrade gracieusement vers le repli habituel, jamais un échec du Join : une erreur de
+/// lecture Redis est donc traitée exactement comme une absence, pas remontée à l'appelant.
+///
+/// Extrait de `gateway_main` pour être testable indépendamment de la boucle complète — voir le
+/// test `resolve_join_spawn` de reprise ci-dessous (Redis réel peuplé, store froid vide).
+pub async fn resolve_join_spawn(
+    effective_key: &str,
+    hot_state: &crate::hot_state_cache::HotStateCache,
+    cold_record: Option<&crate::persistence::PlayerRecord>,
+    spawn: [f32; 3],
+) -> ([f32; 3], crate::persistence::SpawnSource) {
+    match hot_state.read(effective_key).await {
+        Ok(Some(pos)) => (pos, crate::persistence::SpawnSource::LastPosition),
+        Ok(None) => crate::persistence::resolve_spawn(cold_record, spawn),
+        Err(e) => {
+            tracing::warn!(
+                "HotStateCache::read échoué (subject={effective_key}): {e:?} — repli sur le store froid"
+            );
+            crate::persistence::resolve_spawn(cold_record, spawn)
+        }
+    }
+}
+
 /// Décide, au moment du `Join`, si la version de protocole annoncée par le client (Task C3) est
 /// compatible avec ce serveur. `Err` porte le message `Kicked` à renvoyer — un client dont le
 /// protocole a dérivé (launcher pas à jour) doit recevoir une explication lisible plutôt qu'un
@@ -468,7 +500,7 @@ pub async fn gateway_main(
     listen_addr: &str,
     topology: crate::handoff::ShardTopology,
     radius: crate::handoff::RadiusPolicy,
-    mut store: crate::persistence::FileStore,
+    mut store: crate::player_store_impl::PlayerStoreImpl,
     mut admin_store: crate::admin_store::AdminStore,
     spawn: [f32; 3],
     max_players: u32,
@@ -476,6 +508,7 @@ pub async fn gateway_main(
     identity_public: bool,
     whitelist_enabled: bool,
     whitelist_names: std::collections::HashSet<String>,
+    hot_state: crate::hot_state_cache::HotStateCache,
 ) -> std::io::Result<()> {
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
@@ -485,7 +518,7 @@ pub async fn gateway_main(
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
     use crate::permissions::{derive_rank, resolve_permissions};
-    use crate::persistence::{resolve_spawn, PlayerRecord, PlayerStore};
+    use crate::persistence::{PlayerRecord, PlayerStore};
     use crate::rate_limit::{
         check_rate_limit, RateDecision, RateLimitState, DEFAULT_KICK_AFTER_WINDOWS,
         DEFAULT_LIMIT_PER_WINDOW,
@@ -768,8 +801,11 @@ pub async fn gateway_main(
                             rate_states.remove(&cid);
                             continue;
                         }
+                        store.note_display_name(&effective_key, &name);
                         let record = store.load(&effective_key);
-                        let (pos, source) = resolve_spawn(record.as_ref(), spawn);
+                        let (pos, source) =
+                            resolve_join_spawn(&effective_key, &hot_state, record.as_ref(), spawn)
+                                .await;
                         tracing::info!(
                             "Connexion de {name} : placement décidé {pos:?} (source: {source:?})"
                         );
@@ -844,6 +880,18 @@ pub async fn gateway_main(
                     }
                     last_pos.insert(cid, [x, y, z]);
                     last_pos_at.insert(cid, now);
+                    // Écriture hot-state (Décision 3, design stockage 2026-07-09) : à chaque
+                    // PositionUpdate ACCEPTÉ, taguée par la clé effective (jamais display_name).
+                    // Un client sans clé effective connue (ne devrait pas arriver après un Join
+                    // réussi) est silencieusement ignoré plutôt que de paniquer.
+                    if let Some(effective_key) = keys.get(&cid) {
+                        if let Err(e) = hot_state.write(effective_key, [x, y, z]).await {
+                            tracing::warn!(
+                                client = cid,
+                                "HotStateCache::write échoué (subject={effective_key}): {e:?}"
+                            );
+                        }
+                    }
                     let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
                     placement = Some(topology.locate(x, y, r));
                     if let (Some(sl), Some(next)) = (slog.as_mut(), placement.as_ref()) {
@@ -2177,5 +2225,79 @@ mod tests {
             max_age, 5,
             "snapshot age should be exactly 5 ticks (tick 5 - tick 0)"
         );
+    }
+
+    // --- resolve_join_spawn : reprise hot-cache-first (Décision 3, design stockage 2026-07-09) --
+    //
+    // Nécessite un vrai Redis local (`docker run -p 6379:6379 redis:7`), même pattern déjà en
+    // place dans `hot_state_cache.rs` — pas de mock, conformément au brief.
+
+    #[tokio::test]
+    async fn resolve_join_spawn_prefers_hot_cache_over_cold_store_when_both_present() {
+        use crate::hot_state_cache::HotStateCache;
+        use crate::persistence::{PlayerRecord, SpawnSource};
+
+        let hot_state = HotStateCache::connect("redis://127.0.0.1:6379")
+            .await
+            .expect("Redis local requis (docker run -p 6379:6379 redis:7)");
+        let subject = "gateway-resume-test-hot-wins";
+        hot_state.write(subject, [42.0, 43.0, 44.0]).await.unwrap();
+
+        // Store froid VIDE (redémarrage/reconnexion simulé côté Gateway) — le hot cache doit
+        // gagner malgré tout, PAS le spawn par défaut.
+        let cold_record: Option<PlayerRecord> = None;
+        let spawn = [0.0, 0.0, 0.0];
+
+        let (pos, source) =
+            resolve_join_spawn(subject, &hot_state, cold_record.as_ref(), spawn).await;
+        assert_eq!(
+            pos,
+            [42.0, 43.0, 44.0],
+            "la position chaude doit gagner sur le store froid vide et sur le spawn par défaut"
+        );
+        assert_eq!(source, SpawnSource::LastPosition);
+    }
+
+    #[tokio::test]
+    async fn resolve_join_spawn_falls_back_to_cold_store_when_hot_cache_is_empty() {
+        use crate::hot_state_cache::HotStateCache;
+        use crate::persistence::PlayerRecord;
+
+        let hot_state = HotStateCache::connect("redis://127.0.0.1:6379")
+            .await
+            .expect("Redis local requis (docker run -p 6379:6379 redis:7)");
+        let subject = "gateway-resume-test-cold-fallback-never-written";
+
+        let cold_record = PlayerRecord {
+            last_position: [7.0, 8.0, 9.0],
+            residence: None,
+        };
+        let spawn = [0.0, 0.0, 0.0];
+
+        let (pos, _source) =
+            resolve_join_spawn(subject, &hot_state, Some(&cold_record), spawn).await;
+        assert_eq!(
+            pos,
+            [7.0, 8.0, 9.0],
+            "sans entrée hot-cache, le repli habituel (store froid) doit s'appliquer"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_join_spawn_falls_back_to_default_spawn_when_both_hot_and_cold_are_empty() {
+        use crate::hot_state_cache::HotStateCache;
+        use crate::persistence::{PlayerRecord, SpawnSource};
+
+        let hot_state = HotStateCache::connect("redis://127.0.0.1:6379")
+            .await
+            .expect("Redis local requis (docker run -p 6379:6379 redis:7)");
+        let subject = "gateway-resume-test-nothing-known-anywhere";
+        let cold_record: Option<PlayerRecord> = None;
+        let spawn = [1.0, 2.0, 3.0];
+
+        let (pos, source) =
+            resolve_join_spawn(subject, &hot_state, cold_record.as_ref(), spawn).await;
+        assert_eq!(pos, spawn);
+        assert_eq!(source, SpawnSource::Spawn);
     }
 }
