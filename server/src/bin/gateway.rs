@@ -47,7 +47,44 @@ async fn main() -> std::io::Result<()> {
     let store_path = manifest.runtime.store_path.clone();
     let spawn = PLACEHOLDER_SPAWN;
     let listen = manifest.runtime.gateway.listen_addr.clone();
-    let store = server::persistence::FileStore::open(&store_path);
+
+    // Bascule FileStore/PostgresStore selon identity.public (câblage runtime, design stockage
+    // 2026-07-09) : un serveur privé (défaut) garde exactement le comportement historique
+    // (FileStore local) ; un serveur public route vers Postgres, indexé par sub OIDC vérifié.
+    let store = if manifest.identity.public {
+        let postgres_url = manifest.runtime.postgres_url.as_deref().unwrap_or_else(|| {
+            eprintln!(
+                "manifeste invalide ({manifest_path}): identity.public = true nécessite runtime.postgres_url"
+            );
+            std::process::exit(1);
+        });
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(postgres_url)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("connexion Postgres échouée ({postgres_url}): {e}");
+                std::process::exit(1);
+            });
+        server::player_store_impl::PlayerStoreImpl::Postgres {
+            store: server::postgres_store::PostgresStore::new(pool),
+            display_names: std::collections::HashMap::new(),
+        }
+    } else {
+        server::player_store_impl::PlayerStoreImpl::File(server::persistence::FileStore::open(
+            &store_path,
+        ))
+    };
+
+    let hot_state = server::hot_state_cache::HotStateCache::connect(&manifest.runtime.redis_url)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "connexion Redis (hot state) échouée ({}): {e:?}",
+                manifest.runtime.redis_url
+            );
+            std::process::exit(1);
+        });
+
     let admin_store = server::admin_store::AdminStore::open(
         std::path::Path::new(&store_path).with_file_name("permission_groups.json"),
         std::path::Path::new(&store_path).with_file_name("server_admins.json"),
@@ -93,6 +130,7 @@ async fn main() -> std::io::Result<()> {
         identity_public,
         whitelist_enabled,
         whitelist_names,
+        hot_state,
     )
     .await
 }

@@ -38,10 +38,31 @@ pub struct Runtime {
     #[serde(default)]
     pub whitelist_names: Vec<String>,
     pub store_path: String,
+    /// URL de connexion au `HotStateCache` Redis (état chaud, catégorie A du design stockage
+    /// 2026-07-09) — un cache de reprise/lecture rapide, jamais la source de vérité durable.
+    /// Consultée par le Gateway au boot pour construire `HotStateCache::connect`, quel que soit
+    /// `identity.public` (le cache hot-state n'est pas conditionné à la bascule Postgres).
+    /// Valeur par défaut non triviale (Redis local) : absente du TOML → comportement inchangé
+    /// pour un déploiement dev/self-host qui n'a jamais eu besoin de le déclarer explicitement.
+    #[serde(default = "default_redis_url")]
+    pub redis_url: String,
+    /// URL de connexion Postgres pour `PostgresStore` (données joueur durables, catégorie B du
+    /// design stockage 2026-07-09) — consultée UNIQUEMENT quand `identity.public = true`
+    /// (serveur public, cf. `bin/gateway.rs`). Reste `None` et jamais consultée sur un serveur
+    /// privé (`identity.public = false`, défaut) : ce champ ne change alors rien au
+    /// comportement observable (toujours `FileStore`, comme aujourd'hui).
+    #[serde(default)]
+    pub postgres_url: Option<String>,
     pub gateway: GatewayConfig,
     pub topology: TopologyConfig,
     pub radius: RadiusConfig,
     pub aoi: AoiConfig,
+}
+
+/// Valeur par défaut de `Runtime::redis_url` quand absente du TOML — Redis local, cohérent avec
+/// le `docker run -p 6379:6379 redis:7` déjà documenté pour les tests de `hot_state_cache.rs`.
+fn default_redis_url() -> String {
+    "redis://127.0.0.1:6379".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -825,6 +846,44 @@ mod tests {
         assert_eq!(
             m.runtime.whitelist_names,
             vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    // --- Runtime::redis_url / postgres_url (câblage PostgresStore/HotStateCache) ------------
+
+    #[test]
+    fn redis_url_defaults_to_local_redis_when_absent() {
+        let m: Manifest = toml::from_str(MINIMAL_TOML).expect("should parse");
+        assert_eq!(m.runtime.redis_url, "redis://127.0.0.1:6379");
+    }
+
+    #[test]
+    fn redis_url_can_be_overridden_explicitly() {
+        let toml_str = MINIMAL_TOML.replace(
+            "store_path = \"players.json\"",
+            "store_path = \"players.json\"\n        redis_url = \"redis://redis-service:6379\"",
+        );
+        let m: Manifest = toml::from_str(&toml_str).expect("should parse");
+        assert_eq!(m.runtime.redis_url, "redis://redis-service:6379");
+    }
+
+    #[test]
+    fn postgres_url_defaults_to_none_when_absent() {
+        let m: Manifest = toml::from_str(MINIMAL_TOML).expect("should parse");
+        assert_eq!(m.runtime.postgres_url, None);
+    }
+
+    #[test]
+    fn postgres_url_parses_declared_value() {
+        // Placeholder sans forme de secret réel (pas de user:pass) — juste un hôte de test.
+        let toml_str = MINIMAL_TOML.replace(
+            "store_path = \"players.json\"",
+            "store_path = \"players.json\"\n        postgres_url = \"postgres://pg-service/tessera\"",
+        );
+        let m: Manifest = toml::from_str(&toml_str).expect("should parse");
+        assert_eq!(
+            m.runtime.postgres_url,
+            Some("postgres://pg-service/tessera".to_string())
         );
     }
 }
