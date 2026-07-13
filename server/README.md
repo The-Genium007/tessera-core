@@ -41,6 +41,60 @@ de GitHub) à chaque mise à jour. Tu n'as donc **rien à compiler** : Dokploy *
 
 Les joueurs (via le launcher) se connecteront à **`<IP publique du serveur>:27020`**.
 
+## Persistance : Postgres + Redis
+
+Le Gateway a besoin de deux stores :
+
+- **Redis** (`hot_state_cache.rs`) — état chaud (position/reprise rapide), jamais la source de
+  vérité durable. Toujours consulté, indépendamment de `identity.public`.
+- **Postgres** (`postgres_store.rs`) — données joueur durables (position, résidence), consulté
+  **uniquement** quand le manifeste déclare `identity.public = true` (serveur avec authentification
+  ZITADEL réelle). Un serveur privé (`identity.public = false`, défaut) utilise `FileStore`
+  (fichier JSON local) à la place et n'a besoin ni de Postgres ni de ces variables.
+
+### Déploiement standard (colocalisé, un seul VPS)
+
+`docker-compose.yml` inclut deux services supplémentaires, **`postgres`** et **`redis`**,
+colocalisés sur la même machine que le Gateway — un choix d'échelle, pas une contrainte
+d'architecture : à la taille visée par les playtests (une dizaine de joueurs simultanés), une
+instance managée dédiée par service serait un coût et une étape de configuration superflus. Aucun
+des deux n'est exposé hors du réseau Docker interne (pas de `ports:` publié) — seul le Gateway
+leur parle, par nom de service DNS Compose (`postgres`, `redis`).
+
+**Avec ce compose, tu n'as rien à configurer manuellement** : le Gateway assemble lui-même l'URL
+Postgres depuis des variables composants (`TESSERA_PG_HOST=postgres`, `TESSERA_PG_PORT=5432`,
+`TESSERA_PG_USER=tessera`, `TESSERA_PG_DATABASE=tessera`, déjà positionnées dans le compose) si
+aucune URL complète (`TESSERA_POSTGRES_URL`) n'est fournie — voir
+`manifest::assemble_postgres_url_from_components`. Le mot de passe (`TESSERA_POSTGRES_PASSWORD`,
+partagé entre le service `postgres` et le Gateway via la même variable d'environnement) a une
+valeur par défaut versionnée dans le compose ; acceptable seulement parce que Postgres n'est
+**jamais** joignable depuis l'extérieur du réseau Docker — à changer explicitement si ce n'est
+plus vrai pour ton déploiement (ex. tu ajoutes un `ports:` sur le service `postgres`).
+
+Les **migrations** (`migrations/0001_create_player_records.sql`) tournent automatiquement au
+démarrage du Gateway (`sqlx::migrate!(...).run(&pool)` dans `bin/gateway.rs`), avant de servir des
+joueurs. Idempotent : sans effet sur un Postgres déjà à jour, donc pas d'étape manuelle même au
+tout premier déploiement (volume Postgres vide).
+
+### Variables d'environnement (à poser sur Dokploy si tu veux surcharger les défauts)
+
+| Variable | Rôle | Obligatoire ? |
+|---|---|---|
+| `TESSERA_REDIS_URL` | URL Redis complète — l'emporte sur tout | Non (défaut : service `redis` colocalisé) |
+| `TESSERA_POSTGRES_URL` | URL Postgres complète — l'emporte sur les composants `TESSERA_PG_*` et sur le manifeste | Non (défaut : assemblée depuis `TESSERA_PG_*`) |
+| `TESSERA_POSTGRES_PASSWORD` | Mot de passe Postgres, partagé entre le service `postgres` et le Gateway | Non (défaut versionné, voir avertissement ci-dessus) |
+| `TESSERA_PG_HOST`/`_PORT`/`_USER`/`_DATABASE` | Composants d'URL Postgres, utilisés si `TESSERA_POSTGRES_URL` est absente | Non (défauts déjà dans `docker-compose.yml`) |
+
+**Ordre de priorité** (du plus fort au plus faible) : `TESSERA_POSTGRES_URL` (env) >
+`runtime.postgres_url` (manifeste) > composants `TESSERA_PG_*` (env). Même principe pour Redis
+sans les composants (`TESSERA_REDIS_URL` > `runtime.redis_url` du manifeste).
+
+### Bascule vers un Postgres/Redis managé externe
+
+Si le trafic dépasse un jour ce qu'une seule machine encaisse : poser `TESSERA_POSTGRES_URL`/
+`TESSERA_REDIS_URL` avec l'URL du service managé suffit — rien d'autre à changer côté code. Les
+services `postgres`/`redis` du compose peuvent alors être retirés (ou laissés inutilisés).
+
 ## Construire / lancer en local (développeurs)
 
 Avec Docker Compose (recommandé — reproduit la topologie Gateway + 2 Shards) :

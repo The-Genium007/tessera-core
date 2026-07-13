@@ -57,9 +57,30 @@ async fn main() -> std::io::Result<()> {
         server::manifest::resolve_redis_url(&manifest.runtime.redis_url, redis_url_env.as_deref());
 
     let store = if manifest.identity.public {
+        // Dernier niveau de repli : composants séparés TESSERA_PG_* (voir docker-compose.yml,
+        // service `postgres` colocalisé) — permet un déploiement standard sans jamais saisir
+        // d'URL complète (ni sur Dokploy, ni dans le manifeste). N'est consulté que si aucune
+        // URL complète n'a été fournie par les deux niveaux au-dessus.
+        let postgres_url = postgres_url.or_else(|| {
+            let host = std::env::var("TESSERA_PG_HOST").unwrap_or_default();
+            let port = std::env::var("TESSERA_PG_PORT").unwrap_or_else(|_| "5432".to_string());
+            let user = std::env::var("TESSERA_PG_USER").unwrap_or_else(|_| "tessera".to_string());
+            let password = std::env::var("TESSERA_PG_PASSWORD").unwrap_or_default();
+            let database =
+                std::env::var("TESSERA_PG_DATABASE").unwrap_or_else(|_| "tessera".to_string());
+            server::manifest::assemble_postgres_url_from_components(
+                server::manifest::PostgresComponents {
+                    host: &host,
+                    port: &port,
+                    user: &user,
+                    password: &password,
+                    database: &database,
+                },
+            )
+        });
         let postgres_url = postgres_url.unwrap_or_else(|| {
             eprintln!(
-                "manifeste invalide ({manifest_path}): identity.public = true nécessite runtime.postgres_url ou {}",
+                "manifeste invalide ({manifest_path}): identity.public = true nécessite runtime.postgres_url, {}, ou TESSERA_PG_HOST",
                 server::manifest::TESSERA_POSTGRES_URL_ENV
             );
             std::process::exit(1);
@@ -69,6 +90,17 @@ async fn main() -> std::io::Result<()> {
             .await
             .unwrap_or_else(|e| {
                 eprintln!("connexion Postgres échouée ({postgres_url}): {e}");
+                std::process::exit(1);
+            });
+        // Exécutées à chaque boot, pas seulement au premier déploiement : idempotent (sqlx suit
+        // les migrations déjà appliquées dans sa table `_sqlx_migrations`), donc sans effet sur
+        // un Postgres déjà à jour. Nécessaire pour qu'un Postgres neuf (colocalisé, volume vide
+        // au premier démarrage) obtienne son schéma sans étape manuelle — voir server/README.md.
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("migrations Postgres échouées ({postgres_url}): {e}");
                 std::process::exit(1);
             });
         server::player_store_impl::PlayerStoreImpl::Postgres {

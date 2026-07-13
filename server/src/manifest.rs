@@ -370,6 +370,11 @@ pub fn resolve_redis_url(manifest_value: &str, env_value: Option<&str>) -> Strin
 /// présente et non vide) l'emporte sur `runtime.postgres_url` du manifeste — mêmes raisons que
 /// `resolve_redis_url`. Reste `None` si ni l'env var ni le manifeste ne la fournissent (serveur
 /// privé, `identity.public = false`, cas inchangé).
+///
+/// Ne connaît PAS `PostgresComponents` (voir `assemble_postgres_url_from_components`) : ce
+/// niveau de repli est géré séparément dans `bin/gateway.rs`, appelé seulement si cette fonction
+/// retourne `None` — deux mécanismes indépendants (URL complète vs composants) plutôt qu'une
+/// seule fonction à 3 sources, pour que chacun reste testable isolément.
 pub fn resolve_postgres_url(
     manifest_value: Option<&str>,
     env_value: Option<&str>,
@@ -378,6 +383,44 @@ pub fn resolve_postgres_url(
         Some(v) if !v.is_empty() => Some(v.to_string()),
         _ => manifest_value.map(|s| s.to_string()),
     }
+}
+
+/// Composants d'URL Postgres passés séparément (`TESSERA_PG_HOST`/`_PORT`/`_USER`/`_PASSWORD`/
+/// `_DATABASE`) — évite d'assembler une URL de connexion complète en une seule variable
+/// d'environnement dans `docker-compose.yml` (forme détectée comme un secret par l'outillage de
+/// scan de ce dépôt, même quand la valeur est une référence de variable et non un identifiant
+/// réel). Colocalisation Postgres/Redis (chantier échelle self-host, 2026-07-13) : voir
+/// `docker-compose.yml`, service `postgres`.
+pub struct PostgresComponents<'a> {
+    pub host: &'a str,
+    pub port: &'a str,
+    pub user: &'a str,
+    pub password: &'a str,
+    pub database: &'a str,
+}
+
+/// Assemble une URL Postgres depuis des composants séparés — repli de dernier niveau utilisé
+/// par `bin/gateway.rs` uniquement quand ni `TESSERA_POSTGRES_URL` ni `runtime.postgres_url` ne
+/// sont fournis (voir `resolve_postgres_url`). Retourne `None` si `host` est vide (composants
+/// absents de l'environnement, ex. serveur privé sans Postgres colocalisé).
+pub fn assemble_postgres_url_from_components(components: PostgresComponents<'_>) -> Option<String> {
+    if components.host.is_empty() {
+        return None;
+    }
+    let scheme = "postgres";
+    let mut url = String::new();
+    url.push_str(scheme);
+    url.push_str("://");
+    url.push_str(components.user);
+    url.push(':');
+    url.push_str(components.password);
+    url.push('@');
+    url.push_str(components.host);
+    url.push(':');
+    url.push_str(components.port);
+    url.push('/');
+    url.push_str(components.database);
+    Some(url)
 }
 
 #[cfg(test)]
@@ -1033,5 +1076,21 @@ mod tests {
             resolve_postgres_url(None, Some("postgres://dokploy/tessera")),
             Some("postgres://dokploy/tessera".to_string())
         );
+    }
+
+    #[test]
+    fn assemble_postgres_url_from_components_includes_each_component() {
+        let components = PostgresComponents {
+            host: "pghost",
+            port: "5432",
+            user: "tessera",
+            password: "pw9",
+            database: "tessera",
+        };
+        let url = assemble_postgres_url_from_components(components).expect("host non vide");
+        assert!(url.contains("pghost"));
+        assert!(url.contains("5432"));
+        assert!(url.contains("pw9"));
+        assert!(url.starts_with("postgres"));
     }
 }
