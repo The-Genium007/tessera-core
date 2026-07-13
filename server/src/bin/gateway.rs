@@ -3,13 +3,6 @@
 //! Le manifeste (voir server.example.toml) porte topologie/spawn/rayons/store/adresses — plus
 //! aucun argument positionnel.
 
-// TODO(gap): plus de source de spawn point dans le manifeste depuis le remplacement du schéma
-// de topologie (G3) — l'ancien default_entry/spawn_points vivait dans l'arbre de splits/shards
-// disparu. Placeholder en dur en attendant une vraie stratégie de spawn (hors scope de ce
-// chantier §5.6 câblage runtime ; à traiter séparément).
-#[cfg(feature = "gns")]
-const PLACEHOLDER_SPAWN: [f32; 3] = [0.0, 0.0, 0.0];
-
 #[cfg(feature = "gns")]
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -45,7 +38,7 @@ async fn main() -> std::io::Result<()> {
         game_master: manifest.runtime.radius.game_master,
     };
     let store_path = manifest.runtime.store_path.clone();
-    let spawn = PLACEHOLDER_SPAWN;
+    let spawn = manifest.runtime.spawn;
     let listen = manifest.runtime.gateway.listen_addr.clone();
 
     // Bascule FileStore/PostgresStore selon identity.public (câblage runtime, design stockage

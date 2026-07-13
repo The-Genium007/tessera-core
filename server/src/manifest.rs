@@ -38,6 +38,13 @@ pub struct Runtime {
     #[serde(default)]
     pub whitelist_names: Vec<String>,
     pub store_path: String,
+    /// Point de spawn par défaut pour un nouveau joueur sans position/résidence connue —
+    /// remplace l'ancien `[[runtime.topology.shards]].spawn_points`/`default_entry` (schéma BSP
+    /// disparu avec le Groupe G, câblage runtime tessellation Voronoï). Défaut `[0,0,0]`
+    /// (comportement historique du placeholder codé en dur dans `bin/gateway.rs`) si absent —
+    /// aucune régression pour un manifeste existant qui ne le déclare pas encore.
+    #[serde(default)]
+    pub spawn: [f32; 3],
     /// URL de connexion au `HotStateCache` Redis (état chaud, catégorie A du design stockage
     /// 2026-07-09) — un cache de reprise/lecture rapide, jamais la source de vérité durable.
     /// Consultée par le Gateway au boot pour construire `HotStateCache::connect`, quel que soit
@@ -550,6 +557,7 @@ mod tests {
         "#;
         let m: Manifest = toml::from_str(toml).expect("should parse");
         assert_eq!(m.identity.public, false);
+        assert_eq!(m.runtime.spawn, [0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -847,6 +855,50 @@ mod tests {
             m.runtime.whitelist_names,
             vec!["Alice".to_string(), "Bob".to_string()]
         );
+    }
+
+    // --- Runtime::spawn (remplace PLACEHOLDER_SPAWN codé en dur, cf. bin/gateway.rs) --------
+
+    #[test]
+    fn spawn_parses_declared_value() {
+        let toml = r#"
+            format_version = 1
+            [identity]
+            id = "tessera-dev-01"
+            name = "Tessera Dev"
+            description = "desc"
+            region = "EU"
+            language = "FR"
+            max_players = 16
+            tags = ["dev"]
+            discord_url = ""
+            website_url = ""
+            required_modset = "0.1.0"
+            voice_required = false
+
+            [runtime]
+            whitelist = false
+            store_path = "players.json"
+            spawn = [120.5, 8.0, -40.25]
+
+            [runtime.gateway]
+            listen_addr = "0.0.0.0:27020"
+            advertise_addr = "51.38.189.234:27020"
+
+            [runtime.topology]
+            authority_artifact = "authority.json"
+            server_count = 1
+
+            [runtime.radius]
+            base = 25.0
+            moderator = 50.0
+            game_master = 75.0
+
+            [runtime.aoi]
+            visibility_radius = 100.0
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("should parse");
+        assert_eq!(m.runtime.spawn, [120.5, 8.0, -40.25]);
     }
 
     // --- Runtime::redis_url / postgres_url (câblage PostgresStore/HotStateCache) ------------
