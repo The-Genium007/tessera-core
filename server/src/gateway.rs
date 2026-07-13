@@ -457,6 +457,92 @@ pub fn apply_shard_frame_to_client<T: Transport>(body: &[u8], client: &mut T) {
     }
 }
 
+/// Applique une `RateDecision` déjà calculée par `check_rate_limit` (rate_limit.rs, seuils
+/// inchangés) : ne réévalue rien, se contente de la traduire en effets observables. `Accept` ne
+/// fait rien ; `Drop` ignore le message (log warn) sans kick ni métrique — comportement identique
+/// à aujourd'hui ; `Kick` (flood soutenu) logge, incrémente `metrics.rejected_messages_total`
+/// (métrique F3), envoie `encode_kicked("flood")` puis déconnecte le client via `T: Transport`.
+/// Renvoie `true` si le message qui a produit cette décision doit être considéré comme consommé
+/// (l'appelant doit `continue` sans le traiter plus loin) — c'est le cas pour `Drop` et `Kick`,
+/// pas pour `Accept`. Ne touche PAS l'état per-cid au-delà du rate-limit lui-même (`rate_states`
+/// est géré par l'appelant, comme avant) ; le nettoyage complet (keys/last_pos/ranks/...) après un
+/// `Kick` reste à la charge de l'appelant via `cleanup_client_state`, pour garder cette fonction
+/// scopée à "décision + métrique + kick réseau" (voir gateway_main).
+pub fn apply_rate_limit_decision<T: Transport>(
+    decision: crate::rate_limit::RateDecision,
+    cid: u64,
+    metrics: &crate::metrics::Metrics,
+    client: &mut T,
+) -> bool {
+    use crate::rate_limit::RateDecision;
+    match decision {
+        RateDecision::Accept => false,
+        RateDecision::Drop => {
+            tracing::warn!(client = cid, "message ignoré (rate-limit)");
+            true
+        }
+        RateDecision::Kick => {
+            tracing::warn!(client = cid, "kick : flood soutenu (rate-limit)");
+            metrics
+                .rejected_messages_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            client.send(cid, &encode_kicked("flood"));
+            client.disconnect(cid);
+            true
+        }
+    }
+}
+
+/// Décide si un `Join` doit être refusé parce que le serveur est plein : `cid` n'a pas encore de
+/// slot (`!keys_contains_cid`) et le nombre de joueurs actuels a déjà atteint `max_players`. En
+/// cas de refus, logge, incrémente `metrics.rejected_messages_total` (métrique F3), envoie
+/// `encode_kicked("serveur plein")` puis déconnecte le client via `T: Transport`. Ne touche PAS
+/// `rate_states` (géré par l'appelant, comme avant) ni aucune autre map per-cid : un serveur plein
+/// refuse un client qui n'a jamais eu de slot, donc rien d'autre à nettoyer.
+pub fn reject_join_if_server_full<T: Transport>(
+    keys_contains_cid: bool,
+    keys_len: usize,
+    max_players: u32,
+    cid: u64,
+    metrics: &crate::metrics::Metrics,
+    client: &mut T,
+) -> bool {
+    if !keys_contains_cid && keys_len >= max_players as usize {
+        tracing::warn!(client = cid, max_players, "kick : serveur plein");
+        metrics
+            .rejected_messages_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        client.send(cid, &encode_kicked("serveur plein"));
+        client.disconnect(cid);
+        true
+    } else {
+        false
+    }
+}
+
+/// Décide si une `PositionUpdate` doit être rejetée pour cause de vitesse implausible.
+/// `plausible` est déjà calculé par `is_plausible_move`/`cap_elapsed` (anticheat.rs, seuils
+/// inchangés, bypass GameMaster déjà tranché avant l'appel) — cette fonction ne fait que réagir à
+/// un rejet : logge et incrémente `metrics.rejected_messages_total` (métrique F3). Pas de kick ici
+/// (contrairement au rate-limit/serveur plein) : le message est juste ignoré, la position n'est
+/// pas mise à jour par l'appelant. Renvoie `true` si le message doit être considéré comme consommé
+/// (l'appelant doit `continue` sans mettre à jour `last_pos`/`last_pos_at`/placement).
+pub fn reject_position_if_implausible(
+    plausible: bool,
+    cid: u64,
+    metrics: &crate::metrics::Metrics,
+) -> bool {
+    if !plausible {
+        tracing::warn!(client = cid, "PositionUpdate rejeté (vitesse implausible)");
+        metrics
+            .rejected_messages_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
 /// Point d'entrée du Gateway (M4, handoff) : ouvre l'écoute GNS publique et, pour chaque client,
 /// calcule à chaque position — via la `ShardTopology` locale + le rayon selon le rang — l'ensemble
 /// de shards où le charger (autoritaire + zones tampon). Il diffuse les événements du client à tous
@@ -675,48 +761,37 @@ pub async fn gateway_main(
                 let state = rate_states
                     .entry(cid)
                     .or_insert_with(|| RateLimitState::new(now));
-                match check_rate_limit(
+                let decision = check_rate_limit(
                     state,
                     now,
                     DEFAULT_LIMIT_PER_WINDOW,
                     DEFAULT_KICK_AFTER_WINDOWS,
-                ) {
-                    RateDecision::Accept => {}
-                    RateDecision::Drop => {
-                        tracing::warn!(client = cid, "message ignoré (rate-limit)");
-                        continue;
-                    }
-                    RateDecision::Kick => {
-                        tracing::warn!(client = cid, "kick : flood soutenu (rate-limit)");
-                        metrics
-                            .rejected_messages_total
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        client.send(cid, &encode_kicked("flood"));
-                        client.disconnect(cid);
-                        if let Some(name) = keys.remove(&cid) {
-                            if let Some(pos) = last_pos.get(&cid).copied() {
-                                store.save(
-                                    &name,
-                                    PlayerRecord {
-                                        last_position: pos,
-                                        residence: residence.get(&cid).copied().flatten(),
-                                    },
-                                );
-                            }
-                        }
-                        display_names.remove(&cid);
-                        last_pos.remove(&cid);
-                        last_pos_at.remove(&cid);
-                        bypass_warned_at.remove(&cid);
-                        residence.remove(&cid);
-                        ranks.remove(&cid);
-                        permissions.remove(&cid);
-                        rate_states.remove(&cid);
-                        loader.forget(cid);
-                        latest.remove(&cid);
-                        prev_placements.remove(&cid);
-                        continue;
-                    }
+                );
+                let was_kick = decision == RateDecision::Kick;
+                let consumed = apply_rate_limit_decision(decision, cid, &metrics, &mut client);
+                if was_kick {
+                    // Nettoyage complet de l'état per-cid — même liste de maps que le nettoyage
+                    // partagé Disconnected/Leave (cf. `cleanup_client_state`), y compris la
+                    // sauvegarde de la dernière position connue.
+                    cleanup_client_state(
+                        cid,
+                        &mut store,
+                        &mut keys,
+                        &mut display_names,
+                        &mut last_pos,
+                        &mut last_pos_at,
+                        &mut bypass_warned_at,
+                        &mut ranks,
+                        &mut permissions,
+                        &mut residence,
+                        &mut rate_states,
+                        &mut loader,
+                        &mut latest,
+                        &mut prev_placements,
+                    );
+                }
+                if consumed {
+                    continue;
                 }
             }
 
@@ -758,13 +833,14 @@ pub async fn gateway_main(
                                     continue;
                                 }
                             };
-                        if !keys.contains_key(&cid) && keys.len() >= max_players as usize {
-                            tracing::warn!(client = cid, max_players, "kick : serveur plein");
-                            metrics
-                                .rejected_messages_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            client.send(cid, &encode_kicked("serveur plein"));
-                            client.disconnect(cid);
+                        if reject_join_if_server_full(
+                            keys.contains_key(&cid),
+                            keys.len(),
+                            max_players,
+                            cid,
+                            &metrics,
+                            &mut client,
+                        ) {
                             rate_states.remove(&cid);
                             continue;
                         }
@@ -835,11 +911,7 @@ pub async fn gateway_main(
                             _ => true,
                         }
                     };
-                    if !plausible {
-                        tracing::warn!(client = cid, "PositionUpdate rejeté (vitesse implausible)");
-                        metrics
-                            .rejected_messages_total
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if reject_position_if_implausible(plausible, cid, &metrics) {
                         continue;
                     }
                     last_pos.insert(cid, [x, y, z]);
@@ -1225,6 +1297,203 @@ mod tests {
         apply_shard_frame_to_client(&body, &mut client);
         assert_eq!(client.take_sent(9), vec![vec![7, 7]]);
         let _ = &mut shard_side;
+    }
+
+    #[test]
+    fn apply_rate_limit_decision_on_sustained_flood_kicks_and_counts_rejected_metric() {
+        use crate::rate_limit::{
+            check_rate_limit, RateLimitState, DEFAULT_KICK_AFTER_WINDOWS, DEFAULT_LIMIT_PER_WINDOW,
+        };
+        use std::time::{Duration, Instant};
+
+        let t0 = Instant::now();
+        let mut state = RateLimitState::new(t0);
+        let mut client = InMemoryTransport::new();
+        let metrics = crate::metrics::Metrics::new();
+        let cid = 7u64;
+
+        // Reproduit sustained_flooding_across_consecutive_windows_kicks (rate_limit.rs) : 3
+        // fenêtres consécutives bien au-dessus de la limite → RateDecision::Kick à la dernière.
+        // Comme dans gateway_main, un `Kick` fait sortir de la boucle de messages (`continue`
+        // puis déconnexion) : on s'arrête donc au premier Kick rencontré.
+        let mut last_decision = None;
+        'windows: for window in 0..3 {
+            let t = t0 + Duration::from_secs(window);
+            for _ in 0..50 {
+                let decision = check_rate_limit(
+                    &mut state,
+                    t,
+                    DEFAULT_LIMIT_PER_WINDOW,
+                    DEFAULT_KICK_AFTER_WINDOWS,
+                );
+                let is_kick = decision == crate::rate_limit::RateDecision::Kick;
+                last_decision = Some(apply_rate_limit_decision(
+                    decision,
+                    cid,
+                    &metrics,
+                    &mut client,
+                ));
+                if is_kick {
+                    break 'windows;
+                }
+            }
+        }
+
+        assert_eq!(
+            last_decision,
+            Some(true),
+            "la dernière fenêtre doit être un Kick consommant le message"
+        );
+        assert_eq!(
+            metrics
+                .rejected_messages_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "un seul rejet (le Kick final), pas un par message"
+        );
+        assert_eq!(
+            client.take_disconnected(),
+            vec![cid],
+            "le client doit avoir été déconnecté"
+        );
+        let sent = client.take_sent(cid);
+        assert_eq!(sent.len(), 1, "un seul Kicked envoyé");
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&sent[0]).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::Kicked);
+        assert_eq!(env.msg_as_kicked().unwrap().reason(), Some("flood"));
+    }
+
+    #[test]
+    fn apply_rate_limit_decision_on_accept_does_nothing() {
+        use crate::rate_limit::RateDecision;
+
+        let mut client = InMemoryTransport::new();
+        let metrics = crate::metrics::Metrics::new();
+
+        let consumed = apply_rate_limit_decision(RateDecision::Accept, 1, &metrics, &mut client);
+
+        assert!(!consumed);
+        assert_eq!(
+            metrics
+                .rejected_messages_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(client.take_sent(1).is_empty());
+        assert!(client.take_disconnected().is_empty());
+    }
+
+    #[test]
+    fn apply_rate_limit_decision_on_drop_ignores_without_metric_or_kick() {
+        use crate::rate_limit::RateDecision;
+
+        let mut client = InMemoryTransport::new();
+        let metrics = crate::metrics::Metrics::new();
+
+        let consumed = apply_rate_limit_decision(RateDecision::Drop, 1, &metrics, &mut client);
+
+        assert!(
+            consumed,
+            "un message Drop est ignoré : le message est consommé"
+        );
+        assert_eq!(
+            metrics
+                .rejected_messages_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "Drop n'incrémente pas la métrique aujourd'hui (comportement inchangé)"
+        );
+        assert!(client.take_sent(1).is_empty());
+        assert!(client.take_disconnected().is_empty());
+    }
+
+    #[test]
+    fn reject_join_if_server_full_kicks_new_client_when_at_capacity() {
+        let mut client = InMemoryTransport::new();
+        let metrics = crate::metrics::Metrics::new();
+
+        let rejected = reject_join_if_server_full(false, 10, 10, 42, &metrics, &mut client);
+
+        assert!(rejected);
+        assert_eq!(
+            metrics
+                .rejected_messages_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(client.take_disconnected(), vec![42]);
+        let sent = client.take_sent(42);
+        assert_eq!(sent.len(), 1);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&sent[0]).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::Kicked);
+        assert_eq!(env.msg_as_kicked().unwrap().reason(), Some("serveur plein"));
+    }
+
+    #[test]
+    fn reject_join_if_server_full_allows_room_below_capacity() {
+        let mut client = InMemoryTransport::new();
+        let metrics = crate::metrics::Metrics::new();
+
+        let rejected = reject_join_if_server_full(false, 5, 10, 42, &metrics, &mut client);
+
+        assert!(!rejected);
+        assert_eq!(
+            metrics
+                .rejected_messages_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(client.take_sent(42).is_empty());
+        assert!(client.take_disconnected().is_empty());
+    }
+
+    #[test]
+    fn reject_join_if_server_full_allows_reconnecting_known_client_even_at_capacity() {
+        // Un client déjà dans `keys` (re-Join) ne doit pas être rejeté même si keys.len() ==
+        // max_players : `keys_contains_cid = true` désactive le rejet.
+        let mut client = InMemoryTransport::new();
+        let metrics = crate::metrics::Metrics::new();
+
+        let rejected = reject_join_if_server_full(true, 10, 10, 42, &metrics, &mut client);
+
+        assert!(!rejected);
+        assert_eq!(
+            metrics
+                .rejected_messages_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(client.take_disconnected().is_empty());
+    }
+
+    #[test]
+    fn reject_position_if_implausible_counts_metric_when_rejected() {
+        let metrics = crate::metrics::Metrics::new();
+
+        let rejected = reject_position_if_implausible(false, 42, &metrics);
+
+        assert!(rejected);
+        assert_eq!(
+            metrics
+                .rejected_messages_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn reject_position_if_implausible_accepts_plausible_move_without_metric() {
+        let metrics = crate::metrics::Metrics::new();
+
+        let rejected = reject_position_if_implausible(true, 42, &metrics);
+
+        assert!(!rejected);
+        assert_eq!(
+            metrics
+                .rejected_messages_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
 
     fn join_payload() -> Vec<u8> {

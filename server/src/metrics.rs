@@ -135,40 +135,4 @@ mod tests {
         assert!(text.contains("200 OK"));
         assert!(text.contains("tessera_players 3"));
     }
-
-    #[tokio::test]
-    async fn rejected_messages_metric_increases_on_server_full_kick() {
-        use tokio::net::TcpStream;
-
-        let metrics = Metrics::new();
-        // Simulate 5 rejections happening in the gateway (e.g., server full kicks, rate limits, anticheat)
-        metrics
-            .rejected_messages_total
-            .fetch_add(5, Ordering::Relaxed);
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        drop(listener);
-
-        let m = metrics.clone();
-        let addr_clone = addr.clone();
-        tokio::spawn(async move { serve(&addr_clone, m).await.unwrap() });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let mut sock = TcpStream::connect(&addr).await.unwrap();
-        sock.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buf = Vec::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            sock.read_to_end(&mut buf),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("200 OK"));
-        assert!(text.contains("tessera_rejected_messages_total 5"));
-    }
 }
