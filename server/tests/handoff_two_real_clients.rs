@@ -274,7 +274,14 @@ async fn run_test() {
         moderator: BUFFER_RADIUS,
         game_master: BUFFER_RADIUS,
     };
-    let store = server::persistence::FileStore::open(tmp.path().join("players.json"));
+    let store = server::player_store_impl::PlayerStoreImpl::File(
+        server::persistence::FileStore::open(tmp.path().join("players.json")),
+    );
+    // Redis local requis (même exigence que hot_state_cache.rs) — cohérent avec le câblage
+    // HotStateCache désormais obligatoire dans gateway_main.
+    let hot_state = server::hot_state_cache::HotStateCache::connect("redis://127.0.0.1:6379")
+        .await
+        .expect("Redis local (127.0.0.1:6379) requis pour ce test — voir hot_state_cache.rs");
     let admin_store = server::admin_store::AdminStore::open(
         tmp.path().join("permission_groups.json"),
         tmp.path().join("server_admins.json"),
@@ -296,6 +303,7 @@ async fn run_test() {
             false,
             false,
             std::collections::HashSet::new(),
+            hot_state,
         )
         .await
         .expect("gateway ne devrait pas échouer");
