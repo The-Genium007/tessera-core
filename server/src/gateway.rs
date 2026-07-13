@@ -294,6 +294,113 @@ pub fn resolve_is_root(
     playtest_all_admin || root_admins.contains(issuer)
 }
 
+/// Décide, au moment du `Join`, la clé effective de persistance (`store.load`/`store.save`) pour
+/// ce client (design 2026-07-09, launcher-server-auth §4) :
+/// - Serveur privé (`identity_public = false`, défaut) : comportement historique inchangé, le
+///   `display_name` fourni devient la clé, `token` est ignoré intégralement.
+/// - Serveur public (`identity_public = true`) : un token JWT non vide est exigé et vérifié via
+///   `JwksCache::verify` (Task C1) ; le `sub` OIDC vérifié devient la clé — jamais le
+///   `display_name` libre non vérifié, root cause du bug playtest 1 (deux comptes distincts avec
+///   le même display_name partageaient silencieusement un enregistrement).
+///
+/// `Err` porte le message `Kicked` à renvoyer au client avant de couper la connexion (token
+/// absent ou invalide) — jamais un timeout silencieux.
+pub fn resolve_join_key(
+    identity_public: bool,
+    name: &str,
+    token: &str,
+    jwks_cache: &crate::jwks::JwksCache,
+) -> Result<String, &'static str> {
+    if !identity_public {
+        return Ok(name.to_string());
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("compte requis sur ce serveur");
+    }
+    match jwks_cache.verify(token, "launcher") {
+        Ok(claims) => Ok(claims.sub),
+        Err(_) => Err("session invalide, reconnectez-vous"),
+    }
+}
+
+/// Décide, au moment du `Join`, si la version de protocole annoncée par le client (Task C3) est
+/// compatible avec ce serveur. `Err` porte le message `Kicked` à renvoyer — un client dont le
+/// protocole a dérivé (launcher pas à jour) doit recevoir une explication lisible plutôt qu'un
+/// comportement indéfini ou une coupure muette.
+pub fn resolve_protocol_version(received: u32) -> Result<(), &'static str> {
+    if received != crate::gateway_routing::CURRENT_PROTOCOL_VERSION {
+        Err("version du jeu incompatible, mettez à jour votre launcher")
+    } else {
+        Ok(())
+    }
+}
+
+/// Décide, au moment du `Join`, si `name` (display_name brut, jamais la clé de persistance
+/// effective) est autorisé à rejoindre au regard de la whitelist du manifeste (`runtime.whitelist`
+/// et `runtime.whitelist_names`, Task C3). `whitelist` désactivée (défaut) : toujours `Ok` — la
+/// whitelist ne change AUCUN comportement tant que l'opérateur ne l'active pas explicitement.
+/// `Err` porte le message `Kicked` à renvoyer.
+pub fn resolve_whitelist(
+    whitelist_enabled: bool,
+    whitelist_names: &std::collections::HashSet<String>,
+    name: &str,
+) -> Result<(), &'static str> {
+    if whitelist_enabled && !whitelist_names.contains(name) {
+        Err("accès restreint (whitelist)")
+    } else {
+        Ok(())
+    }
+}
+
+/// Nettoie tout l'état par-client (`cid`) que le Gateway maintient en mémoire, et sauvegarde sa
+/// dernière position connue avant de l'oublier — chemin PARTAGÉ entre une déconnexion (crash/coupure
+/// réseau, `TransportEvent::Disconnected`) et un départ volontaire (`Leave`, Task C3) : les deux
+/// libèrent aujourd'hui le slot du client de façon identique et immédiate. Le jour où palier 2
+/// distingue les deux (réservation de slot 5 min après un `Disconnected`, libération immédiate
+/// après un `Leave`), seul l'appelant du chemin `Disconnected` ajoutera cette réservation — ce
+/// nettoyage per-cid, lui, restera commun aux deux.
+#[allow(clippy::too_many_arguments)] // état per-cid éclaté en plusieurs HashMaps (même discipline que gateway_main)
+pub fn cleanup_client_state(
+    cid: u64,
+    store: &mut impl crate::persistence::PlayerStore,
+    keys: &mut HashMap<u64, String>,
+    display_names: &mut HashMap<u64, String>,
+    last_pos: &mut HashMap<u64, [f32; 3]>,
+    last_pos_at: &mut HashMap<u64, std::time::Instant>,
+    bypass_warned_at: &mut HashMap<u64, std::time::Instant>,
+    ranks: &mut HashMap<u64, crate::handoff::Rank>,
+    permissions: &mut HashMap<u64, Vec<String>>,
+    residence: &mut HashMap<u64, Option<[f32; 3]>>,
+    rate_states: &mut HashMap<u64, crate::rate_limit::RateLimitState>,
+    loader: &mut crate::handoff::ShardLoader,
+    latest: &mut HashMap<u64, HashMap<String, Vec<u8>>>,
+    prev_placements: &mut HashMap<u64, crate::handoff::Placement>,
+) {
+    if let Some(name) = keys.remove(&cid) {
+        if let Some(pos) = last_pos.get(&cid).copied() {
+            store.save(
+                &name,
+                crate::persistence::PlayerRecord {
+                    last_position: pos,
+                    residence: residence.get(&cid).copied().flatten(),
+                },
+            );
+        }
+    }
+    display_names.remove(&cid);
+    last_pos.remove(&cid);
+    last_pos_at.remove(&cid);
+    bypass_warned_at.remove(&cid);
+    ranks.remove(&cid);
+    permissions.remove(&cid);
+    residence.remove(&cid);
+    rate_states.remove(&cid);
+    loader.forget(cid);
+    latest.remove(&cid);
+    prev_placements.remove(&cid);
+}
+
 /// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
 /// rejouer vers ce shard après une reconnexion. Le shard vient de perdre tout son état (nouveau
 /// `Server::new()` recréé côté Shard à chaque connexion acceptée, cf. `shard_main`) et ne connaît
@@ -356,6 +463,7 @@ pub fn apply_shard_frame_to_client<T: Transport>(body: &[u8], client: &mut T) {
 /// ses shards chargés, et **fusionne** les snapshots reçus de ces shards en un seul avant de les
 /// renvoyer au client. Le double-chargement près d'une frontière élimine les saccades au transfert.
 #[cfg(feature = "gns")]
+#[allow(clippy::too_many_arguments)] // config de boot (manifeste éclaté en paramètres), pas un point d'appel répété
 pub async fn gateway_main(
     listen_addr: &str,
     topology: crate::handoff::ShardTopology,
@@ -364,10 +472,15 @@ pub async fn gateway_main(
     mut admin_store: crate::admin_store::AdminStore,
     spawn: [f32; 3],
     max_players: u32,
+    jwks_cache: std::sync::Arc<crate::jwks::JwksCache>,
+    identity_public: bool,
+    whitelist_enabled: bool,
+    whitelist_names: std::collections::HashSet<String>,
 ) -> std::io::Result<()> {
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
-        extract_admin_command, extract_join_name, extract_position, extract_time_report,
+        extract_admin_command, extract_join_fields, extract_leave, extract_position,
+        extract_time_report,
     };
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
@@ -399,8 +512,17 @@ pub async fn gateway_main(
     // catalogue (spec admin-mode-permissions, Partie 5) — non consommé en phase 1 au-delà de la
     // dérivation de `Rank` et de l'affichage du menu client.
     let mut permissions: HashMap<u64, Vec<String>> = HashMap::new();
-    // Persistance : clé (display_name), dernière position, et résidence chargée — par client.
+    // Persistance : clé EFFECTIVE (display_name sur serveur privé, `sub` OIDC vérifié sur
+    // serveur public — Task C2), dernière position, et résidence chargée — par client. Alimente
+    // `store.load`/`store.save`/`save_all_known` : NE PAS lire cette map pour résoudre une
+    // identité admin (cf. `display_names` ci-dessous).
     let mut keys: HashMap<u64, String> = HashMap::new();
+    // Pseudo affiché / identité admin (display_name) — toujours le nom brut du Join, jamais le
+    // `sub` OIDC vérifié même sur un serveur public. `admin_store`/`root_admins` restent indexés
+    // par display_name tant que Task D3 (migration de l'indexation admin vers `sub`) n'est pas
+    // faite ; `keys` (au-dessus) porte la clé de PERSISTANCE (effective_key), qui elle diffère du
+    // display_name sur un serveur public — ne pas confondre les deux usages.
+    let mut display_names: HashMap<u64, String> = HashMap::new();
     let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
     // Horodatage de la dernière PositionUpdate ACCEPTÉE par client (absent tant qu'aucune
     // position n'a encore été acceptée depuis le Join — sert de garde anti-triche).
@@ -579,6 +701,7 @@ pub async fn gateway_main(
                                 );
                             }
                         }
+                        display_names.remove(&cid);
                         last_pos.remove(&cid);
                         last_pos_at.remove(&cid);
                         bypass_warned_at.remove(&cid);
@@ -598,8 +721,40 @@ pub async fn gateway_main(
             // PositionUpdate → placement (topologie + rang) et mémorisation de la dernière position.
             let mut placement = None;
             if let TransportEvent::Message { data, .. } = &ev {
-                if let Some(name) = extract_join_name(data) {
-                    if !name.is_empty() {
+                if let Some((name, token, protocol_version)) = extract_join_fields(data) {
+                    if !name.is_empty() || !token.is_empty() {
+                        if let Err(reason) = resolve_protocol_version(protocol_version) {
+                            tracing::warn!(
+                                client = cid,
+                                received = protocol_version,
+                                expected = crate::gateway_routing::CURRENT_PROTOCOL_VERSION,
+                                "kick : version protocole incompatible"
+                            );
+                            client.send(cid, &encode_kicked(reason));
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
+                        if let Err(reason) =
+                            resolve_whitelist(whitelist_enabled, &whitelist_names, &name)
+                        {
+                            tracing::warn!(client = cid, %name, "kick : non présent sur la whitelist");
+                            client.send(cid, &encode_kicked(reason));
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
+                        let effective_key =
+                            match resolve_join_key(identity_public, &name, &token, &jwks_cache) {
+                                Ok(key) => key,
+                                Err(reason) => {
+                                    tracing::warn!(client = cid, %reason, "kick : Join refusé");
+                                    client.send(cid, &encode_kicked(reason));
+                                    client.disconnect(cid);
+                                    rate_states.remove(&cid);
+                                    continue;
+                                }
+                            };
                         if !keys.contains_key(&cid) && keys.len() >= max_players as usize {
                             tracing::warn!(client = cid, max_players, "kick : serveur plein");
                             client.send(cid, &encode_kicked("serveur plein"));
@@ -607,7 +762,7 @@ pub async fn gateway_main(
                             rate_states.remove(&cid);
                             continue;
                         }
-                        let record = store.load(&name);
+                        let record = store.load(&effective_key);
                         let (pos, source) = resolve_spawn(record.as_ref(), spawn);
                         tracing::info!(
                             "Connexion de {name} : placement décidé {pos:?} (source: {source:?})"
@@ -640,7 +795,8 @@ pub async fn gateway_main(
                                 name: name.clone(),
                             });
                         }
-                        keys.insert(cid, name);
+                        keys.insert(cid, effective_key);
+                        display_names.insert(cid, name);
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
                     let now = std::time::Instant::now();
@@ -706,7 +862,7 @@ pub async fn gateway_main(
                             // dans les logs stdout du conteneur, donc récupérable à distance via
                             // l'API Dokploy (compose.readLogs) sans SSH — utile pour suivre les
                             // franchissements de shard en direct pendant un playtest.
-                            let name = keys.get(&cid).map(String::as_str).unwrap_or("?");
+                            let name = display_names.get(&cid).map(String::as_str).unwrap_or("?");
                             match &ev {
                                 crate::session_log::SessionEvent::Handoff { from, to, .. } => {
                                     tracing::info!(
@@ -734,7 +890,7 @@ pub async fn gateway_main(
                     let client_secs = (h as u32) * 3600 + (m as u32) * 60 + (s as u32);
                     let delta = client_secs as i32 - server_secs as i32;
                     if delta.unsigned_abs() as i32 > TIME_DRIFT_WARN_THRESHOLD_SECS {
-                        let name = keys.get(&cid).map(String::as_str).unwrap_or("?");
+                        let name = display_names.get(&cid).map(String::as_str).unwrap_or("?");
                         tracing::warn!(
                             client = cid,
                             %name,
@@ -751,7 +907,11 @@ pub async fn gateway_main(
                         });
                     }
                 } else if let Some(text) = extract_admin_command(data) {
-                    let issuer = keys.get(&cid).cloned().unwrap_or_default();
+                    // Résolution d'identité admin : `display_names` (display_name brut), jamais
+                    // `keys` (clé de persistance = `sub` OIDC sur serveur public depuis Task C2) —
+                    // `root_admins`/`admin_store` restent indexés par display_name tant que
+                    // Task D3 n'a pas migré cette indexation vers `sub`.
+                    let issuer = display_names.get(&cid).cloned().unwrap_or_default();
                     let is_root = resolve_is_root(&issuer, &root_admins, playtest_all_admin);
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -806,7 +966,9 @@ pub async fn gateway_main(
                         &admin_store.admins,
                     );
                     for target in &to_resync {
-                        if let Some((&target_cid, _)) = keys.iter().find(|(_, n)| *n == target) {
+                        if let Some((&target_cid, _)) =
+                            display_names.iter().find(|(_, n)| *n == target)
+                        {
                             let is_target_root =
                                 resolve_is_root(target, &root_admins, playtest_all_admin);
                             let target_record = admin_store
@@ -824,6 +986,31 @@ pub async fn gateway_main(
                             client.send(target_cid, &encode_permission_sync(&resolved));
                         }
                     }
+                } else if extract_leave(data).is_some() {
+                    // Départ volontaire (Task C3), distinct d'une coupure réseau/crash
+                    // (`TransportEvent::Disconnected`, jamais annoncé par le client) : le même
+                    // nettoyage per-cid que ce dernier (voir plus bas, bloc `is_disconnect`), mais
+                    // appliqué immédiatement plutôt qu'attendu via un timeout de transport. La
+                    // réservation de slot différenciée entre les deux chemins reste palier 2 —
+                    // cette tâche pose seulement la distinction protocole.
+                    tracing::info!(client = cid, "départ volontaire (Leave)");
+                    cleanup_client_state(
+                        cid,
+                        &mut store,
+                        &mut keys,
+                        &mut display_names,
+                        &mut last_pos,
+                        &mut last_pos_at,
+                        &mut bypass_warned_at,
+                        &mut ranks,
+                        &mut permissions,
+                        &mut residence,
+                        &mut rate_states,
+                        &mut loader,
+                        &mut latest,
+                        &mut prev_placements,
+                    );
+                    continue;
                 }
             }
 
@@ -864,6 +1051,7 @@ pub async fn gateway_main(
                         tracing::info!("Sauvegarde de {name} à {pos:?}");
                     }
                 }
+                display_names.remove(&cid);
                 last_pos.remove(&cid);
                 last_pos_at.remove(&cid);
                 bypass_warned_at.remove(&cid);
@@ -1037,6 +1225,8 @@ mod tests {
             &mut b,
             &protocol::JoinArgs {
                 display_name: Some(name),
+                token: None,
+                protocol_version: 1,
             },
         );
         let env = protocol::ClientEnvelope::create(
@@ -1502,6 +1692,347 @@ mod tests {
         let root_admins: std::collections::HashSet<String> =
             ["Compte1".to_string()].into_iter().collect();
         assert!(resolve_is_root("Compte1", &root_admins, true));
+    }
+
+    // --- resolve_protocol_version / resolve_whitelist / Leave (Task C3) --------------------
+
+    #[test]
+    fn join_rejected_when_protocol_version_mismatches() {
+        assert_eq!(
+            resolve_protocol_version(999),
+            Err("version du jeu incompatible, mettez à jour votre launcher")
+        );
+    }
+
+    #[test]
+    fn join_accepted_when_protocol_version_matches() {
+        assert_eq!(
+            resolve_protocol_version(crate::gateway_routing::CURRENT_PROTOCOL_VERSION),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn join_rejected_when_whitelist_enabled_and_name_not_listed() {
+        let names: std::collections::HashSet<String> = ["Alice".to_string()].into_iter().collect();
+        assert_eq!(
+            resolve_whitelist(true, &names, "Mallory"),
+            Err("accès restreint (whitelist)")
+        );
+    }
+
+    #[test]
+    fn join_accepted_when_whitelist_enabled_and_name_listed() {
+        let names: std::collections::HashSet<String> = ["Alice".to_string()].into_iter().collect();
+        assert_eq!(resolve_whitelist(true, &names, "Alice"), Ok(()));
+    }
+
+    #[test]
+    fn join_accepted_when_whitelist_disabled_regardless_of_name() {
+        // Comportement inchangé (défaut) : whitelist désactivée → tout le monde passe, même une
+        // liste vide de noms autorisés.
+        let names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert_eq!(resolve_whitelist(false, &names, "AnyoneAtAll"), Ok(()));
+    }
+
+    #[test]
+    fn leave_message_releases_slot_immediately_unlike_crash_disconnect() {
+        use crate::handoff::{Placement, Rank, ShardLoader};
+        use crate::persistence::{MemoryStore, PlayerRecord, PlayerStore};
+        use crate::rate_limit::RateLimitState;
+        use crate::transport::TransportEvent;
+
+        let cid = 1u64;
+        let mut store = MemoryStore::new();
+        let mut keys = HashMap::new();
+        keys.insert(cid, "Alice".to_string());
+        let mut display_names = HashMap::new();
+        display_names.insert(cid, "Alice".to_string());
+        let mut last_pos = HashMap::new();
+        last_pos.insert(cid, [1.0, 2.0, 3.0]);
+        let mut last_pos_at = HashMap::new();
+        last_pos_at.insert(cid, std::time::Instant::now());
+        let mut bypass_warned_at = HashMap::new();
+        bypass_warned_at.insert(cid, std::time::Instant::now());
+        let mut ranks = HashMap::new();
+        ranks.insert(cid, Rank::Player);
+        let mut permissions = HashMap::new();
+        permissions.insert(cid, vec!["some.node".to_string()]);
+        let mut residence = HashMap::new();
+        residence.insert(cid, Some([1.0, 2.0, 3.0]));
+        let mut rate_states = HashMap::new();
+        rate_states.insert(cid, RateLimitState::new(std::time::Instant::now()));
+        let mut loader = ShardLoader::new();
+        loader.feed(TransportEvent::Connected(cid), None);
+        let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+        latest.insert(cid, HashMap::new());
+        let mut prev_placements = HashMap::new();
+        prev_placements.insert(
+            cid,
+            Placement {
+                authoritative: "A".to_string(),
+                overlaps: vec![],
+            },
+        );
+
+        cleanup_client_state(
+            cid,
+            &mut store,
+            &mut keys,
+            &mut display_names,
+            &mut last_pos,
+            &mut last_pos_at,
+            &mut bypass_warned_at,
+            &mut ranks,
+            &mut permissions,
+            &mut residence,
+            &mut rate_states,
+            &mut loader,
+            &mut latest,
+            &mut prev_placements,
+        );
+
+        assert!(keys.is_empty(), "keys doit être nettoyé immédiatement");
+        assert!(display_names.is_empty());
+        assert!(last_pos.is_empty());
+        assert!(last_pos_at.is_empty());
+        assert!(bypass_warned_at.is_empty());
+        assert!(ranks.is_empty());
+        assert!(permissions.is_empty());
+        assert!(residence.is_empty());
+        assert!(rate_states.is_empty());
+        assert!(latest.is_empty());
+        assert!(prev_placements.is_empty());
+        assert_eq!(
+            store.load("Alice"),
+            Some(PlayerRecord {
+                last_position: [1.0, 2.0, 3.0],
+                residence: Some([1.0, 2.0, 3.0]),
+            }),
+            "la dernière position connue doit être sauvée avant l'oubli, comme au Disconnected"
+        );
+    }
+
+    // --- resolve_join_key (Task C2, vérification JWT au Join) -------------------------------
+    //
+    // `JwksCache` (Task C1, `crate::jwks`) n'expose délibérément aucun constructeur de test
+    // pré-rempli en dehors de son propre module — cette tâche n'a pas à toucher jwks.rs. La
+    // seule voie publique pour peupler un cache de test est donc `refresh()` contre un mini
+    // serveur HTTP mocké, exactement comme le fait déjà le test
+    // `refresh_populates_cache_from_jwks_endpoint` dans jwks.rs — dupliqué ici à dessein plutôt
+    // que rendu public depuis jwks.rs (hors périmètre C2).
+
+    const JOIN_TEST_KID: &str = "gateway-join-test-key-1";
+
+    struct JoinTestRsaKeyMaterial {
+        encoding_key: jsonwebtoken::EncodingKey,
+        n_b64: String,
+        e_b64: String,
+    }
+
+    fn generate_join_test_rsa_key_material() -> JoinTestRsaKeyMaterial {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        use rsa::traits::PublicKeyParts;
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+
+        let mut rng = rand::rngs::OsRng;
+        let private_key =
+            RsaPrivateKey::new(&mut rng, 2048).expect("génération de la clé RSA de test");
+        let public_key = RsaPublicKey::from(&private_key);
+        let pem = private_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .expect("encodage PKCS1 PEM de la clé de test");
+        let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes())
+            .expect("clé RSA de test illisible par jsonwebtoken");
+        let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
+        let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+        JoinTestRsaKeyMaterial {
+            encoding_key,
+            n_b64,
+            e_b64,
+        }
+    }
+
+    fn encode_join_test_token(
+        claims: &crate::jwks::Claims,
+        key: &jsonwebtoken::EncodingKey,
+    ) -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(JOIN_TEST_KID.to_string());
+        jsonwebtoken::encode(&header, claims, key).expect("échec de l'encodage du token de test")
+    }
+
+    fn far_future_timestamp() -> u64 {
+        9_999_999_999 // an. 2286 — largement suffisant pour ne jamais expirer en test
+    }
+
+    /// Démarre un serveur HTTP mocké servant un unique document JWKS ({ "keys": [...] }) et
+    /// rafraîchit un `JwksCache` neuf contre lui. Renvoie le cache peuplé + la clé d'encodage
+    /// correspondante (pour signer des tokens "valides" dans les tests).
+    async fn join_test_jwks_cache_with_valid_key(
+    ) -> (crate::jwks::JwksCache, JoinTestRsaKeyMaterial) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let material = generate_join_test_rsa_key_material();
+        let body = format!(
+            "{{\"keys\":[{{\"kid\":\"{kid}\",\"kty\":\"RSA\",\"n\":\"{n}\",\"e\":\"{e}\"}}]}}",
+            kid = JOIN_TEST_KID,
+            n = material.n_b64,
+            e = material.e_b64,
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind du serveur JWKS mocké");
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept du client HTTP");
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("écriture de la réponse JWKS mockée");
+            socket.shutdown().await.ok();
+        });
+
+        let jwks_cache = crate::jwks::JwksCache::new();
+        jwks_cache
+            .refresh(&format!("http://{addr}/jwks"))
+            .await
+            .expect("refresh doit réussir contre le serveur mocké");
+
+        (jwks_cache, material)
+    }
+
+    #[tokio::test]
+    async fn join_rejected_when_public_server_receives_no_token() {
+        // Serveur public, display_name rempli mais token vide : rejet propre, jamais un timeout.
+        let jwks_cache = crate::jwks::JwksCache::new();
+        let result = resolve_join_key(true, "SomeDisplayName", "", &jwks_cache);
+        assert_eq!(result, Err("compte requis sur ce serveur"));
+    }
+
+    #[tokio::test]
+    async fn join_rejected_when_token_signature_invalid() {
+        // Le cache ne connaît que la clé "légitime" ; le token est signé par une AUTRE paire —
+        // simule un tiers non autorisé (ou une clé ZITADEL déjà rotée hors du cache).
+        let (jwks_cache, _legit_material) = join_test_jwks_cache_with_valid_key().await;
+        let other_material = generate_join_test_rsa_key_material();
+        let claims = crate::jwks::Claims {
+            sub: "user-attacker".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &other_material.encoding_key);
+
+        let result = resolve_join_key(true, "SomeDisplayName", &token, &jwks_cache);
+        assert_eq!(result, Err("session invalide, reconnectez-vous"));
+    }
+
+    #[tokio::test]
+    async fn join_accepted_with_valid_token_uses_sub_as_key() {
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let claims = crate::jwks::Claims {
+            sub: "oidc-user-abc".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &material.encoding_key);
+
+        // Le display_name fourni ("DisplayNameLibre") n'est PAS la clé retenue : la clé
+        // effective doit être le `sub` vérifié, jamais le texte libre non vérifié (root cause
+        // du bug playtest 1).
+        let result = resolve_join_key(true, "DisplayNameLibre", &token, &jwks_cache);
+        assert_eq!(result, Ok("oidc-user-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn private_server_accepts_join_without_token_unchanged() {
+        // identity.public = false (ou absent) : comportement historique, token ignoré
+        // intégralement, même vide, même si le JwksCache est vide/jamais rafraîchi.
+        let jwks_cache = crate::jwks::JwksCache::new();
+        let result = resolve_join_key(false, "Lucas", "", &jwks_cache);
+        assert_eq!(result, Ok("Lucas".to_string()));
+    }
+
+    // --- Régression : identité admin reste indexée par display_name sur serveur public --------
+    //
+    // Task C2 a fait de `keys` la clé de PERSISTANCE effective (le `sub` OIDC vérifié sur un
+    // serveur public). Mais `root_admins`/`admin_store` restent indexés par `display_name`
+    // jusqu'à la migration Task D3 — ce test reproduit exactement le pipeline de la boucle
+    // Gateway (Join → maps `keys`/`display_names` → AdminCommand) et prouve que la résolution
+    // d'autorité admin utilise bien `display_names` (display_name brut), pas `keys` (le `sub`).
+    #[tokio::test]
+    async fn admin_command_resolves_issuer_from_display_name_not_sub_on_public_server() {
+        use crate::admin_commands::{
+            execute as execute_admin_command, parse as parse_admin_command,
+        };
+
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let claims = crate::jwks::Claims {
+            sub: "oidc-user-xyz".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &material.encoding_key);
+        let display_name = "AdminDisplayName";
+
+        // Join sur un serveur public : la clé effective (persistance) est le `sub` vérifié, pas
+        // le display_name — exactement ce que fait `resolve_join_key` (Task C2) dans la boucle.
+        let effective_key = resolve_join_key(true, display_name, &token, &jwks_cache)
+            .expect("token valide, join accepté");
+        assert_ne!(
+            effective_key, display_name,
+            "précondition du test : le sub doit diverger du display_name"
+        );
+
+        // Reproduit ce que le Join fait dans la boucle : `keys` reçoit la clé effective,
+        // `display_names` (le fix) reçoit toujours le display_name brut.
+        let cid = 42u64;
+        let mut keys: HashMap<u64, String> = HashMap::new();
+        let mut display_names: HashMap<u64, String> = HashMap::new();
+        keys.insert(cid, effective_key.clone());
+        display_names.insert(cid, display_name.to_string());
+
+        // `root_admins` (TESSERA_ROOT_ADMINS) liste le display_name, jamais le sub.
+        let root_admins: std::collections::HashSet<String> =
+            [display_name.to_string()].into_iter().collect();
+
+        // Bug reproduit : résoudre l'autorité depuis `keys` (le sub) échoue toujours.
+        let issuer_from_keys = keys.get(&cid).cloned().unwrap_or_default();
+        assert!(
+            !resolve_is_root(&issuer_from_keys, &root_admins, false),
+            "le sub OIDC ne doit jamais être reconnu comme root admin"
+        );
+
+        // Fix : résoudre depuis `display_names` reconnaît bien le root admin.
+        let issuer = display_names.get(&cid).cloned().unwrap_or_default();
+        assert_eq!(issuer, display_name);
+        let is_root = resolve_is_root(&issuer, &root_admins, false);
+        assert!(
+            is_root,
+            "le display_name doit être reconnu comme root admin"
+        );
+
+        // Et la commande admin s'exécute réellement avec cet issuer (comme au call site
+        // `gateway.rs` de la boucle événementielle) : `/creategroup` réservé aux admins racine.
+        let mut groups = Vec::new();
+        let mut admins = Vec::new();
+        let parsed = parse_admin_command("/creategroup moderators").expect("commande valide");
+        let outcome = execute_admin_command(parsed, is_root, &mut groups, &mut admins, 0, &issuer);
+        assert!(
+            outcome.success,
+            "la commande admin doit réussir : issuer = display_name, reconnu root admin"
+        );
     }
 
     #[test]

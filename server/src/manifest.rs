@@ -31,6 +31,12 @@ pub struct Identity {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Runtime {
     pub whitelist: bool,
+    /// Noms autorisés à rejoindre quand `whitelist = true` — vide et ignoré si `whitelist =
+    /// false` (comportement inchangé, défaut). Comparé au `display_name` brut du `Join`, jamais
+    /// à la clé de persistance effective (`sub` OIDC sur serveur public) : la whitelist filtre
+    /// qui peut se connecter, pas quel enregistrement de sauvegarde est chargé (Task C3).
+    #[serde(default)]
+    pub whitelist_names: Vec<String>,
     pub store_path: String,
     pub gateway: GatewayConfig,
     pub topology: TopologyConfig,
@@ -734,5 +740,91 @@ mod tests {
         // le vrai artefact v3, confirmé via `python3 -c "json.load(...)"` avant d'écrire ce test).
         let total_cells: usize = zones.iter().map(|z| z.cells.len()).sum();
         assert_eq!(total_cells, 10);
+    }
+
+    #[test]
+    fn whitelist_names_defaults_to_empty_when_absent() {
+        let toml = r#"
+            format_version = 1
+            [identity]
+            id = "tessera-dev-01"
+            name = "Tessera Dev"
+            description = "desc"
+            region = "EU"
+            language = "FR"
+            max_players = 16
+            tags = ["dev"]
+            discord_url = ""
+            website_url = ""
+            required_modset = "0.1.0"
+            voice_required = false
+
+            [runtime]
+            whitelist = false
+            store_path = "players.json"
+
+            [runtime.gateway]
+            listen_addr = "0.0.0.0:27020"
+            advertise_addr = "51.38.189.234:27020"
+
+            [runtime.topology]
+            authority_artifact = "authority.json"
+            server_count = 1
+
+            [runtime.radius]
+            base = 25.0
+            moderator = 50.0
+            game_master = 75.0
+
+            [runtime.aoi]
+            visibility_radius = 100.0
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("should parse");
+        assert!(m.runtime.whitelist_names.is_empty());
+    }
+
+    #[test]
+    fn whitelist_names_parses_declared_list() {
+        let toml = r#"
+            format_version = 1
+            [identity]
+            id = "tessera-dev-01"
+            name = "Tessera Dev"
+            description = "desc"
+            region = "EU"
+            language = "FR"
+            max_players = 16
+            tags = ["dev"]
+            discord_url = ""
+            website_url = ""
+            required_modset = "0.1.0"
+            voice_required = false
+
+            [runtime]
+            whitelist = true
+            whitelist_names = ["Alice", "Bob"]
+            store_path = "players.json"
+
+            [runtime.gateway]
+            listen_addr = "0.0.0.0:27020"
+            advertise_addr = "51.38.189.234:27020"
+
+            [runtime.topology]
+            authority_artifact = "authority.json"
+            server_count = 1
+
+            [runtime.radius]
+            base = 25.0
+            moderator = 50.0
+            game_master = 75.0
+
+            [runtime.aoi]
+            visibility_radius = 100.0
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("should parse");
+        assert_eq!(
+            m.runtime.whitelist_names,
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
     }
 }

@@ -69,6 +69,8 @@ fn main() {
                 &mut b,
                 &JoinArgs {
                     display_name: Some(name),
+                    token: None,
+                    protocol_version: server::gateway_routing::CURRENT_PROTOCOL_VERSION,
                 },
             );
             let env = ClientEnvelope::create(
