@@ -2,7 +2,7 @@
 //! `manifest::load_authority_topology` (I/O + résolution `assignment_patterns[server_count]`,
 //! Task G3) suivi de `ShardTopology::locate` (routage, Task G2) — route correctement une
 //! position connue vers le bon groupe de shards, en utilisant le VRAI `authority.json` v3
-//! (10 cellules, `tools/district-topology/`), pas une fixture synthétique.
+//! (10 cellules), pas une fixture synthétique.
 //!
 //! `gateway_main`/`shard_main` réels ne sont pas démarrés ici : `gateway_main` est gns-gated
 //! (nécessite GameNetworkingSockets, cf. ADR 0003) et n'a de toute façon aucune logique de
@@ -14,9 +14,11 @@ use server::handoff::ShardTopology;
 use server::manifest::{load_authority_topology, TopologyConfig};
 use std::collections::HashMap;
 
-/// Répertoire du manifeste utilisé par les tests : celui où vit le vrai `authority.json` v3.
+/// Répertoire du manifeste utilisé par les tests : `server/` lui-même, où `authority.json` v3
+/// est déjà copié à côté de `server.example.toml` (pas `tools/district-topology/`, qui n'est pas
+/// mirroré vers le dépôt public `tessera-core` — cf. `.github/workflows/core-subtree.yml`).
 fn district_topology_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/district-topology")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
 #[test]

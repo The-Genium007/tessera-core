@@ -38,9 +38,13 @@ mod tests {
         let manifest =
             server::manifest::load(std::path::Path::new("../server/server.example.toml"))
                 .expect("server.example.toml doit être chargeable");
+        // "../server" (pas "../../tools/district-topology") : authority_artifact est un chemin
+        // relatif au manifeste (voir server.example.toml), et authority.json est déjà copié à
+        // côté du manifeste dans server/ — le répertoire tools/ n'existe pas dans le mirror
+        // public tessera-core (non vendoré, cf. .github/workflows/core-subtree.yml).
         let zones = server::manifest::load_authority_topology(
             &manifest.runtime.topology,
-            std::path::Path::new("../../tools/district-topology"),
+            std::path::Path::new("../server"),
         )
         .expect("le vrai authority.json doit se charger pour server_count=2");
 

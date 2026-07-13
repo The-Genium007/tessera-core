@@ -829,12 +829,14 @@ mod tests {
         assert_eq!(cell1_radius, 25.0); // pas d'override → b de l'artefact
     }
 
-    // --- Intégration : le vrai authority.json v3 (10 cellules, voir tools/district-topology) ---
+    // --- Intégration : le vrai authority.json v3 (10 cellules, copié à côté de ce crate) ---
 
     #[test]
     fn load_authority_topology_works_with_real_v3_artifact() {
-        let manifest_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/district-topology");
+        // CARGO_MANIFEST_DIR seul (pas "../../tools/district-topology", non mirroré vers le
+        // dépôt public tessera-core) : authority.json est déjà copié directement dans server/,
+        // à côté de server.example.toml — voir .github/workflows/core-subtree.yml.
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
         let config = TopologyConfig {
             authority_artifact: "authority.json".into(),
             server_count: 4,
