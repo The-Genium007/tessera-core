@@ -39,7 +39,9 @@ pub fn parse(text: &str) -> Result<ParsedCommand, ParseError> {
             _ => Err(ParseError::MissingArgs),
         },
         "demote" => match rest.as_slice() {
-            [account] => Ok(ParsedCommand::Demote { account: account.to_string() }),
+            [account] => Ok(ParsedCommand::Demote {
+                account: account.to_string(),
+            }),
             _ => Err(ParseError::MissingArgs),
         },
         "grant" => match rest.as_slice() {
@@ -59,11 +61,15 @@ pub fn parse(text: &str) -> Result<ParsedCommand, ParseError> {
         "admins" => Ok(ParsedCommand::ListAdmins),
         "groups" => Ok(ParsedCommand::ListGroups),
         "groupinfo" => match rest.as_slice() {
-            [group] => Ok(ParsedCommand::GroupInfo { group: group.to_string() }),
+            [group] => Ok(ParsedCommand::GroupInfo {
+                group: group.to_string(),
+            }),
             _ => Err(ParseError::MissingArgs),
         },
         "creategroup" => match rest.as_slice() {
-            [name] => Ok(ParsedCommand::CreateGroup { name: name.to_string() }),
+            [name] => Ok(ParsedCommand::CreateGroup {
+                name: name.to_string(),
+            }),
             _ => Err(ParseError::MissingArgs),
         },
         "groupgrant" => match rest.as_slice() {
@@ -81,7 +87,9 @@ pub fn parse(text: &str) -> Result<ParsedCommand, ParseError> {
             _ => Err(ParseError::MissingArgs),
         },
         "deletegroup" => match rest.as_slice() {
-            [name] => Ok(ParsedCommand::DeleteGroup { name: name.to_string() }),
+            [name] => Ok(ParsedCommand::DeleteGroup {
+                name: name.to_string(),
+            }),
             _ => Err(ParseError::MissingArgs),
         },
         _ => Err(ParseError::UnknownCommand),
@@ -98,13 +106,25 @@ pub struct ExecOutcome {
 }
 
 fn ok(message: impl Into<String>) -> ExecOutcome {
-    ExecOutcome { success: true, message: message.into(), affected_account: None }
+    ExecOutcome {
+        success: true,
+        message: message.into(),
+        affected_account: None,
+    }
 }
 fn ok_for(account: &str, message: impl Into<String>) -> ExecOutcome {
-    ExecOutcome { success: true, message: message.into(), affected_account: Some(account.to_string()) }
+    ExecOutcome {
+        success: true,
+        message: message.into(),
+        affected_account: Some(account.to_string()),
+    }
 }
 fn fail(message: impl Into<String>) -> ExecOutcome {
-    ExecOutcome { success: false, message: message.into(), affected_account: None }
+    ExecOutcome {
+        success: false,
+        message: message.into(),
+        affected_account: None,
+    }
 }
 
 /// Exécute une commande déjà parsée. `is_root` doit avoir été résolu par le caller (le compte
@@ -133,6 +153,13 @@ pub fn execute(
             } else {
                 admins.push(AdminRecord {
                     display_name: account.clone(),
+                    // `/promote` est une commande tapée par un humain (l'admin émetteur saisit un
+                    // display_name lisible au clavier, jamais un `sub` OIDC opaque) — le `sub` de
+                    // ce compte, s'il en obtient un, est découvert et rattaché à son prochain Join
+                    // sur un serveur public (voir `gateway.rs`, résolution admin au Join, Task D3),
+                    // pas ici. Rien à migrer dans ce fichier : voir note de scope Task D3 dans le
+                    // rapport de tâche.
+                    sub: None,
                     group,
                     extra_permissions: Vec::new(),
                     revoked_permissions: Vec::new(),
@@ -176,11 +203,23 @@ pub fn execute(
                 .map(|a| format!("{} ({})", a.display_name, a.group))
                 .collect::<Vec<_>>()
                 .join(", ");
-            ok(if list.is_empty() { "aucun admin".to_string() } else { list })
+            ok(if list.is_empty() {
+                "aucun admin".to_string()
+            } else {
+                list
+            })
         }
         ParsedCommand::ListGroups => {
-            let list = groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ");
-            ok(if list.is_empty() { "aucun groupe".to_string() } else { list })
+            let list = groups
+                .iter()
+                .map(|g| g.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            ok(if list.is_empty() {
+                "aucun groupe".to_string()
+            } else {
+                list
+            })
         }
         ParsedCommand::GroupInfo { group } => {
             let Some(g) = groups.iter().find(|g| g.name == group) else {
@@ -202,7 +241,10 @@ pub fn execute(
             if groups.iter().any(|g| g.name == name) {
                 return fail(format!("groupe déjà existant : {name}"));
             }
-            groups.push(Group { name: name.clone(), permissions: Vec::new() });
+            groups.push(Group {
+                name: name.clone(),
+                permissions: Vec::new(),
+            });
             ok(format!("groupe {name} créé"))
         }
         ParsedCommand::GroupGrant { group, node } => {
@@ -243,16 +285,16 @@ mod tests {
     fn parses_promote_with_leading_slash() {
         assert_eq!(
             parse("/promote Compte1 moderator"),
-            Ok(ParsedCommand::Promote { account: "Compte1".into(), group: "moderator".into() })
+            Ok(ParsedCommand::Promote {
+                account: "Compte1".into(),
+                group: "moderator".into()
+            })
         );
     }
 
     #[test]
     fn parses_without_leading_slash_too() {
-        assert_eq!(
-            parse("admins"),
-            Ok(ParsedCommand::ListAdmins)
-        );
+        assert_eq!(parse("admins"), Ok(ParsedCommand::ListAdmins));
     }
 
     #[test]
@@ -267,35 +309,66 @@ mod tests {
 
     #[test]
     fn parses_all_zero_or_one_arg_commands() {
-        assert_eq!(parse("/demote Compte1"), Ok(ParsedCommand::Demote { account: "Compte1".into() }));
+        assert_eq!(
+            parse("/demote Compte1"),
+            Ok(ParsedCommand::Demote {
+                account: "Compte1".into()
+            })
+        );
         assert_eq!(parse("/groups"), Ok(ParsedCommand::ListGroups));
-        assert_eq!(parse("/groupinfo moderator"), Ok(ParsedCommand::GroupInfo { group: "moderator".into() }));
-        assert_eq!(parse("/creategroup vip"), Ok(ParsedCommand::CreateGroup { name: "vip".into() }));
-        assert_eq!(parse("/deletegroup vip"), Ok(ParsedCommand::DeleteGroup { name: "vip".into() }));
+        assert_eq!(
+            parse("/groupinfo moderator"),
+            Ok(ParsedCommand::GroupInfo {
+                group: "moderator".into()
+            })
+        );
+        assert_eq!(
+            parse("/creategroup vip"),
+            Ok(ParsedCommand::CreateGroup { name: "vip".into() })
+        );
+        assert_eq!(
+            parse("/deletegroup vip"),
+            Ok(ParsedCommand::DeleteGroup { name: "vip".into() })
+        );
     }
 
     #[test]
     fn parses_all_two_arg_commands() {
         assert_eq!(
             parse("/grant Compte1 admin.fly"),
-            Ok(ParsedCommand::Grant { account: "Compte1".into(), node: "admin.fly".into() })
+            Ok(ParsedCommand::Grant {
+                account: "Compte1".into(),
+                node: "admin.fly".into()
+            })
         );
         assert_eq!(
             parse("/revoke Compte1 admin.fly"),
-            Ok(ParsedCommand::Revoke { account: "Compte1".into(), node: "admin.fly".into() })
+            Ok(ParsedCommand::Revoke {
+                account: "Compte1".into(),
+                node: "admin.fly".into()
+            })
         );
         assert_eq!(
             parse("/groupgrant moderator admin.fly"),
-            Ok(ParsedCommand::GroupGrant { group: "moderator".into(), node: "admin.fly".into() })
+            Ok(ParsedCommand::GroupGrant {
+                group: "moderator".into(),
+                node: "admin.fly".into()
+            })
         );
         assert_eq!(
             parse("/grouprevoke moderator admin.fly"),
-            Ok(ParsedCommand::GroupRevoke { group: "moderator".into(), node: "admin.fly".into() })
+            Ok(ParsedCommand::GroupRevoke {
+                group: "moderator".into(),
+                node: "admin.fly".into()
+            })
         );
     }
 
     fn moderator_group() -> Group {
-        Group { name: "moderator".into(), permissions: vec!["admin.noclip".into()] }
+        Group {
+            name: "moderator".into(),
+            permissions: vec!["admin.noclip".into()],
+        }
     }
 
     #[test]
@@ -303,7 +376,10 @@ mod tests {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
         let outcome = execute(
-            ParsedCommand::Promote { account: "Compte1".into(), group: "moderator".into() },
+            ParsedCommand::Promote {
+                account: "Compte1".into(),
+                group: "moderator".into(),
+            },
             false,
             &mut groups,
             &mut admins,
@@ -319,7 +395,10 @@ mod tests {
         let mut groups = vec![];
         let mut admins = vec![];
         let outcome = execute(
-            ParsedCommand::Promote { account: "Compte1".into(), group: "ghost".into() },
+            ParsedCommand::Promote {
+                account: "Compte1".into(),
+                group: "ghost".into(),
+            },
             true,
             &mut groups,
             &mut admins,
@@ -335,7 +414,10 @@ mod tests {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
         let outcome = execute(
-            ParsedCommand::Promote { account: "Compte1".into(), group: "moderator".into() },
+            ParsedCommand::Promote {
+                account: "Compte1".into(),
+                group: "moderator".into(),
+            },
             true,
             &mut groups,
             &mut admins,
@@ -354,7 +436,9 @@ mod tests {
         let mut groups = vec![];
         let mut admins = vec![];
         let outcome = execute(
-            ParsedCommand::Demote { account: "Compte1".into() },
+            ParsedCommand::Demote {
+                account: "Compte1".into(),
+            },
             true,
             &mut groups,
             &mut admins,
@@ -369,19 +453,40 @@ mod tests {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
         execute(
-            ParsedCommand::Promote { account: "Compte1".into(), group: "moderator".into() },
-            true, &mut groups, &mut admins, 0, "Root",
+            ParsedCommand::Promote {
+                account: "Compte1".into(),
+                group: "moderator".into(),
+            },
+            true,
+            &mut groups,
+            &mut admins,
+            0,
+            "Root",
         );
         let outcome = execute(
-            ParsedCommand::Grant { account: "Compte1".into(), node: "admin.fly".into() },
-            true, &mut groups, &mut admins, 0, "Root",
+            ParsedCommand::Grant {
+                account: "Compte1".into(),
+                node: "admin.fly".into(),
+            },
+            true,
+            &mut groups,
+            &mut admins,
+            0,
+            "Root",
         );
         assert!(outcome.success);
         assert_eq!(admins[0].extra_permissions, vec!["admin.fly".to_string()]);
 
         let outcome = execute(
-            ParsedCommand::Revoke { account: "Compte1".into(), node: "admin.fly".into() },
-            true, &mut groups, &mut admins, 0, "Root",
+            ParsedCommand::Revoke {
+                account: "Compte1".into(),
+                node: "admin.fly".into(),
+            },
+            true,
+            &mut groups,
+            &mut admins,
+            0,
+            "Root",
         );
         assert!(outcome.success);
         assert!(admins[0].extra_permissions.is_empty());
@@ -393,12 +498,25 @@ mod tests {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
         execute(
-            ParsedCommand::Promote { account: "Compte1".into(), group: "moderator".into() },
-            true, &mut groups, &mut admins, 0, "Root",
+            ParsedCommand::Promote {
+                account: "Compte1".into(),
+                group: "moderator".into(),
+            },
+            true,
+            &mut groups,
+            &mut admins,
+            0,
+            "Root",
         );
         let outcome = execute(
-            ParsedCommand::DeleteGroup { name: "moderator".into() },
-            true, &mut groups, &mut admins, 0, "Root",
+            ParsedCommand::DeleteGroup {
+                name: "moderator".into(),
+            },
+            true,
+            &mut groups,
+            &mut admins,
+            0,
+            "Root",
         );
         assert!(!outcome.success);
         assert_eq!(groups.len(), 1);
@@ -409,8 +527,14 @@ mod tests {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
         let outcome = execute(
-            ParsedCommand::DeleteGroup { name: "moderator".into() },
-            true, &mut groups, &mut admins, 0, "Root",
+            ParsedCommand::DeleteGroup {
+                name: "moderator".into(),
+            },
+            true,
+            &mut groups,
+            &mut admins,
+            0,
+            "Root",
         );
         assert!(outcome.success);
         assert!(groups.is_empty());
@@ -420,11 +544,25 @@ mod tests {
     fn creategroup_then_groupgrant_populates_its_permissions() {
         let mut groups = vec![];
         let mut admins = vec![];
-        execute(ParsedCommand::CreateGroup { name: "vip".into() }, true, &mut groups, &mut admins, 0, "Root");
+        execute(
+            ParsedCommand::CreateGroup { name: "vip".into() },
+            true,
+            &mut groups,
+            &mut admins,
+            0,
+            "Root",
+        );
         assert_eq!(groups.len(), 1);
         execute(
-            ParsedCommand::GroupGrant { group: "vip".into(), node: "admin.teleport".into() },
-            true, &mut groups, &mut admins, 0, "Root",
+            ParsedCommand::GroupGrant {
+                group: "vip".into(),
+                node: "admin.teleport".into(),
+            },
+            true,
+            &mut groups,
+            &mut admins,
+            0,
+            "Root",
         );
         assert_eq!(groups[0].permissions, vec!["admin.teleport".to_string()]);
     }

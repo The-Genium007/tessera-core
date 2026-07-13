@@ -14,6 +14,15 @@ pub struct Group {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminRecord {
     pub display_name: String,
+    /// `sub` OIDC vérifié du compte, quand connu (Task D3 — migration de l'indexation admin vers
+    /// `sub` pour fermer définitivement le bug playtest 1 : deux comptes distincts avec le même
+    /// `display_name` ne doivent jamais partager d'autorité admin). `None` pour les admins
+    /// attribués sur un serveur privé (`identity.public = false`), où seul le `display_name` a un
+    /// sens — et pour tout enregistrement créé avant cette migration. `#[serde(default)]` : un
+    /// `server_admins.json` existant sans ce champ continue de charger (désérialisation
+    /// tolérante, même discipline que `AdminStore::open`).
+    #[serde(default)]
+    pub sub: Option<String>,
     pub group: String,
     pub extra_permissions: Vec<String>,
     pub revoked_permissions: Vec<String>,
@@ -72,7 +81,10 @@ pub fn derive_rank(resolved: &[String]) -> Rank {
     let full_admin = resolved.iter().any(|n| n == "*" || n == "admin.*");
     if full_admin {
         Rank::GameMaster
-    } else if resolved.iter().any(|n| n.starts_with("admin.") || n == "admin") {
+    } else if resolved
+        .iter()
+        .any(|n| n.starts_with("admin.") || n == "admin")
+    {
         Rank::Moderator
     } else {
         Rank::Player
@@ -106,13 +118,22 @@ mod tests {
     #[test]
     fn root_always_resolves_to_wildcard_regardless_of_store() {
         let groups = vec![];
-        assert_eq!(resolve_permissions(true, None, &groups), vec!["*".to_string()]);
+        assert_eq!(
+            resolve_permissions(true, None, &groups),
+            vec!["*".to_string()]
+        );
     }
 
     #[test]
     fn account_with_no_record_resolves_empty() {
-        let groups = vec![Group { name: "admin".into(), permissions: vec!["admin.*".into()] }];
-        assert_eq!(resolve_permissions(false, None, &groups), Vec::<String>::new());
+        let groups = vec![Group {
+            name: "admin".into(),
+            permissions: vec!["admin.*".into()],
+        }];
+        assert_eq!(
+            resolve_permissions(false, None, &groups),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -123,6 +144,7 @@ mod tests {
         }];
         let record = AdminRecord {
             display_name: "Compte1".into(),
+            sub: None,
             group: "moderator".into(),
             extra_permissions: vec!["admin.fly".into()],
             revoked_permissions: vec!["admin.invisible".into()],
@@ -131,7 +153,10 @@ mod tests {
         };
         let mut resolved = resolve_permissions(false, Some(&record), &groups);
         resolved.sort();
-        assert_eq!(resolved, vec!["admin.fly".to_string(), "admin.noclip".to_string()]);
+        assert_eq!(
+            resolved,
+            vec!["admin.fly".to_string(), "admin.noclip".to_string()]
+        );
     }
 
     #[test]
@@ -139,6 +164,7 @@ mod tests {
         let groups: Vec<Group> = vec![]; // le groupe "moderator" n'existe plus
         let record = AdminRecord {
             display_name: "Compte1".into(),
+            sub: None,
             group: "moderator".into(),
             extra_permissions: vec!["admin.fly".into()],
             revoked_permissions: vec![],
@@ -165,6 +191,9 @@ mod tests {
     #[test]
     fn no_admin_node_derives_player_rank() {
         assert_eq!(derive_rank(&[]), Rank::Player);
-        assert_eq!(derive_rank(&["server.queue_bypass".to_string()]), Rank::Player);
+        assert_eq!(
+            derive_rank(&["server.queue_bypass".to_string()]),
+            Rank::Player
+        );
     }
 }
