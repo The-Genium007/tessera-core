@@ -611,6 +611,31 @@ pub fn reject_join_if_server_full<T: Transport>(
 /// (contrairement au rate-limit/serveur plein) : le message est juste ignoré, la position n'est
 /// pas mise à jour par l'appelant. Renvoie `true` si le message doit être considéré comme consommé
 /// (l'appelant doit `continue` sans mettre à jour `last_pos`/`last_pos_at`/placement).
+/// Décide si un mouvement doit être considéré comme plausible : un `Rank::GameMaster` contourne
+/// systématiquement la vérification anti-triche (bypass playtest voulu, staff/MJ — Moderator et
+/// Player n'en bénéficient jamais) ; sinon, `is_plausible_move`/`cap_elapsed` tranchent (une
+/// première position après Join, `last` = `None`, est toujours acceptée). Extrait de la boucle de
+/// `gateway_main` pour être testable sans `--features gns` (même pattern que
+/// `reject_position_if_implausible`/`apply_rate_limit_decision`).
+pub fn resolve_move_plausibility(
+    rank: crate::handoff::Rank,
+    last: Option<([f32; 3], std::time::Duration)>,
+    current: [f32; 3],
+) -> bool {
+    if rank == crate::handoff::Rank::GameMaster {
+        return true;
+    }
+    match last {
+        Some((prev, elapsed)) => crate::anticheat::is_plausible_move(
+            prev,
+            current,
+            crate::anticheat::cap_elapsed(elapsed, crate::anticheat::MAX_ELAPSED_WINDOW),
+            crate::anticheat::MAX_PLAYER_SPEED_MPS,
+        ),
+        None => true,
+    }
+}
+
 pub fn reject_position_if_implausible(
     plausible: bool,
     cid: u64,
@@ -1007,8 +1032,9 @@ pub async fn gateway_main(
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
                     let now = std::time::Instant::now();
-                    let bypassed = matches!(ranks.get(&cid), Some(Rank::GameMaster));
-                    let plausible = if bypassed {
+                    let rank = ranks.get(&cid).copied().unwrap_or(Rank::Player);
+                    let bypassed = rank == Rank::GameMaster;
+                    if bypassed {
                         let should_log = match bypass_warned_at.get(&cid) {
                             Some(at) => now.duration_since(*at) >= BYPASS_LOG_INTERVAL,
                             None => true,
@@ -1020,22 +1046,12 @@ pub async fn gateway_main(
                                 "PositionUpdate accepté sans vérification (contournement anti-triche playtest, log throttled {BYPASS_LOG_INTERVAL:?})"
                             );
                         }
-                        true
-                    } else {
-                        match (last_pos.get(&cid).copied(), last_pos_at.get(&cid).copied()) {
-                            (Some(prev), Some(at)) => crate::anticheat::is_plausible_move(
-                                prev,
-                                [x, y, z],
-                                crate::anticheat::cap_elapsed(
-                                    now.duration_since(at),
-                                    crate::anticheat::MAX_ELAPSED_WINDOW,
-                                ),
-                                crate::anticheat::MAX_PLAYER_SPEED_MPS,
-                            ),
-                            // Pas encore de référence temporelle (1re position après Join) : accepté.
-                            _ => true,
-                        }
+                    }
+                    let last = match (last_pos.get(&cid).copied(), last_pos_at.get(&cid).copied()) {
+                        (Some(prev), Some(at)) => Some((prev, now.duration_since(at))),
+                        _ => None,
                     };
+                    let plausible = resolve_move_plausibility(rank, last, [x, y, z]);
                     if reject_position_if_implausible(plausible, cid, &metrics) {
                         continue;
                     }
@@ -2811,18 +2827,38 @@ mod tests {
     }
 
     #[test]
-    fn gamemaster_rank_bypasses_anticheat_plausibility_check_by_design() {
+    fn gamemaster_rank_bypasses_anticheat_even_on_an_implausible_teleport() {
         use crate::handoff::Rank;
-        // Documente explicitement que ce bypass est voulu (rôle GameMaster = staff/MJ), pas un bug —
-        // sert de garde-fou si quelqu'un tente de le "corriger" par accident plus tard.
-        // Le bypass s'active ligne 613 de gateway.rs : `let bypassed = matches!(ranks.get(&cid), Some(Rank::GameMaster));`
-        // Quand vrai, la vérification anti-triche de plausibilité de mouvement (is_plausible_move) est court-circuitée.
-        let rank = Rank::GameMaster;
-        assert!(matches!(rank, Rank::GameMaster));
+        // Exerce le VRAI code de décision (resolve_move_plausibility), pas une comparaison de
+        // motif isolée : un GameMaster qui téléporte à une vitesse totalement implausible
+        // (10 km en 1 tick) doit quand même être accepté — c'est le bypass voulu (rôle
+        // staff/MJ), documenté ici pour qu'il ne soit jamais "corrigé" par accident.
+        let prev = [0.0, 0.0, 0.0];
+        let teleport = [10_000.0, 0.0, 0.0];
+        let elapsed = std::time::Duration::from_millis(50); // un seul tick à 20 Hz
 
-        // Vérifier aussi que les autres rangs ne déclenchent pas le bypass.
-        assert!(!matches!(Rank::Player, Rank::GameMaster));
-        assert!(!matches!(Rank::Moderator, Rank::GameMaster));
+        let plausible_gm =
+            resolve_move_plausibility(Rank::GameMaster, Some((prev, elapsed)), teleport);
+        assert!(
+            plausible_gm,
+            "GameMaster doit être accepté même sur un mouvement implausible"
+        );
+
+        // Le même mouvement, pour un rang normal, doit être rejeté — preuve que le test
+        // exercerait bien une régression si le bypass disparaissait par erreur.
+        let plausible_player =
+            resolve_move_plausibility(Rank::Player, Some((prev, elapsed)), teleport);
+        assert!(
+            !plausible_player,
+            "un joueur normal ne doit pas bénéficier du bypass"
+        );
+
+        let plausible_mod =
+            resolve_move_plausibility(Rank::Moderator, Some((prev, elapsed)), teleport);
+        assert!(
+            !plausible_mod,
+            "un modérateur ne doit pas bénéficier du bypass (réservé au GameMaster)"
+        );
     }
 
     #[test]
