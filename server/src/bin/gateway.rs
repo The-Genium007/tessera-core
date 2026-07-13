@@ -43,6 +43,9 @@ async fn main() -> std::io::Result<()> {
     const JWKS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
     let identity_public = manifest.identity.public;
+    let whitelist_enabled = manifest.runtime.whitelist;
+    let whitelist_names: std::collections::HashSet<String> =
+        manifest.runtime.whitelist_names.iter().cloned().collect();
     let jwks_cache = std::sync::Arc::new(server::jwks::JwksCache::new());
     if identity_public {
         let jwks_cache = jwks_cache.clone();
@@ -69,6 +72,8 @@ async fn main() -> std::io::Result<()> {
         max_players,
         jwks_cache,
         identity_public,
+        whitelist_enabled,
+        whitelist_names,
     )
     .await
 }

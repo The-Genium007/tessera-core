@@ -5,7 +5,12 @@ struct Vec3 { x:float; y:float; z:float; }
 // `token` : JWT ZITADEL optionnel (chaîne vide par défaut FlatBuffers si absent) — ignoré
 // intégralement par un serveur privé (`identity.public = false`, défaut), exigé et vérifié via
 // `JwksCache::verify` par un serveur public (design 2026-07-09, launcher-server-auth).
-table Join { display_name:string; token:string; }
+// `protocol_version` : version du protocole FlatBuffers parlée par le client (Task C3) — comparée
+// à `CURRENT_PROTOCOL_VERSION` côté serveur au Join ; un mismatch kick avec un message explicite
+// plutôt qu'un comportement indéfini (désérialisation qui dérive silencieusement au fil des
+// évolutions du schéma). 0 par défaut FlatBuffers si absent (client trop ancien pour connaître le
+// champ) — mismatch avec la version courante dès qu'elle dépasse 0.
+table Join { display_name:string; token:string; protocol_version:uint; }
 table PositionUpdate { position:Vec3; yaw:float; }
 
 table PlayerState { id:ulong; position:Vec3; yaw:float; }
@@ -38,7 +43,15 @@ table CommandResult { success:bool; message:string; }
 // changement affectant ce compte, sans reconnexion nécessaire.
 table PermissionSync { nodes:[string]; }
 
-union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand }
+// Départ volontaire (déconnexion propre, ex. joueur qui quitte via un menu) — distinct d'une
+// coupure réseau/crash (`TransportEvent::Disconnected`, jamais annoncé par le client). Permet au
+// Gateway de libérer immédiatement le slot du joueur plutôt que d'attendre l'expiration d'un
+// timeout de transport (Task C3). Table vide : aucune donnée à transporter, seul le type du
+// message compte. `Leave` reste en FIN d'union — ne jamais réordonner les membres d'un union déjà
+// publié, ça romprait la compatibilité binaire des clients existants.
+table Leave {}
+
+union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave }
 union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync }
 
 table ClientEnvelope { msg:ClientMsg; }

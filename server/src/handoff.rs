@@ -293,6 +293,7 @@ mod tests {
             &JoinArgs {
                 display_name: Some(name),
                 token: None,
+                protocol_version: 1,
             },
         );
         let env = ClientEnvelope::create(

@@ -294,6 +294,83 @@ pub fn resolve_join_key(
     }
 }
 
+/// Décide, au moment du `Join`, si la version de protocole annoncée par le client (Task C3) est
+/// compatible avec ce serveur. `Err` porte le message `Kicked` à renvoyer — un client dont le
+/// protocole a dérivé (launcher pas à jour) doit recevoir une explication lisible plutôt qu'un
+/// comportement indéfini ou une coupure muette.
+pub fn resolve_protocol_version(received: u32) -> Result<(), &'static str> {
+    if received != crate::gateway_routing::CURRENT_PROTOCOL_VERSION {
+        Err("version du jeu incompatible, mettez à jour votre launcher")
+    } else {
+        Ok(())
+    }
+}
+
+/// Décide, au moment du `Join`, si `name` (display_name brut, jamais la clé de persistance
+/// effective) est autorisé à rejoindre au regard de la whitelist du manifeste (`runtime.whitelist`
+/// et `runtime.whitelist_names`, Task C3). `whitelist` désactivée (défaut) : toujours `Ok` — la
+/// whitelist ne change AUCUN comportement tant que l'opérateur ne l'active pas explicitement.
+/// `Err` porte le message `Kicked` à renvoyer.
+pub fn resolve_whitelist(
+    whitelist_enabled: bool,
+    whitelist_names: &std::collections::HashSet<String>,
+    name: &str,
+) -> Result<(), &'static str> {
+    if whitelist_enabled && !whitelist_names.contains(name) {
+        Err("accès restreint (whitelist)")
+    } else {
+        Ok(())
+    }
+}
+
+/// Nettoie tout l'état par-client (`cid`) que le Gateway maintient en mémoire, et sauvegarde sa
+/// dernière position connue avant de l'oublier — chemin PARTAGÉ entre une déconnexion (crash/coupure
+/// réseau, `TransportEvent::Disconnected`) et un départ volontaire (`Leave`, Task C3) : les deux
+/// libèrent aujourd'hui le slot du client de façon identique et immédiate. Le jour où palier 2
+/// distingue les deux (réservation de slot 5 min après un `Disconnected`, libération immédiate
+/// après un `Leave`), seul l'appelant du chemin `Disconnected` ajoutera cette réservation — ce
+/// nettoyage per-cid, lui, restera commun aux deux.
+#[allow(clippy::too_many_arguments)] // état per-cid éclaté en plusieurs HashMaps (même discipline que gateway_main)
+pub fn cleanup_client_state(
+    cid: u64,
+    store: &mut impl crate::persistence::PlayerStore,
+    keys: &mut HashMap<u64, String>,
+    display_names: &mut HashMap<u64, String>,
+    last_pos: &mut HashMap<u64, [f32; 3]>,
+    last_pos_at: &mut HashMap<u64, std::time::Instant>,
+    bypass_warned_at: &mut HashMap<u64, std::time::Instant>,
+    ranks: &mut HashMap<u64, crate::handoff::Rank>,
+    permissions: &mut HashMap<u64, Vec<String>>,
+    residence: &mut HashMap<u64, Option<[f32; 3]>>,
+    rate_states: &mut HashMap<u64, crate::rate_limit::RateLimitState>,
+    loader: &mut crate::handoff::ShardLoader,
+    latest: &mut HashMap<u64, HashMap<String, Vec<u8>>>,
+    prev_placements: &mut HashMap<u64, crate::handoff::Placement>,
+) {
+    if let Some(name) = keys.remove(&cid) {
+        if let Some(pos) = last_pos.get(&cid).copied() {
+            store.save(
+                &name,
+                crate::persistence::PlayerRecord {
+                    last_position: pos,
+                    residence: residence.get(&cid).copied().flatten(),
+                },
+            );
+        }
+    }
+    display_names.remove(&cid);
+    last_pos.remove(&cid);
+    last_pos_at.remove(&cid);
+    bypass_warned_at.remove(&cid);
+    ranks.remove(&cid);
+    permissions.remove(&cid);
+    residence.remove(&cid);
+    rate_states.remove(&cid);
+    loader.forget(cid);
+    latest.remove(&cid);
+    prev_placements.remove(&cid);
+}
+
 /// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
 /// rejouer vers ce shard après une reconnexion. Le shard vient de perdre tout son état (nouveau
 /// `Server::new()` recréé côté Shard à chaque connexion acceptée, cf. `shard_main`) et ne connaît
@@ -367,10 +444,13 @@ pub async fn gateway_main(
     max_players: u32,
     jwks_cache: std::sync::Arc<crate::jwks::JwksCache>,
     identity_public: bool,
+    whitelist_enabled: bool,
+    whitelist_names: std::collections::HashSet<String>,
 ) -> std::io::Result<()> {
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
-        extract_admin_command, extract_join_fields, extract_position, extract_time_report,
+        extract_admin_command, extract_join_fields, extract_leave, extract_position,
+        extract_time_report,
     };
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
@@ -608,8 +688,29 @@ pub async fn gateway_main(
             // PositionUpdate → placement (topologie + rang) et mémorisation de la dernière position.
             let mut placement = None;
             if let TransportEvent::Message { data, .. } = &ev {
-                if let Some((name, token)) = extract_join_fields(data) {
+                if let Some((name, token, protocol_version)) = extract_join_fields(data) {
                     if !name.is_empty() || !token.is_empty() {
+                        if let Err(reason) = resolve_protocol_version(protocol_version) {
+                            tracing::warn!(
+                                client = cid,
+                                received = protocol_version,
+                                expected = crate::gateway_routing::CURRENT_PROTOCOL_VERSION,
+                                "kick : version protocole incompatible"
+                            );
+                            client.send(cid, &encode_kicked(reason));
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
+                        if let Err(reason) =
+                            resolve_whitelist(whitelist_enabled, &whitelist_names, &name)
+                        {
+                            tracing::warn!(client = cid, %name, "kick : non présent sur la whitelist");
+                            client.send(cid, &encode_kicked(reason));
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
                         let effective_key =
                             match resolve_join_key(identity_public, &name, &token, &jwks_cache) {
                                 Ok(key) => key,
@@ -852,6 +953,31 @@ pub async fn gateway_main(
                             client.send(target_cid, &encode_permission_sync(&resolved));
                         }
                     }
+                } else if extract_leave(data).is_some() {
+                    // Départ volontaire (Task C3), distinct d'une coupure réseau/crash
+                    // (`TransportEvent::Disconnected`, jamais annoncé par le client) : le même
+                    // nettoyage per-cid que ce dernier (voir plus bas, bloc `is_disconnect`), mais
+                    // appliqué immédiatement plutôt qu'attendu via un timeout de transport. La
+                    // réservation de slot différenciée entre les deux chemins reste palier 2 —
+                    // cette tâche pose seulement la distinction protocole.
+                    tracing::info!(client = cid, "départ volontaire (Leave)");
+                    cleanup_client_state(
+                        cid,
+                        &mut store,
+                        &mut keys,
+                        &mut display_names,
+                        &mut last_pos,
+                        &mut last_pos_at,
+                        &mut bypass_warned_at,
+                        &mut ranks,
+                        &mut permissions,
+                        &mut residence,
+                        &mut rate_states,
+                        &mut loader,
+                        &mut latest,
+                        &mut prev_placements,
+                    );
+                    continue;
                 }
             }
 
@@ -1050,6 +1176,7 @@ mod tests {
             &protocol::JoinArgs {
                 display_name: Some(name),
                 token: None,
+                protocol_version: 1,
             },
         );
         let env = protocol::ClientEnvelope::create(
@@ -1511,6 +1638,125 @@ mod tests {
         let root_admins: std::collections::HashSet<String> =
             ["Compte1".to_string()].into_iter().collect();
         assert!(resolve_is_root("Compte1", &root_admins, true));
+    }
+
+    // --- resolve_protocol_version / resolve_whitelist / Leave (Task C3) --------------------
+
+    #[test]
+    fn join_rejected_when_protocol_version_mismatches() {
+        assert_eq!(
+            resolve_protocol_version(999),
+            Err("version du jeu incompatible, mettez à jour votre launcher")
+        );
+    }
+
+    #[test]
+    fn join_accepted_when_protocol_version_matches() {
+        assert_eq!(
+            resolve_protocol_version(crate::gateway_routing::CURRENT_PROTOCOL_VERSION),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn join_rejected_when_whitelist_enabled_and_name_not_listed() {
+        let names: std::collections::HashSet<String> = ["Alice".to_string()].into_iter().collect();
+        assert_eq!(
+            resolve_whitelist(true, &names, "Mallory"),
+            Err("accès restreint (whitelist)")
+        );
+    }
+
+    #[test]
+    fn join_accepted_when_whitelist_enabled_and_name_listed() {
+        let names: std::collections::HashSet<String> = ["Alice".to_string()].into_iter().collect();
+        assert_eq!(resolve_whitelist(true, &names, "Alice"), Ok(()));
+    }
+
+    #[test]
+    fn join_accepted_when_whitelist_disabled_regardless_of_name() {
+        // Comportement inchangé (défaut) : whitelist désactivée → tout le monde passe, même une
+        // liste vide de noms autorisés.
+        let names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert_eq!(resolve_whitelist(false, &names, "AnyoneAtAll"), Ok(()));
+    }
+
+    #[test]
+    fn leave_message_releases_slot_immediately_unlike_crash_disconnect() {
+        use crate::handoff::{Placement, Rank, ShardLoader};
+        use crate::persistence::{MemoryStore, PlayerRecord, PlayerStore};
+        use crate::rate_limit::RateLimitState;
+        use crate::transport::TransportEvent;
+
+        let cid = 1u64;
+        let mut store = MemoryStore::new();
+        let mut keys = HashMap::new();
+        keys.insert(cid, "Alice".to_string());
+        let mut display_names = HashMap::new();
+        display_names.insert(cid, "Alice".to_string());
+        let mut last_pos = HashMap::new();
+        last_pos.insert(cid, [1.0, 2.0, 3.0]);
+        let mut last_pos_at = HashMap::new();
+        last_pos_at.insert(cid, std::time::Instant::now());
+        let mut bypass_warned_at = HashMap::new();
+        bypass_warned_at.insert(cid, std::time::Instant::now());
+        let mut ranks = HashMap::new();
+        ranks.insert(cid, Rank::Player);
+        let mut permissions = HashMap::new();
+        permissions.insert(cid, vec!["some.node".to_string()]);
+        let mut residence = HashMap::new();
+        residence.insert(cid, Some([1.0, 2.0, 3.0]));
+        let mut rate_states = HashMap::new();
+        rate_states.insert(cid, RateLimitState::new(std::time::Instant::now()));
+        let mut loader = ShardLoader::new();
+        loader.feed(TransportEvent::Connected(cid), None);
+        let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+        latest.insert(cid, HashMap::new());
+        let mut prev_placements = HashMap::new();
+        prev_placements.insert(
+            cid,
+            Placement {
+                authoritative: "A".to_string(),
+                overlaps: vec![],
+            },
+        );
+
+        cleanup_client_state(
+            cid,
+            &mut store,
+            &mut keys,
+            &mut display_names,
+            &mut last_pos,
+            &mut last_pos_at,
+            &mut bypass_warned_at,
+            &mut ranks,
+            &mut permissions,
+            &mut residence,
+            &mut rate_states,
+            &mut loader,
+            &mut latest,
+            &mut prev_placements,
+        );
+
+        assert!(keys.is_empty(), "keys doit être nettoyé immédiatement");
+        assert!(display_names.is_empty());
+        assert!(last_pos.is_empty());
+        assert!(last_pos_at.is_empty());
+        assert!(bypass_warned_at.is_empty());
+        assert!(ranks.is_empty());
+        assert!(permissions.is_empty());
+        assert!(residence.is_empty());
+        assert!(rate_states.is_empty());
+        assert!(latest.is_empty());
+        assert!(prev_placements.is_empty());
+        assert_eq!(
+            store.load("Alice"),
+            Some(PlayerRecord {
+                last_position: [1.0, 2.0, 3.0],
+                residence: Some([1.0, 2.0, 3.0]),
+            }),
+            "la dernière position connue doit être sauvée avant l'oubli, comme au Disconnected"
+        );
     }
 
     // --- resolve_join_key (Task C2, vérification JWT au Join) -------------------------------
