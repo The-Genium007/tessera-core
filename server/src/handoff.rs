@@ -2,6 +2,8 @@
 //! (shard autoritaire + shards en zone tampon), rayon par rang, et machine de chargement.
 //! Pur et testable sans GNS/TCP.
 
+use tessera_authority::geometry::{dist_point_polygon, point_in_polygon, Point};
+
 /// Boîte alignée sur les axes (zone d'un shard sur le plan X/Y ; Z ignoré pour le sharding).
 #[derive(Debug, Clone, Copy)]
 pub struct Aabb {
@@ -39,14 +41,49 @@ impl Aabb {
     }
 }
 
-/// Un shard et la zone du monde dont il est responsable. `addr` sert aussi d'identifiant.
+/// Zone d'une cellule d'autorité, définie par une géométrie polygonale (issue de la
+/// tessellation Voronoï d'autorité, `tessera-authority`). Une cellule peut porter plusieurs
+/// anneaux (quartiers non contigus) — pas de fusion géométrique, appartenance testée anneau
+/// par anneau (D4 de la spec district-topology, toujours valide).
+#[derive(Debug, Clone)]
+pub struct CellZone {
+    pub boundary_rings: Vec<Vec<Point>>,
+}
+
+impl CellZone {
+    /// Le point appartient à la cellule s'il est dans AU MOINS UN des anneaux.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        let p: Point = [x as f64, y as f64];
+        self.boundary_rings
+            .iter()
+            .any(|ring| point_in_polygon(p, ring))
+    }
+
+    /// Distance euclidienne du point à la cellule : le minimum, sur tous les anneaux, de la
+    /// distance au polygone (`dist_point_polygon` — distance au segment le plus proche, PAS 0
+    /// quand le point est dedans ; voir les tests `cellzone_dist_*` pour la convention exacte).
+    pub fn dist(&self, x: f32, y: f32) -> f32 {
+        let p: Point = [x as f64, y as f64];
+        self.boundary_rings
+            .iter()
+            .map(|ring| dist_point_polygon(p, ring))
+            .fold(f64::MAX, f64::min) as f32
+    }
+}
+
+/// Un shard (ou "groupe" de cellules Voronoï simulées par un même process, décision 3 de la
+/// spec câblage runtime tessellation d'autorité) et les cellules d'autorité dont il est
+/// responsable. `addr` sert aussi d'identifiant. Chaque élément de `cells` porte sa géométrie
+/// (`CellZone`) et son rayon de tampon déjà résolu en amont (artefact ou override manuel par
+/// cellule, décision 5 de la même spec) — pas de rayon uniforme par shard : une cellule dense et
+/// une cellule périphérique du même groupe ont des tampons différents.
 #[derive(Debug, Clone)]
 pub struct ShardZone {
     pub addr: String,
-    pub zone: Aabb,
+    pub cells: Vec<(CellZone, f32)>,
 }
 
-/// L'ensemble des shards et leurs zones (une tuile du monde par shard).
+/// L'ensemble des shards et leurs cellules (un groupe de cellules Voronoï par shard).
 #[derive(Debug, Clone)]
 pub struct ShardTopology {
     pub shards: Vec<ShardZone>,
@@ -59,36 +96,92 @@ pub struct Placement {
     pub overlaps: Vec<String>,
 }
 
+/// Distance minimale d'un point à un shard : le minimum, sur toutes les cellules du groupe, de
+/// `CellZone::dist` — un shard est "proche" du point dès qu'une de ses cellules l'est (même
+/// logique de regroupement que l'ancien `ShardZone` mono-`Aabb`, étendue à N cellules).
+fn shard_dist(shard: &ShardZone, x: f32, y: f32) -> f32 {
+    shard
+        .cells
+        .iter()
+        .map(|(cell, _)| cell.dist(x, y))
+        .fold(f32::MAX, f32::min)
+}
+
 impl ShardTopology {
-    /// Place un joueur en `(x,y)` : le shard autoritaire (celui dont la zone contient le point ;
-    /// tie-break = adresse minimale) et les shards en zone tampon (tout autre shard dont la zone
-    /// est à <= `radius` du point — c.-à-d. dont la frontière tombe dans le rayon).
-    pub fn locate(&self, x: f32, y: f32, radius: f32) -> Placement {
-        // Autoritaire : parmi les zones contenant le point, l'adresse minimale ; si aucune ne
-        // contient (point hors couverture), le shard le plus proche (tie-break adresse minimale).
-        let authoritative = self
+    /// Place un joueur en `(x,y)` : le shard autoritaire (celui dont une cellule contient le
+    /// point ; tie-break = adresse minimale) et les shards en zone tampon (tout autre shard dont
+    /// une cellule est à <= [rayon de tampon de la cellule autoritaire + `rank_bonus`] du point).
+    ///
+    /// `rank_bonus` est le bonus de rayon selon le rang du joueur (`RadiusPolicy`, inchangé,
+    /// non remplacé) ; il est combiné en interne avec le rayon de tampon déjà résolu (artefact ou
+    /// override) de la cellule où se trouve le joueur.
+    pub fn locate(&self, x: f32, y: f32, rank_bonus: f32) -> Placement {
+        // Autoritaire : parmi les shards ayant une cellule contenant le point, l'adresse
+        // minimale. On retient aussi le rayon de tampon de LA CELLULE QUI CONTIENT LE POINT
+        // (pas d'une autre cellule du même shard) — c'est ce rayon, pas celui d'un voisin, qui
+        // sert de seuil de zone tampon ci-dessous.
+        let containing_addr = self
             .shards
             .iter()
-            .filter(|s| s.zone.contains(x, y))
+            .filter(|s| s.cells.iter().any(|(cell, _)| cell.contains(x, y)))
             .map(|s| s.addr.clone())
-            .min()
-            .unwrap_or_else(|| {
-                self.shards
+            .min();
+
+        let (authoritative, own_cell_buffer) = match containing_addr {
+            Some(addr) => {
+                let shard = self
+                    .shards
                     .iter()
-                    .min_by(|a, b| {
-                        a.zone
-                            .dist(x, y)
-                            .total_cmp(&b.zone.dist(x, y))
-                            .then(a.addr.cmp(&b.addr))
-                    })
-                    .map(|s| s.addr.clone())
-                    .unwrap_or_default()
-            });
+                    .find(|s| s.addr == addr)
+                    .expect("adresse retenue ci-dessus provient de self.shards");
+                let buffer = shard
+                    .cells
+                    .iter()
+                    .find(|(cell, _)| cell.contains(x, y))
+                    .map(|(_, b)| *b)
+                    .unwrap_or(0.0);
+                (addr, buffer)
+            }
+            None => {
+                // Hors couverture (aucune cellule ne contient le point — ne devrait pas arriver
+                // avec la couverture raster réelle de l'artefact v3) : fallback au shard le plus
+                // proche (min sur toutes ses cellules), tie-break adresse minimale — comportement
+                // de fallback préservé fidèlement de l'ancienne implémentation `Aabb`. Le rayon de
+                // tampon retenu est alors celui de la cellule la plus proche de ce shard.
+                match self.shards.iter().min_by(|a, b| {
+                    shard_dist(a, x, y)
+                        .total_cmp(&shard_dist(b, x, y))
+                        .then(a.addr.cmp(&b.addr))
+                }) {
+                    Some(shard) => {
+                        let buffer = shard
+                            .cells
+                            .iter()
+                            .min_by(|(ca, _), (cb, _)| ca.dist(x, y).total_cmp(&cb.dist(x, y)))
+                            .map(|(_, b)| *b)
+                            .unwrap_or(0.0);
+                        (shard.addr.clone(), buffer)
+                    }
+                    None => (String::new(), 0.0),
+                }
+            }
+        };
+
+        // Seuil de zone tampon : le rayon de tampon résolu de LA CELLULE OÙ SE TROUVE LE JOUEUR
+        // (`own_cell_buffer`, calculé ci-dessus), PAS celui de la cellule voisine candidate.
+        // Décision 5 de la spec câblage runtime tessellation d'autorité
+        // (docs/superpowers/specs/2026-07-09-authority-tessellation-runtime-wiring-design.md) :
+        // « locate() utilise le b de la cellule où se trouve le joueur, combiné au rayon de rang
+        // existant ». L'exemple illustratif du plan (Task G2, Step 4) utilise par erreur le
+        // buffer du voisin candidat — en cas de doute d'architecture la spec fait foi (contrainte
+        // globale du plan). Ne PAS "corriger" ceci vers le buffer du voisin sans relire cette note.
+        let threshold = own_cell_buffer + rank_bonus;
 
         let mut overlaps: Vec<String> = self
             .shards
             .iter()
-            .filter(|s| s.addr != authoritative && s.zone.dist(x, y) <= radius)
+            .filter(|s| s.addr != authoritative)
+            .filter(|s| shard_dist(s, x, y) <= threshold)
             .map(|s| s.addr.clone())
             .collect();
         overlaps.sort();
@@ -536,72 +629,97 @@ mod tests {
         assert!(l.loaded_shards(7).is_empty());
     }
 
-    // 2 shards : A = x<1000, B = x>=1000 (Y plein). Frontière à x=1000.
+    /// Rectangle fermé (anneau `Vec<Point>`, premier == dernier point) — anti-friction pour
+    /// éviter de répéter la construction de polygones dans chaque test (plusieurs tests de
+    /// G1/G2 en ont besoin).
+    fn rect(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Vec<Point> {
+        vec![
+            [min_x, min_y],
+            [max_x, min_y],
+            [max_x, max_y],
+            [min_x, max_y],
+            [min_x, min_y],
+        ]
+    }
+
+    /// Carré fermé de côté `side`, coin bas-gauche `(min_x, min_y)`.
+    fn square(min_x: f64, min_y: f64, side: f64) -> Vec<Point> {
+        rect(min_x, min_y, min_x + side, min_y + side)
+    }
+
+    // "Infini" pratique pour représenter un demi-plan par un polygone fini : assez grand pour
+    // que les tests (qui ne sondent jamais qu'à quelques dizaines/centaines de mètres de la
+    // frontière d'intérêt) ne puissent jamais atteindre le bord opposé du rectangle.
+    const BIG: f64 = 1.0e7;
+
+    // 2 shards : A = x<1000, B = x>=1000 (Y plein). Frontière à x=1000. Buffer de tampon
+    // identique (25.0) sur les deux cellules — reproduit l'ancien radius uniforme passé par
+    // l'appelant (Aabb) ; les tests appellent désormais `locate(x, y, 0.0)` (rank_bonus=0).
     fn two_shards() -> ShardTopology {
         ShardTopology {
             shards: vec![
                 ShardZone {
                     addr: "A".into(),
-                    zone: Aabb {
-                        min_x: f32::NEG_INFINITY,
-                        max_x: 1000.0,
-                        min_y: f32::NEG_INFINITY,
-                        max_y: f32::INFINITY,
-                    },
+                    cells: vec![(
+                        CellZone {
+                            boundary_rings: vec![rect(-BIG, -BIG, 1000.0, BIG)],
+                        },
+                        25.0,
+                    )],
                 },
                 ShardZone {
                     addr: "B".into(),
-                    zone: Aabb {
-                        min_x: 1000.0,
-                        max_x: f32::INFINITY,
-                        min_y: f32::NEG_INFINITY,
-                        max_y: f32::INFINITY,
-                    },
+                    cells: vec![(
+                        CellZone {
+                            boundary_rings: vec![rect(1000.0, -BIG, BIG, BIG)],
+                        },
+                        25.0,
+                    )],
                 },
             ],
         }
     }
 
-    // 4 quadrants autour de (0,0) : coin où 4 shards se touchent.
+    // 4 quadrants autour de (0,0) : coin où 4 shards se touchent. Buffer 5.0 sur chaque cellule
+    // (reproduit l'ancien radius=5.0 uniforme).
     fn quad_shards() -> ShardTopology {
-        let big = f32::INFINITY;
         ShardTopology {
             shards: vec![
                 ShardZone {
                     addr: "SW".into(),
-                    zone: Aabb {
-                        min_x: -big,
-                        max_x: 0.0,
-                        min_y: -big,
-                        max_y: 0.0,
-                    },
+                    cells: vec![(
+                        CellZone {
+                            boundary_rings: vec![rect(-BIG, -BIG, 0.0, 0.0)],
+                        },
+                        5.0,
+                    )],
                 },
                 ShardZone {
                     addr: "SE".into(),
-                    zone: Aabb {
-                        min_x: 0.0,
-                        max_x: big,
-                        min_y: -big,
-                        max_y: 0.0,
-                    },
+                    cells: vec![(
+                        CellZone {
+                            boundary_rings: vec![rect(0.0, -BIG, BIG, 0.0)],
+                        },
+                        5.0,
+                    )],
                 },
                 ShardZone {
                     addr: "NW".into(),
-                    zone: Aabb {
-                        min_x: -big,
-                        max_x: 0.0,
-                        min_y: 0.0,
-                        max_y: big,
-                    },
+                    cells: vec![(
+                        CellZone {
+                            boundary_rings: vec![rect(-BIG, 0.0, 0.0, BIG)],
+                        },
+                        5.0,
+                    )],
                 },
                 ShardZone {
                     addr: "NE".into(),
-                    zone: Aabb {
-                        min_x: 0.0,
-                        max_x: big,
-                        min_y: 0.0,
-                        max_y: big,
-                    },
+                    cells: vec![(
+                        CellZone {
+                            boundary_rings: vec![rect(0.0, 0.0, BIG, BIG)],
+                        },
+                        5.0,
+                    )],
                 },
             ],
         }
@@ -609,39 +727,105 @@ mod tests {
 
     #[test]
     fn far_from_boundary_loads_only_authoritative() {
-        let p = two_shards().locate(500.0, 0.0, 25.0);
+        let p = two_shards().locate(500.0, 0.0, 0.0);
         assert_eq!(p.authoritative, "A");
         assert!(p.overlaps.is_empty());
     }
 
     #[test]
     fn inside_buffer_dual_loads_neighbor() {
-        // x=990 : autoritaire A, à 10 m de la frontière (<=25) → overlap B.
-        let p = two_shards().locate(990.0, 0.0, 25.0);
+        // x=990 : autoritaire A, à 10 m de la frontière (<=25, buffer de la cellule A) → overlap B.
+        let p = two_shards().locate(990.0, 0.0, 0.0);
         assert_eq!(p.authoritative, "A");
         assert_eq!(p.overlaps, vec!["B".to_string()]);
-        // x=1000 (sur la frontière) → appartient à B (demi-ouvert), overlap A.
-        let p2 = two_shards().locate(1000.0, 0.0, 25.0);
+        // x=1000 (sur la frontière) → appartient à B (demi-ouvert, même convention que l'ancien
+        // Aabb — vérifié : `point_in_polygon` sur un rectangle exclut le bord partagé du côté
+        // dont ce bord est le max_x, l'inclut du côté dont il est le min_x), overlap A.
+        let p2 = two_shards().locate(1000.0, 0.0, 0.0);
         assert_eq!(p2.authoritative, "B");
         assert_eq!(p2.overlaps, vec!["A".to_string()]);
     }
 
     #[test]
     fn junction_near_corner_loads_three_neighbors_but_edge_loads_one() {
-        // Près du coin (-2,-2), rayon 5 : autoritaire SW, voisins SE (bord x=0, d=2),
-        // NW (bord y=0, d=2), NE (coin, d=2.83) → les 3 dans le rayon.
-        let corner = quad_shards().locate(-2.0, -2.0, 5.0);
+        // Près du coin (-2,-2), buffer 5 (baked dans chaque cellule) : autoritaire SW, voisins
+        // SE (bord x=0, d=2), NW (bord y=0, d=2), NE (coin, d=2.83) → les 3 dans le rayon.
+        let corner = quad_shards().locate(-2.0, -2.0, 0.0);
         assert_eq!(corner.authoritative, "SW");
         assert_eq!(
             corner.overlaps,
             vec!["NE".to_string(), "NW".to_string(), "SE".to_string()]
         ); // triés
 
-        // Loin du coin mais près d'un seul bord (-2,-50), rayon 5 : seul SE (x=0, d=2).
+        // Loin du coin mais près d'un seul bord (-2,-50), buffer 5 : seul SE (x=0, d=2).
         // NW (y=0, d=50) et NE (coin, d>50) hors rayon → on NE charge PAS tous les voisins.
-        let edge = quad_shards().locate(-2.0, -50.0, 5.0);
+        let edge = quad_shards().locate(-2.0, -50.0, 0.0);
         assert_eq!(edge.authoritative, "SW");
         assert_eq!(edge.overlaps, vec!["SE".to_string()]);
+    }
+
+    #[test]
+    fn locate_finds_authoritative_cell_among_multiple_in_same_shard_zone() {
+        let zone_a = CellZone {
+            boundary_rings: vec![square(0.0, 0.0, 10.0)],
+        };
+        let zone_b = CellZone {
+            boundary_rings: vec![square(100.0, 100.0, 10.0)],
+        };
+        let shard = ShardZone {
+            addr: "shard-group-1".into(),
+            cells: vec![(zone_a, 25.0), (zone_b, 25.0)],
+        };
+        let topology = ShardTopology {
+            shards: vec![shard],
+        };
+
+        let placement = topology.locate(5.0, 5.0, 0.0);
+        assert_eq!(placement.authoritative, "shard-group-1");
+    }
+
+    #[test]
+    fn locate_uses_own_cell_buffer_not_neighbor_buffer_for_overlap_threshold() {
+        // Décision 5 de la spec câblage runtime tessellation d'autorité
+        // (docs/superpowers/specs/2026-07-09-authority-tessellation-runtime-wiring-design.md) :
+        // le seuil de zone tampon utilise le `b` de LA CELLULE DU JOUEUR, pas celui du voisin
+        // candidat. Deux ShardZone adjacentes à x=1000 : A (dense, buffer=25.0) et B (périphérie,
+        // buffer=600.0).
+        let a = ShardZone {
+            addr: "A".into(),
+            cells: vec![(
+                CellZone {
+                    boundary_rings: vec![rect(-BIG, -BIG, 1000.0, BIG)],
+                },
+                25.0,
+            )],
+        };
+        let b = ShardZone {
+            addr: "B".into(),
+            cells: vec![(
+                CellZone {
+                    boundary_rings: vec![rect(1000.0, -BIG, BIG, BIG)],
+                },
+                600.0,
+            )],
+        };
+        let topology = ShardTopology { shards: vec![a, b] };
+
+        // Joueur dans A, à 30 m de la frontière (x=970). Si le seuil utilisait le buffer DE B
+        // (600.0, l'interprétation erronée du plan), 30 <= 600 donnerait un overlap — mais le
+        // seuil doit utiliser le buffer DE A (25.0, la cellule du joueur) : 30 > 25 → pas d'overlap.
+        let p1 = topology.locate(970.0, 0.0, 0.0);
+        assert_eq!(p1.authoritative, "A");
+        assert!(
+            p1.overlaps.is_empty(),
+            "le seuil doit utiliser le buffer de A (25.0), pas celui de B (600.0)"
+        );
+
+        // Joueur dans B, à 30 m de la frontière (x=1030) : le buffer DE B (600.0, la cellule du
+        // joueur) s'applique — 30 <= 600 → overlap A.
+        let p2 = topology.locate(1030.0, 0.0, 0.0);
+        assert_eq!(p2.authoritative, "B");
+        assert_eq!(p2.overlaps, vec!["A".to_string()]);
     }
 
     #[test]
@@ -654,5 +838,53 @@ mod tests {
         assert_eq!(pol.radius_for(Rank::Player), 25.0);
         assert_eq!(pol.radius_for(Rank::Moderator), 50.0);
         assert_eq!(pol.radius_for(Rank::GameMaster), 75.0);
+    }
+
+    #[test]
+    fn cellzone_contains_point_inside_simple_square() {
+        // Carré [0,0]-[10,0]-[10,10]-[0,10]-[0,0] (anneau fermé, premier==dernier point).
+        let zone = CellZone {
+            boundary_rings: vec![square(0.0, 0.0, 10.0)],
+        };
+        assert!(zone.contains(5.0, 5.0));
+        assert!(!zone.contains(15.0, 5.0));
+    }
+
+    #[test]
+    fn cellzone_contains_checks_all_rings_for_multi_polygon_cell() {
+        // Une cellule à deux quartiers disjoints (deux anneaux séparés) — le point appartient à la
+        // cellule s'il est dans AU MOINS UN des anneaux (D4 de l'ancienne spec district-topology,
+        // toujours valide : pas de fusion géométrique).
+        let zone = CellZone {
+            boundary_rings: vec![square(0.0, 0.0, 10.0), square(100.0, 100.0, 10.0)],
+        };
+        assert!(zone.contains(5.0, 5.0));
+        assert!(zone.contains(105.0, 105.0));
+        assert!(!zone.contains(50.0, 50.0));
+    }
+
+    #[test]
+    fn cellzone_dist_is_distance_to_nearest_edge_even_when_point_is_inside() {
+        // Convention réelle de `dist_point_polygon` (tools/authority-tessellation/src/geometry.rs) :
+        // distance au segment le plus proche du polygone, PAS 0 quand le point est dedans (ce
+        // n'est pas une distance signée). Vérifié en lisant l'implémentation + son test
+        // `dist_to_polygon_edge` (point à 5 unités au-dessus d'un carré 10x10 → dist == 5.0), qui
+        // s'applique symétriquement à un point à l'intérieur équidistant des 4 bords.
+        let zone = CellZone {
+            boundary_rings: vec![square(0.0, 0.0, 10.0)],
+        };
+        // Centre du carré : équidistant des 4 bords, chacun à 5.0.
+        assert!((zone.dist(5.0, 5.0) - 5.0).abs() < 1e-6);
+        // Point hors du polygone : distance normale au bord le plus proche.
+        assert!((zone.dist(15.0, 5.0) - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cellzone_dist_takes_the_min_across_all_rings_for_multi_polygon_cell() {
+        let zone = CellZone {
+            boundary_rings: vec![square(0.0, 0.0, 10.0), square(100.0, 100.0, 10.0)],
+        };
+        // Point à x=50 : dist au 1er anneau (bord x=10) = 40 ; au 2e (bord x=100) = 50 → min = 40.
+        assert!((zone.dist(50.0, 5.0) - 40.0).abs() < 1e-6);
     }
 }

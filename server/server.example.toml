@@ -21,26 +21,12 @@ store_path = "players.json"
 listen_addr = "0.0.0.0:27020"
 advertise_addr = "51.38.189.234:27020"
 
+# Topologie d'autorité Voronoï (tools/authority-tessellation) : authority.json (copié à côté de
+# ce manifeste) porte la géométrie des cellules ; server_count sélectionne le groupement
+# assignment_patterns[N] de l'artefact (remplace l'ancien arbre de splits/shards).
 [runtime.topology]
-active_preset = "2-shards"
-
-[[runtime.topology.splits]]
-id = "root"
-axis = "x"
-at = 1000.0
-left = "shard-a"
-right = "shard-b"
-
-[[runtime.topology.shards]]
-id = "shard-a"
-listen_addr = "127.0.0.1:27030"
-default_entry = true
-spawn_points = [[2387.0, -1295.0, 63.0]]
-
-[[runtime.topology.shards]]
-id = "shard-b"
-listen_addr = "127.0.0.1:27031"
-spawn_points = []
+authority_artifact = "authority.json"
+server_count = 2
 
 [runtime.radius]
 base = 25.0

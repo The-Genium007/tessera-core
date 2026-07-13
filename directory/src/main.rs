@@ -157,8 +157,13 @@ fn cmd_topology_render(
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
     let manifest = server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
-    let zones = server::manifest::flatten_topology(&manifest.runtime.topology)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let zones = server::manifest::load_authority_topology(
+        &manifest.runtime.topology,
+        manifest_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let svg = render::render_svg(&manifest.runtime.topology, &zones);
     std::fs::write(out, svg)?;
     println!("Rendu dans {}", out.display());
@@ -170,8 +175,13 @@ fn cmd_topology_export(
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
     let manifest = server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
-    let zones = server::manifest::flatten_topology(&manifest.runtime.topology)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let zones = server::manifest::load_authority_topology(
+        &manifest.runtime.topology,
+        manifest_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let v = shard_map::shard_map_json(&manifest, &zones);
     std::fs::write(out, serde_json::to_vec_pretty(&v)?)?;
     println!("Carte des shards exportée dans {}", out.display());
