@@ -510,13 +510,8 @@ mod tests {
             advertise_addr = "51.38.189.234:27020"
 
             [runtime.topology]
-            active_preset = "1-shard"
-
-            [[runtime.topology.shards]]
-            id = "shard-a"
-            listen_addr = "127.0.0.1:27030"
-            default_entry = true
-            spawn_points = [[0.0, 0.0, 0.0]]
+            authority_artifact = "authority.json"
+            server_count = 1
 
             [runtime.radius]
             base = 25.0
@@ -557,13 +552,8 @@ mod tests {
             advertise_addr = "51.38.189.234:27020"
 
             [runtime.topology]
-            active_preset = "1-shard"
-
-            [[runtime.topology.shards]]
-            id = "shard-a"
-            listen_addr = "127.0.0.1:27030"
-            default_entry = true
-            spawn_points = [[0.0, 0.0, 0.0]]
+            authority_artifact = "authority.json"
+            server_count = 1
 
             [runtime.radius]
             base = 25.0
