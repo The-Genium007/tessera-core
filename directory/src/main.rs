@@ -147,7 +147,19 @@ fn cmd_verify(
 }
 
 fn cmd_topology_check(manifest_path: &std::path::Path) -> anyhow::Result<()> {
-    server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
+    let manifest = server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
+    // Valide aussi la résolution complète de la topologie d'autorité (pas seulement les champs
+    // scalaires du manifeste) : un `server_count` sans groupement correspondant dans
+    // `assignment_patterns`, ou un `authority_artifact` introuvable/invalide, doivent faire
+    // échouer `check` — c'est la référence pendante analogue à l'ancien schéma BSP
+    // (`right`/`left` pointant vers un shard inexistant).
+    server::manifest::load_authority_topology(
+        &manifest.runtime.topology,
+        manifest_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     println!("Topologie valide.");
     Ok(())
 }

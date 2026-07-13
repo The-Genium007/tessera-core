@@ -26,5 +26,9 @@ fn render_produces_non_empty_svg() {
 
     let content = std::fs::read_to_string(&out).unwrap();
     assert!(content.contains("<svg"));
-    assert!(content.contains("shard-a") || content.contains("127.0.0.1:27030"));
+    // Labels de groupe post-Groupe G (tessellation Voronoï, remplace les anciens noms de
+    // shard "shard-a"/adresse BSP) : "group-N", un par élément de assignment_patterns[N].
+    // server.example.toml a server_count = 2 → group-0 et group-1 attendus.
+    assert!(content.contains("group-0"));
+    assert!(content.contains("group-1"));
 }
