@@ -13,6 +13,35 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Postgres de test pour les `#[sqlx::test]` de `postgres_store.rs` (Task D1) et Redis de test
+    # pour les tests de `hot_state_cache.rs` (Task D2) — même config que
+    # tessera-core/../.github/workflows/server-image.yml du monorepo (ce fichier était resté sans
+    # ces services, ce qui faisait échouer 13 tests ici alors qu'ils passent dans le monorepo).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
