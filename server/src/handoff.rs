@@ -222,6 +222,30 @@ impl RadiusPolicy {
 use crate::internal_net::event_to_client_event_frame;
 use crate::transport::{ClientId, TransportEvent};
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
+
+/// Seuil de stabilité avant bascule d'autorité d'écriture — distinct du double-chargement AoI
+/// (immédiat, cf. `overlaps`) : l'écriture ne bascule que si le joueur reste côté nouveau shard
+/// un minimum de temps, pour absorber un joueur oscillant à la frontière (design stockage
+/// 2026-07-09, décision explicite contre la double-écriture multi-maître).
+const WRITE_AUTHORITY_STABILITY_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// Décide si l'autorité d'ÉCRITURE de l'état chaud (`HotStateCache`, Task D2) d'un joueur doit
+/// basculer du shard `current_authoritative` vers `new_placement.authoritative`. Un seul écrivain
+/// à la fois : tant que le seuil de stabilité n'est pas atteint, le shard courant reste seul à
+/// écrire — le shard voisin en zone tampon peut lire (`HotStateCache::read`) mais n'écrit jamais
+/// avant la bascule. Pure, sans réseau : `time_since_boundary_cross` est fourni par l'appelant
+/// (horloge du chargement de shard, hors scope ici).
+pub fn should_transfer_write_authority(
+    current_authoritative: &str,
+    new_placement: &Placement,
+    time_since_boundary_cross: Duration,
+) -> bool {
+    if new_placement.authoritative == current_authoritative {
+        return false;
+    }
+    time_since_boundary_cross >= WRITE_AUTHORITY_STABILITY_THRESHOLD
+}
 
 /// Action de chargement : des frames `ClientEvent` à écrire à un shard donné.
 #[derive(Debug)]
@@ -888,5 +912,119 @@ mod tests {
         };
         // Point à x=50 : dist au 1er anneau (bord x=10) = 40 ; au 2e (bord x=100) = 50 → min = 40.
         assert!((zone.dist(50.0, 5.0) - 40.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn write_authority_does_not_transfer_before_stability_threshold() {
+        let placement = Placement {
+            authoritative: "shard-b".into(),
+            overlaps: vec!["shard-a".into()],
+        };
+        let should_transfer = should_transfer_write_authority(
+            "shard-a",
+            &placement,
+            Duration::from_millis(500), // sous le seuil (proposé 1-2s dans la spec)
+        );
+        assert!(!should_transfer);
+    }
+
+    #[test]
+    fn write_authority_transfers_after_stability_threshold() {
+        let placement = Placement {
+            authoritative: "shard-b".into(),
+            overlaps: vec!["shard-a".into()],
+        };
+        let should_transfer =
+            should_transfer_write_authority("shard-a", &placement, Duration::from_secs(2));
+        assert!(should_transfer);
+    }
+
+    #[test]
+    fn write_authority_never_transfers_if_still_same_shard() {
+        let placement = Placement {
+            authoritative: "shard-a".into(),
+            overlaps: vec![],
+        };
+        let should_transfer =
+            should_transfer_write_authority("shard-a", &placement, Duration::from_secs(10));
+        assert!(!should_transfer); // rien à transférer, déjà autoritaire
+    }
+
+    #[test]
+    fn rapid_flapping_never_triggers_transfer() {
+        // Simule un joueur qui oscille toutes les 300ms entre shard-a et shard-b pendant 5 secondes
+        // — à aucun moment le temps de stabilité continue ne dépasse le seuil, donc devrait rester
+        // toujours sur shard-a (jamais de transfert). Vérifie la propriété centrale de la décision
+        // "un seul écrivain + hystérésis" retenue contre la double-écriture.
+        let mut current_authoritative = "shard-a".to_string();
+        let mut time_stable = Duration::ZERO;
+        for _tick in 0..17 {
+            // 17 * 300ms ≈ 5.1s d'oscillation
+            let placement = Placement {
+                authoritative: "shard-b".into(),
+                overlaps: vec!["shard-a".into()],
+            };
+            time_stable += Duration::from_millis(300);
+            if should_transfer_write_authority(&current_authoritative, &placement, time_stable) {
+                current_authoritative = "shard-b".into();
+                time_stable = Duration::ZERO; // reset : on vient de transférer
+            } else {
+                time_stable = Duration::ZERO; // reset : oscillation = jamais 2 ticks d'affilée du même côté
+            }
+        }
+        assert_eq!(current_authoritative, "shard-a");
+    }
+
+    /// Nécessite redis://127.0.0.1:6379 local — lancer manuellement avec `cargo test -- --ignored`.
+    /// Aucun Redis n'est démarré automatiquement en CI ni via `docker-compose.yml` pour ce crate
+    /// (même constat que les tests existants de `hot_state_cache.rs`, qui ne sont eux-mêmes PAS
+    /// protégés par `#[ignore]` aujourd'hui — incohérence pré-existante signalée dans le rapport
+    /// de la Task D4 ; corriger `hot_state_cache.rs` est hors du scope de fichiers de cette tâche).
+    #[tokio::test]
+    #[ignore]
+    async fn neighbor_shard_reads_hot_state_during_buffer_before_authority_transfers() {
+        use crate::hot_state_cache::HotStateCache;
+
+        // Deux handles logiques (un par "shard"), même Redis de test — cohérent avec la note du
+        // brief : pas besoin de deux process Redis séparés pour prouver la lecture croisée.
+        let authoritative_shard_cache = HotStateCache::connect("redis://127.0.0.1:6379")
+            .await
+            .unwrap();
+        let neighbor_shard_cache = HotStateCache::connect("redis://127.0.0.1:6379")
+            .await
+            .unwrap();
+
+        let subject = "test-subject-d4-buffer-read";
+        let position = [42.0, 7.0, 0.0];
+
+        // Le shard autoritaire écrit la position (seul écrivain à cet instant : le joueur vient
+        // d'entrer en zone tampon, `should_transfer_write_authority` renverrait `false` ici).
+        authoritative_shard_cache
+            .write(subject, position)
+            .await
+            .unwrap();
+
+        // Le shard voisin (en overlap) doit pouvoir LIRE cette position dès l'entrée en zone
+        // tampon, sans jamais écrire lui-même tant que le seuil de stabilité n'est pas atteint.
+        let placement = Placement {
+            authoritative: "authoritative-shard".into(),
+            overlaps: vec!["neighbor-shard".into()],
+        };
+        let should_neighbor_write = should_transfer_write_authority(
+            "authoritative-shard",
+            &placement,
+            Duration::from_millis(500), // vient d'entrer dans le tampon, sous le seuil
+        );
+        assert!(
+            !should_neighbor_write,
+            "le voisin ne doit pas encore écrire pendant la fenêtre de stabilité"
+        );
+
+        let read_by_neighbor = neighbor_shard_cache.read(subject).await.unwrap();
+        assert_eq!(
+            read_by_neighbor,
+            Some(position),
+            "le shard voisin doit pouvoir lire l'état chaud écrit par l'autoritaire"
+        );
     }
 }
