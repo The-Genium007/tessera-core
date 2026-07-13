@@ -346,6 +346,40 @@ pub fn load(path: &std::path::Path) -> Result<Manifest, String> {
     parse_and_validate(&s)
 }
 
+/// Nom de la variable d'environnement Dokploy pour surcharger `runtime.redis_url` — voir
+/// `resolve_redis_url`.
+pub const TESSERA_REDIS_URL_ENV: &str = "TESSERA_REDIS_URL";
+/// Nom de la variable d'environnement Dokploy pour surcharger `runtime.postgres_url` — voir
+/// `resolve_postgres_url`.
+pub const TESSERA_POSTGRES_URL_ENV: &str = "TESSERA_POSTGRES_URL";
+
+/// Résout l'URL Redis effective : la variable d'environnement `TESSERA_REDIS_URL` (si présente
+/// et non vide) l'emporte sur `runtime.redis_url` du manifeste — même pattern que
+/// `TESSERA_ROOT_ADMINS`/`TESSERA_PLAYTEST_ALL_ADMIN` (secret/valeur d'environnement Dokploy,
+/// pas de rebuild d'image ni d'édition du manifeste monté pour changer d'instance Redis). Prend
+/// `env_value` en paramètre (plutôt que de lire `std::env::var` en interne) pour rester une
+/// fonction pure et testable sans dépendre de l'environnement du process de test.
+pub fn resolve_redis_url(manifest_value: &str, env_value: Option<&str>) -> String {
+    match env_value {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => manifest_value.to_string(),
+    }
+}
+
+/// Résout l'URL Postgres effective : la variable d'environnement `TESSERA_POSTGRES_URL` (si
+/// présente et non vide) l'emporte sur `runtime.postgres_url` du manifeste — mêmes raisons que
+/// `resolve_redis_url`. Reste `None` si ni l'env var ni le manifeste ne la fournissent (serveur
+/// privé, `identity.public = false`, cas inchangé).
+pub fn resolve_postgres_url(
+    manifest_value: Option<&str>,
+    env_value: Option<&str>,
+) -> Option<String> {
+    match env_value {
+        Some(v) if !v.is_empty() => Some(v.to_string()),
+        _ => manifest_value.map(|s| s.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,6 +970,68 @@ mod tests {
         assert_eq!(
             m.runtime.postgres_url,
             Some("postgres://pg-service/tessera".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_redis_url_falls_back_to_manifest_when_env_absent() {
+        assert_eq!(
+            resolve_redis_url("redis://manifest-host:6379", None),
+            "redis://manifest-host:6379"
+        );
+    }
+
+    #[test]
+    fn resolve_redis_url_falls_back_to_manifest_when_env_empty() {
+        assert_eq!(
+            resolve_redis_url("redis://manifest-host:6379", Some("")),
+            "redis://manifest-host:6379"
+        );
+    }
+
+    #[test]
+    fn resolve_redis_url_prefers_env_when_present() {
+        assert_eq!(
+            resolve_redis_url(
+                "redis://manifest-host:6379",
+                Some("redis://dokploy-host:6379")
+            ),
+            "redis://dokploy-host:6379"
+        );
+    }
+
+    #[test]
+    fn resolve_postgres_url_falls_back_to_manifest_when_env_absent() {
+        assert_eq!(
+            resolve_postgres_url(Some("postgres://manifest/tessera"), None),
+            Some("postgres://manifest/tessera".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_postgres_url_prefers_env_when_present() {
+        assert_eq!(
+            resolve_postgres_url(
+                Some("postgres://manifest/tessera"),
+                Some("postgres://dokploy/tessera")
+            ),
+            Some("postgres://dokploy/tessera".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_postgres_url_stays_none_when_neither_set() {
+        assert_eq!(resolve_postgres_url(None, None), None);
+    }
+
+    #[test]
+    fn resolve_postgres_url_env_alone_is_enough_without_manifest_value() {
+        // Un serveur privé (identity.public = false) n'a jamais postgres_url dans son manifeste ;
+        // s'il bascule en public via env var seule (sans éditer le manifeste monté), l'env var
+        // doit suffire.
+        assert_eq!(
+            resolve_postgres_url(None, Some("postgres://dokploy/tessera")),
+            Some("postgres://dokploy/tessera".to_string())
         );
     }
 }

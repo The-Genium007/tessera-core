@@ -44,15 +44,28 @@ async fn main() -> std::io::Result<()> {
     // Bascule FileStore/PostgresStore selon identity.public (câblage runtime, design stockage
     // 2026-07-09) : un serveur privé (défaut) garde exactement le comportement historique
     // (FileStore local) ; un serveur public route vers Postgres, indexé par sub OIDC vérifié.
+    // `TESSERA_POSTGRES_URL`/`TESSERA_REDIS_URL` (Dokploy) l'emportent sur le manifeste quand
+    // présentes — voir `manifest::resolve_postgres_url`/`resolve_redis_url` — pour changer
+    // d'instance sans rebuild d'image ni édition du manifeste monté.
+    let postgres_url_env = std::env::var(server::manifest::TESSERA_POSTGRES_URL_ENV).ok();
+    let postgres_url = server::manifest::resolve_postgres_url(
+        manifest.runtime.postgres_url.as_deref(),
+        postgres_url_env.as_deref(),
+    );
+    let redis_url_env = std::env::var(server::manifest::TESSERA_REDIS_URL_ENV).ok();
+    let redis_url =
+        server::manifest::resolve_redis_url(&manifest.runtime.redis_url, redis_url_env.as_deref());
+
     let store = if manifest.identity.public {
-        let postgres_url = manifest.runtime.postgres_url.as_deref().unwrap_or_else(|| {
+        let postgres_url = postgres_url.unwrap_or_else(|| {
             eprintln!(
-                "manifeste invalide ({manifest_path}): identity.public = true nécessite runtime.postgres_url"
+                "manifeste invalide ({manifest_path}): identity.public = true nécessite runtime.postgres_url ou {}",
+                server::manifest::TESSERA_POSTGRES_URL_ENV
             );
             std::process::exit(1);
         });
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect(postgres_url)
+            .connect(&postgres_url)
             .await
             .unwrap_or_else(|e| {
                 eprintln!("connexion Postgres échouée ({postgres_url}): {e}");
@@ -68,13 +81,10 @@ async fn main() -> std::io::Result<()> {
         ))
     };
 
-    let hot_state = server::hot_state_cache::HotStateCache::connect(&manifest.runtime.redis_url)
+    let hot_state = server::hot_state_cache::HotStateCache::connect(&redis_url)
         .await
         .unwrap_or_else(|e| {
-            eprintln!(
-                "connexion Redis (hot state) échouée ({}): {e:?}",
-                manifest.runtime.redis_url
-            );
+            eprintln!("connexion Redis (hot state) échouée ({redis_url}): {e:?}");
             std::process::exit(1);
         });
 

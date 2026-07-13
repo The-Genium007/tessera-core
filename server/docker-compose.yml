@@ -55,6 +55,13 @@ services:
       # on veut tester l'anti-triche aussi, pas seulement l'auth. À ne réactiver que si
       # besoin d'un bypass de développement ultérieurement (ne jamais pour prod).
       TESSERA_PLAYTEST_ALL_ADMIN: "false"
+      # Surchargent runtime.redis_url/runtime.postgres_url du manifeste monté quand définies
+      # (voir manifest::resolve_redis_url/resolve_postgres_url) — pour changer d'instance
+      # Redis/Postgres sans rebuild d'image ni édition du manifeste. Vides par défaut : absence
+      # de valeur ⇒ retombe sur le manifeste (comportement inchangé). TESSERA_POSTGRES_URL n'est
+      # nécessaire que si identity.public = true dans le manifeste.
+      TESSERA_REDIS_URL: ${TESSERA_REDIS_URL:-}
+      TESSERA_POSTGRES_URL: ${TESSERA_POSTGRES_URL:-}
     depends_on:
       - shard-a
       - shard-b
