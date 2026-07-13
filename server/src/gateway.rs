@@ -2298,6 +2298,101 @@ mod tests {
         );
     }
 
+    // --- Test central de non-régression : visibilité AoI symétrique (bug playtest 1) -----------
+    //
+    // Le bug original observé en playtest 1 : deux joueurs connectés avec le même `display_name`
+    // partageaient silencieusement le même enregistrement de persistance, produisant une
+    // visibilité AoI ASYMÉTRIQUE (un joueur voyait l'autre, pas l'inverse). Ce test exerce les
+    // DEUX étages réellement câblés en prod bout en bout :
+    //   1. le Gateway (`resolve_join_key`, Task C2) : deux `sub` distincts avec le même
+    //      `display_name` doivent produire deux clés de persistance (`keys`) distinctes, jamais
+    //      partagées — exactement la racine du bug ;
+    //   2. le Shard (`crate::server_loop::Server` + `crate::world::World::snapshot_for`, code de
+    //      production réel, pas un mock) : une fois les deux connexions distinctes établies
+    //      (`ClientId` assignés par le transport, jamais dérivés de `display_name`/`sub`), chacune
+    //      envoie une `PositionUpdate` et le snapshot renvoyé par `Server::tick` à CHAQUE client
+    //      doit contenir l'autre — symétriquement. Une régression qui referait fuiter
+    //      `display_name` jusque dans l'identité de connexion (ex: un `ClientId` dérivé du nom
+    //      plutôt que de la connexion transport) casserait cette symétrie et ce test le détecterait.
+    #[tokio::test]
+    async fn two_accounts_with_same_display_name_have_symmetric_aoi_visibility() {
+        use crate::server_loop::Server;
+        use crate::transport::InMemoryTransport;
+
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let display_name = "Lucas"; // collision de pseudo, exactement le scénario du playtest 1
+
+        let claims_alice = crate::jwks::Claims {
+            sub: "oidc-sub-alice".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token_alice = encode_join_test_token(&claims_alice, &material.encoding_key);
+        let claims_bob = crate::jwks::Claims {
+            sub: "oidc-sub-bob".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token_bob = encode_join_test_token(&claims_bob, &material.encoding_key);
+
+        // --- Étage Gateway : les deux Join sont acceptés, avec des clés de persistance distinctes.
+        let key_alice = resolve_join_key(true, display_name, &token_alice, &jwks_cache)
+            .expect("alice : join accepté malgré la collision de display_name");
+        let key_bob = resolve_join_key(true, display_name, &token_bob, &jwks_cache)
+            .expect("bob : join accepté malgré la collision de display_name");
+        assert_ne!(
+            key_alice, key_bob,
+            "deux sub distincts doivent produire deux clés de persistance distinctes"
+        );
+
+        // --- Étage Shard : deux connexions distinctes (ClientId 1 = alice, ClientId 2 = bob),
+        // chacune bouge, puis on vérifie la symétrie du snapshot AoI.
+        let alice_cid: u64 = 1;
+        let bob_cid: u64 = 2;
+        let mut server = Server::new(1000.0); // rayon large : la distance n'est pas ce qu'on teste
+        let mut t = InMemoryTransport::new();
+
+        t.inject(TransportEvent::Connected(alice_cid));
+        t.inject(TransportEvent::Connected(bob_cid));
+        t.inject(TransportEvent::Message {
+            from: alice_cid,
+            data: crate::gateway_routing::encode_position_update([10.0, 0.0, 0.0]),
+        });
+        t.inject(TransportEvent::Message {
+            from: bob_cid,
+            data: crate::gateway_routing::encode_position_update([20.0, 0.0, 0.0]),
+        });
+
+        server.tick(&mut t);
+
+        // Alice doit voir Bob.
+        let sent_to_alice = t.take_sent(alice_cid);
+        assert_eq!(sent_to_alice.len(), 1, "un snapshot envoyé à alice");
+        let env_alice = flatbuffers::root::<protocol::ServerEnvelope>(&sent_to_alice[0]).unwrap();
+        let snap_alice = env_alice.msg_as_snapshot().unwrap();
+        let players_alice = snap_alice.players().unwrap();
+        assert_eq!(
+            players_alice.len(),
+            1,
+            "alice doit voir exactement un autre joueur (bob)"
+        );
+        assert_eq!(players_alice.get(0).id(), bob_cid);
+
+        // Bob doit voir Alice — symétriquement, malgré le display_name partagé.
+        let sent_to_bob = t.take_sent(bob_cid);
+        assert_eq!(sent_to_bob.len(), 1, "un snapshot envoyé à bob");
+        let env_bob = flatbuffers::root::<protocol::ServerEnvelope>(&sent_to_bob[0]).unwrap();
+        let snap_bob = env_bob.msg_as_snapshot().unwrap();
+        let players_bob = snap_bob.players().unwrap();
+        assert_eq!(
+            players_bob.len(),
+            1,
+            "bob doit voir exactement un autre joueur (alice) — c'est la régression exacte \
+             du playtest 1 (asymétrie de visibilité) qui ne doit plus jamais se reproduire"
+        );
+        assert_eq!(players_bob.get(0).id(), alice_cid);
+    }
+
     // --- resolve_protocol_version / resolve_whitelist / Leave (Task C3) --------------------
 
     #[test]
