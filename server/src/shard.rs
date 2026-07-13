@@ -129,4 +129,45 @@ mod tests {
             "shard_main devrait retourner Ok(()) sur arrêt propre"
         );
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shard_flushes_cleanly_on_shutdown_signal_while_a_connection_is_active() {
+        // Contrairement au test précédent (aucune connexion), ici une vraie connexion
+        // Gateway est établie avant l'envoi du signal — le shard est donc entré dans la
+        // boucle interne par-connexion. Ce test prouve que la course d'arrêt y est aussi
+        // gagnée (l'arm `shutdown.recv()` du `select!` interne), et que le shard ne reste
+        // pas bloqué à attendre la fin de la connexion Gateway. Port différent de
+        // 127.0.0.1:27131 (utilisé par le test ci-dessus) pour éviter toute collision entre
+        // tests exécutés en parallèle.
+        let addr = "127.0.0.1:27132";
+        let handle =
+            tokio::spawn(async move { super::shard_main(addr, 1000.0, "127.0.0.1:0").await });
+
+        // Laisse le shard se binder et enregistrer son ShutdownSignal avant de se connecter.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let _sock = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("la connexion TCP au shard devrait réussir");
+
+        // Laisse le shard accepter la connexion et entrer dans la boucle interne
+        // par-connexion avant d'envoyer le signal.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        send_self_sigterm();
+
+        let result = tokio::time::timeout(Duration::from_secs(3), handle)
+            .await
+            .expect(
+                "shard_main aurait dû sortir avant le timeout au lieu d'attendre la fin \
+                 de la connexion Gateway",
+            )
+            .expect("la tâche du shard n'aurait pas dû paniquer");
+
+        assert!(
+            result.is_ok(),
+            "shard_main devrait retourner Ok(()) sur arrêt propre même avec une connexion active"
+        );
+    }
 }

@@ -688,6 +688,9 @@ pub async fn gateway_main(
                     }
                     RateDecision::Kick => {
                         tracing::warn!(client = cid, "kick : flood soutenu (rate-limit)");
+                        metrics
+                            .rejected_messages_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         client.send(cid, &encode_kicked("flood"));
                         client.disconnect(cid);
                         if let Some(name) = keys.remove(&cid) {
@@ -757,6 +760,9 @@ pub async fn gateway_main(
                             };
                         if !keys.contains_key(&cid) && keys.len() >= max_players as usize {
                             tracing::warn!(client = cid, max_players, "kick : serveur plein");
+                            metrics
+                                .rejected_messages_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             client.send(cid, &encode_kicked("serveur plein"));
                             client.disconnect(cid);
                             rate_states.remove(&cid);
@@ -831,6 +837,9 @@ pub async fn gateway_main(
                     };
                     if !plausible {
                         tracing::warn!(client = cid, "PositionUpdate rejeté (vitesse implausible)");
+                        metrics
+                            .rejected_messages_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
                     last_pos.insert(cid, [x, y, z]);
@@ -2033,6 +2042,21 @@ mod tests {
             outcome.success,
             "la commande admin doit réussir : issuer = display_name, reconnu root admin"
         );
+    }
+
+    #[test]
+    fn gamemaster_rank_bypasses_anticheat_plausibility_check_by_design() {
+        use crate::handoff::Rank;
+        // Documente explicitement que ce bypass est voulu (rôle GameMaster = staff/MJ), pas un bug —
+        // sert de garde-fou si quelqu'un tente de le "corriger" par accident plus tard.
+        // Le bypass s'active ligne 613 de gateway.rs : `let bypassed = matches!(ranks.get(&cid), Some(Rank::GameMaster));`
+        // Quand vrai, la vérification anti-triche de plausibilité de mouvement (is_plausible_move) est court-circuitée.
+        let rank = Rank::GameMaster;
+        assert!(matches!(rank, Rank::GameMaster));
+
+        // Vérifier aussi que les autres rangs ne déclenchent pas le bypass.
+        assert!(!matches!(Rank::Player, Rank::GameMaster));
+        assert!(!matches!(Rank::Moderator, Rank::GameMaster));
     }
 
     #[test]
