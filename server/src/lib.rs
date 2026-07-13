@@ -14,6 +14,7 @@ pub mod manifest;
 pub mod metrics;
 pub mod permissions;
 pub mod persistence;
+pub mod player_store_impl;
 pub mod postgres_store;
 pub mod rate_limit;
 pub mod server_loop;
