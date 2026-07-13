@@ -294,6 +294,58 @@ pub fn resolve_is_root(
     playtest_all_admin || root_admins.contains(issuer)
 }
 
+/// Vrai si le compte doit être traité comme admin racine, en priorisant le `sub` OIDC vérifié
+/// quand il est disponible (serveur public), avec repli sur `display_name` sinon (Task D3 —
+/// migration de l'indexation admin vers `sub`, ferme le bug playtest 1 : deux comptes distincts
+/// avec le même `display_name` ne doivent jamais partager d'autorité admin). `sub` est `None` sur
+/// un serveur privé (`identity.public = false`) — comportement alors strictement identique à
+/// `resolve_is_root` seule. Le repli sur `display_name` reste actif même quand `sub` est fourni :
+/// migration progressive, un opérateur qui a listé un display_name dans `TESSERA_ROOT_ADMINS`
+/// avant cette tâche ne perd pas son accès root tant qu'il n'a pas basculé vers le `sub`.
+pub fn is_root_by_sub_or_display_name(
+    sub: Option<&str>,
+    display_name: &str,
+    root_admins: &std::collections::HashSet<String>,
+    playtest_all_admin: bool,
+) -> bool {
+    if let Some(sub) = sub {
+        if resolve_is_root(sub, root_admins, playtest_all_admin) {
+            return true;
+        }
+    }
+    resolve_is_root(display_name, root_admins, playtest_all_admin)
+}
+
+/// Résout l'`AdminRecord` d'un compte en priorisant une recherche par `sub` OIDC vérifié quand il
+/// est disponible, avec repli sur `display_name` (Task D3 — même logique et même justification
+/// que `is_root_by_sub_or_display_name`). Le repli couvre le cas d'un compte promu par `/promote`
+/// avant son premier Join sur un serveur public : son `AdminRecord` existe déjà (créé par
+/// `admin_commands.rs`, toujours avec `sub: None`) mais n'a pas encore été enrichi du `sub`
+/// découvert au Join — sans repli, cet admin perdrait son autorité tant qu'il n'a pas rejoint.
+///
+/// **Garde anti-collision (root cause du bug playtest 1)** : le repli sur `display_name` ne
+/// matche JAMAIS un enregistrement dont le `sub` est déjà renseigné ET différent du `sub`
+/// recherché — sinon un second compte revendiquant un display_name déjà lié à un autre `sub`
+/// hériterait silencieusement de l'`AdminRecord` (et donc des permissions/rang) du premier. Le
+/// repli ne s'applique que quand l'enregistrement candidat n'a pas encore de `sub` connu
+/// (`sub: None`, admin jamais vu sur un serveur public) ou quand on ne connaît pas nous-mêmes de
+/// `sub` pour ce client (serveur privé).
+pub fn resolve_admin_record<'a>(
+    sub: Option<&str>,
+    display_name: &str,
+    admins: &'a [crate::permissions::AdminRecord],
+) -> Option<&'a crate::permissions::AdminRecord> {
+    if let Some(s) = sub {
+        if let Some(found) = admins.iter().find(|a| a.sub.as_deref() == Some(s)) {
+            return Some(found);
+        }
+        return admins
+            .iter()
+            .find(|a| a.display_name == display_name && a.sub.is_none());
+    }
+    admins.iter().find(|a| a.display_name == display_name)
+}
+
 /// Décide, au moment du `Join`, la clé effective de persistance (`store.load`/`store.save`) pour
 /// ce client (design 2026-07-09, launcher-server-auth §4) :
 /// - Serveur privé (`identity_public = false`, défaut) : comportement historique inchangé, le
@@ -600,14 +652,18 @@ pub async fn gateway_main(
     let mut permissions: HashMap<u64, Vec<String>> = HashMap::new();
     // Persistance : clé EFFECTIVE (display_name sur serveur privé, `sub` OIDC vérifié sur
     // serveur public — Task C2), dernière position, et résidence chargée — par client. Alimente
-    // `store.load`/`store.save`/`save_all_known` : NE PAS lire cette map pour résoudre une
-    // identité admin (cf. `display_names` ci-dessous).
+    // `store.load`/`store.save`/`save_all_known`. Depuis Task D3, cette map sert AUSSI de source
+    // du `sub` vérifié pour la résolution d'autorité admin sur serveur public (voir
+    // `is_root_by_sub_or_display_name`/`resolve_admin_record`, lus via `keys.get(&cid)` UNIQUEMENT
+    // quand `identity_public` est vrai — sur serveur privé cette map porte le display_name, pas un
+    // `sub`, et ne doit jamais être lue à cette fin).
     let mut keys: HashMap<u64, String> = HashMap::new();
-    // Pseudo affiché / identité admin (display_name) — toujours le nom brut du Join, jamais le
-    // `sub` OIDC vérifié même sur un serveur public. `admin_store`/`root_admins` restent indexés
-    // par display_name tant que Task D3 (migration de l'indexation admin vers `sub`) n'est pas
-    // faite ; `keys` (au-dessus) porte la clé de PERSISTANCE (effective_key), qui elle diffère du
-    // display_name sur un serveur public — ne pas confondre les deux usages.
+    // Pseudo affiché (display_name) — toujours le nom brut du Join, jamais le `sub` OIDC vérifié
+    // même sur un serveur public. Depuis Task D3, `admin_store`/`root_admins` sont résolus en
+    // priorisant le `sub` (via `keys`, cf. ci-dessus) quand disponible, avec repli sur ce
+    // display_name sinon (serveur privé, ou compte encore jamais vu sur ce serveur public) — les
+    // deux maps restent séparées : `keys` porte la clé de PERSISTANCE (effective_key), qui diffère
+    // du display_name sur un serveur public ; ne pas les confondre.
     let mut display_names: HashMap<u64, String> = HashMap::new();
     let mut last_pos: HashMap<u64, [f32; 3]> = HashMap::new();
     // Horodatage de la dernière PositionUpdate ACCEPTÉE par client (absent tant qu'aucune
@@ -851,12 +907,45 @@ pub async fn gateway_main(
                         );
                         residence.insert(cid, record.and_then(|r| r.residence));
                         last_pos.insert(cid, pos); // départ tant qu'aucune position réelle
-                        let is_root = resolve_is_root(&name, &root_admins, playtest_all_admin);
-                        let admin_record = admin_store
-                            .admins
-                            .iter()
-                            .find(|a| a.display_name == name)
-                            .cloned();
+
+                        // Résolution d'autorité admin (Task D3) : sur un serveur public,
+                        // `effective_key` EST le `sub` OIDC vérifié (cf. `resolve_join_key`) — on
+                        // le priorise pour retrouver l'admin, avec repli sur `name` (display_name
+                        // brut) sinon. Sur un serveur privé, `sub_for_admin` est `None` et le
+                        // comportement est strictement celui d'avant cette tâche.
+                        let sub_for_admin: Option<&str> =
+                            identity_public.then_some(effective_key.as_str());
+                        let is_root = is_root_by_sub_or_display_name(
+                            sub_for_admin,
+                            &name,
+                            &root_admins,
+                            playtest_all_admin,
+                        );
+                        let admin_record =
+                            resolve_admin_record(sub_for_admin, &name, &admin_store.admins)
+                                .cloned();
+                        // Backfill (Task D3) : un admin attribué par `/promote` avant son premier
+                        // Join sur un serveur public (ou avant cette migration) a un `AdminRecord`
+                        // encore résolu par repli display_name (`sub: None`). Dès qu'on connaît
+                        // son vrai `sub` vérifié, on l'enregistre pour que les Join suivants (et
+                        // toute future collision de pseudo) le résolvent directement par `sub` —
+                        // migration progressive sans perdre l'admin en cours de route. Sûr même en
+                        // cas de collision de display_name : `/promote` (admin_commands.rs) fait
+                        // un `find` (jamais `find_all`) avant d'insérer, donc `admin_store.admins`
+                        // ne peut jamais contenir deux enregistrements avec le même display_name —
+                        // ce `find` ne peut matcher qu'un seul enregistrement au plus.
+                        if let (Some(sub), Some(record)) = (sub_for_admin, admin_record.as_ref()) {
+                            if record.sub.is_none() {
+                                if let Some(stored) = admin_store
+                                    .admins
+                                    .iter_mut()
+                                    .find(|a| a.display_name == record.display_name)
+                                {
+                                    stored.sub = Some(sub.to_string());
+                                    admin_store.save_admins();
+                                }
+                            }
+                        }
                         let resolved = resolve_permissions(
                             is_root,
                             admin_record.as_ref(),
@@ -988,12 +1077,25 @@ pub async fn gateway_main(
                         });
                     }
                 } else if let Some(text) = extract_admin_command(data) {
-                    // Résolution d'identité admin : `display_names` (display_name brut), jamais
-                    // `keys` (clé de persistance = `sub` OIDC sur serveur public depuis Task C2) —
-                    // `root_admins`/`admin_store` restent indexés par display_name tant que
-                    // Task D3 n'a pas migré cette indexation vers `sub`.
+                    // Résolution d'identité admin (Task D3) : `issuer` (display_name brut, depuis
+                    // `display_names`) reste le texte affiché/journalisé (`granted_by`, logs,
+                    // `SessionEvent::AdminAction`) — jamais le `sub`, illisible pour un humain.
+                    // L'AUTORITÉ (`is_root`), elle, se résout en priorisant le `sub` OIDC vérifié
+                    // de CE client quand il est connu : `keys` porte le `sub` uniquement quand
+                    // `identity_public` est vrai (cf. `resolve_join_key`, Task C2) — sur serveur
+                    // privé `sub_for_admin` est `None` et le comportement est inchangé.
                     let issuer = display_names.get(&cid).cloned().unwrap_or_default();
-                    let is_root = resolve_is_root(&issuer, &root_admins, playtest_all_admin);
+                    let sub_for_admin: Option<&str> = if identity_public {
+                        keys.get(&cid).map(String::as_str)
+                    } else {
+                        None
+                    };
+                    let is_root = is_root_by_sub_or_display_name(
+                        sub_for_admin,
+                        &issuer,
+                        &root_admins,
+                        playtest_all_admin,
+                    );
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
@@ -1050,13 +1152,23 @@ pub async fn gateway_main(
                         if let Some((&target_cid, _)) =
                             display_names.iter().find(|(_, n)| *n == target)
                         {
-                            let is_target_root =
-                                resolve_is_root(target, &root_admins, playtest_all_admin);
-                            let target_record = admin_store
-                                .admins
-                                .iter()
-                                .find(|a| &a.display_name == target)
-                                .cloned();
+                            // Même priorité sub-avec-repli que la résolution de l'issuer
+                            // ci-dessus (Task D3) : le compte cible peut être connecté avec un
+                            // `sub` OIDC vérifié différent de son display_name.
+                            let target_sub: Option<&str> = if identity_public {
+                                keys.get(&target_cid).map(String::as_str)
+                            } else {
+                                None
+                            };
+                            let is_target_root = is_root_by_sub_or_display_name(
+                                target_sub,
+                                target,
+                                &root_admins,
+                                playtest_all_admin,
+                            );
+                            let target_record =
+                                resolve_admin_record(target_sub, target, &admin_store.admins)
+                                    .cloned();
                             let resolved = resolve_permissions(
                                 is_target_root,
                                 target_record.as_ref(),
@@ -1881,6 +1993,7 @@ mod tests {
     fn resync_test_admin(name: &str, group: &str) -> crate::permissions::AdminRecord {
         crate::permissions::AdminRecord {
             display_name: name.to_string(),
+            sub: None,
             group: group.to_string(),
             extra_permissions: vec![],
             revoked_permissions: vec![],
@@ -1970,6 +2083,219 @@ mod tests {
         let root_admins: std::collections::HashSet<String> =
             ["Compte1".to_string()].into_iter().collect();
         assert!(resolve_is_root("Compte1", &root_admins, true));
+    }
+
+    // --- is_root_by_sub_or_display_name / resolve_admin_record (Task D3) -------------------
+    //
+    // Migration de l'indexation admin vers `sub` OIDC vérifié, avec repli sur `display_name`
+    // pour les serveurs privés (voir note de contexte du brief D3). Ferme le bug playtest 1 :
+    // deux comptes distincts (`sub` différents) avec le même `display_name` ne doivent jamais
+    // partager d'autorité admin sur un serveur public.
+
+    #[test]
+    fn is_root_by_sub_grants_when_sub_is_listed_even_if_display_name_is_not() {
+        let root_admins: std::collections::HashSet<String> =
+            ["oidc-sub-alice".to_string()].into_iter().collect();
+        assert!(is_root_by_sub_or_display_name(
+            Some("oidc-sub-alice"),
+            "Lucas",
+            &root_admins,
+            false
+        ));
+    }
+
+    #[test]
+    fn is_root_by_sub_falls_back_to_display_name_when_sub_absent() {
+        // Serveur privé : `sub` est `None`, repli sur `display_name` — comportement historique
+        // inchangé.
+        let root_admins: std::collections::HashSet<String> =
+            ["Lucas".to_string()].into_iter().collect();
+        assert!(is_root_by_sub_or_display_name(
+            None,
+            "Lucas",
+            &root_admins,
+            false
+        ));
+    }
+
+    #[test]
+    fn is_root_by_sub_falls_back_to_display_name_when_sub_not_listed() {
+        // Serveur public mais `TESSERA_ROOT_ADMINS` liste encore un display_name (transition) :
+        // le repli doit fonctionner tant que le sub lui-même n'est pas listé.
+        let root_admins: std::collections::HashSet<String> =
+            ["Lucas".to_string()].into_iter().collect();
+        assert!(is_root_by_sub_or_display_name(
+            Some("oidc-sub-alice"),
+            "Lucas",
+            &root_admins,
+            false
+        ));
+    }
+
+    #[test]
+    fn is_root_by_sub_denies_when_neither_sub_nor_display_name_listed() {
+        let root_admins: std::collections::HashSet<String> =
+            ["Compte1".to_string()].into_iter().collect();
+        assert!(!is_root_by_sub_or_display_name(
+            Some("oidc-sub-mallory"),
+            "Mallory",
+            &root_admins,
+            false
+        ));
+    }
+
+    #[test]
+    fn is_root_by_sub_respects_playtest_bypass() {
+        let root_admins: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert!(is_root_by_sub_or_display_name(
+            Some("anyone"),
+            "Anyone",
+            &root_admins,
+            true
+        ));
+    }
+
+    fn admin_record_with_sub(
+        display_name: &str,
+        sub: Option<&str>,
+    ) -> crate::permissions::AdminRecord {
+        crate::permissions::AdminRecord {
+            display_name: display_name.to_string(),
+            sub: sub.map(str::to_string),
+            group: "moderator".to_string(),
+            extra_permissions: vec![],
+            revoked_permissions: vec![],
+            granted_at: 0,
+            granted_by: "Root".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_admin_record_finds_by_sub_first() {
+        let admins = vec![
+            admin_record_with_sub("Lucas", Some("oidc-sub-alice")),
+            admin_record_with_sub("Lucas", Some("oidc-sub-bob")),
+        ];
+        // Deux comptes distincts partagent le même display_name (collision de pseudo, exactement
+        // le scénario du playtest 1) : la résolution par `sub` doit retrouver le bon enregistrement
+        // sans jamais confondre les deux comptes.
+        let found = resolve_admin_record(Some("oidc-sub-bob"), "Lucas", &admins)
+            .expect("le compte bob doit être trouvé par son sub");
+        assert_eq!(found.sub.as_deref(), Some("oidc-sub-bob"));
+    }
+
+    #[test]
+    fn resolve_admin_record_falls_back_to_display_name_when_sub_absent() {
+        let admins = vec![admin_record_with_sub("Lucas", None)];
+        let found = resolve_admin_record(None, "Lucas", &admins)
+            .expect("repli display_name doit trouver l'enregistrement");
+        assert_eq!(found.display_name, "Lucas");
+    }
+
+    #[test]
+    fn resolve_admin_record_falls_back_to_display_name_when_sub_not_found() {
+        // Compte promu par `/promote` avant son premier Join sur un serveur public : son
+        // AdminRecord existe déjà (créé par admin_commands.rs) mais avec `sub: None` — tant
+        // qu'aucun Join n'a enrichi l'enregistrement, la résolution par sub échoue et doit
+        // replier sur le display_name plutôt que de perdre l'admin.
+        let admins = vec![admin_record_with_sub("Lucas", None)];
+        let found = resolve_admin_record(Some("oidc-sub-alice"), "Lucas", &admins)
+            .expect("repli display_name doit trouver l'enregistrement même avec un sub inconnu");
+        assert_eq!(found.display_name, "Lucas");
+    }
+
+    #[test]
+    fn resolve_admin_record_returns_none_when_nothing_matches() {
+        let admins = vec![admin_record_with_sub("Lucas", Some("oidc-sub-alice"))];
+        assert!(resolve_admin_record(Some("oidc-sub-mallory"), "Mallory", &admins).is_none());
+    }
+
+    #[test]
+    fn resolve_admin_record_never_falls_back_to_a_record_already_bound_to_another_sub() {
+        // Garde anti-collision (root cause du bug playtest 1) : Alice est admin, son AdminRecord
+        // a déjà un sub connu. Bob revendique le même display_name mais a un sub DIFFÉRENT — le
+        // repli display_name ne doit jamais lui rendre l'enregistrement d'Alice, sinon Bob
+        // hériterait silencieusement de son groupe/permissions.
+        let admins = vec![admin_record_with_sub("Lucas", Some("oidc-sub-alice"))];
+        assert!(
+            resolve_admin_record(Some("oidc-sub-bob"), "Lucas", &admins).is_none(),
+            "bob ne doit jamais résoudre l'AdminRecord d'alice via leur display_name partagé"
+        );
+    }
+
+    // --- Test central de non-régression (brief D3, Step 1) : bug playtest 1 fermé --------------
+    //
+    // Deux comptes ZITADEL distincts (`sub` différents) avec le même `display_name` ne doivent
+    // JAMAIS partager d'état ni d'autorité admin sur un serveur public — root cause exacte du bug
+    // observé en playtest 1. `PostgresStore` (Task D1) n'étant pas câblé dans `gateway_main` (hors
+    // scope de cette tâche, voir note de contexte du brief point 4), ce test exerce le pipeline
+    // réellement câblé aujourd'hui : `resolve_join_key` (clé de persistance = `sub`, Task C2) +
+    // `is_root_by_sub_or_display_name`/`resolve_admin_record` (autorité admin, Task D3) — la
+    // même garantie de non-partage est déjà prouvée séparément pour `StoreError::DisplayNameConflict`
+    // au niveau `postgres_store.rs` (`display_name_conflict_is_first_come_first_served`).
+    #[tokio::test]
+    async fn two_accounts_with_same_display_name_never_share_admin_state_on_public_server() {
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let display_name = "Lucas"; // collision de pseudo, exactement le scénario du playtest 1
+
+        let claims_alice = crate::jwks::Claims {
+            sub: "oidc-sub-alice".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token_alice = encode_join_test_token(&claims_alice, &material.encoding_key);
+        let claims_bob = crate::jwks::Claims {
+            sub: "oidc-sub-bob".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token_bob = encode_join_test_token(&claims_bob, &material.encoding_key);
+
+        // Les deux Join sont traités (pas de kick sur la collision de display_name).
+        let key_alice = resolve_join_key(true, display_name, &token_alice, &jwks_cache)
+            .expect("alice : join accepté malgré la collision de display_name");
+        let key_bob = resolve_join_key(true, display_name, &token_bob, &jwks_cache)
+            .expect("bob : join accepté malgré la collision de display_name");
+
+        // Clés de persistance distinctes : deux enregistrements Postgres/FileStore distincts.
+        assert_ne!(
+            key_alice, key_bob,
+            "deux sub distincts doivent produire deux clés de persistance distinctes"
+        );
+        assert_eq!(key_alice, "oidc-sub-alice");
+        assert_eq!(key_bob, "oidc-sub-bob");
+
+        // Alice seule est admin (un seul AdminRecord, rattaché à son sub) : Bob, malgré le même
+        // display_name, ne doit jamais hériter de son autorité.
+        let admins = vec![admin_record_with_sub(display_name, Some("oidc-sub-alice"))];
+        let root_admins: std::collections::HashSet<String> =
+            ["oidc-sub-alice".to_string()].into_iter().collect();
+
+        let alice_record = resolve_admin_record(Some(&key_alice), display_name, &admins)
+            .expect("alice doit résoudre son propre AdminRecord");
+        assert_eq!(alice_record.sub.as_deref(), Some("oidc-sub-alice"));
+        let alice_is_root =
+            is_root_by_sub_or_display_name(Some(&key_alice), display_name, &root_admins, false);
+        assert!(
+            alice_is_root,
+            "alice doit être reconnue root admin par son sub"
+        );
+
+        // Bob revendique le même display_name qu'Alice mais a un sub DIFFÉRENT : la garde
+        // anti-collision de `resolve_admin_record` (root cause du bug playtest 1) doit refuser de
+        // lui rendre l'AdminRecord d'Alice — sans quoi Bob hériterait silencieusement de son
+        // groupe/permissions via leur seul point commun, le display_name affiché.
+        let bob_record = resolve_admin_record(Some(&key_bob), display_name, &admins);
+        assert!(
+            bob_record.is_none(),
+            "bob ne doit jamais résoudre l'AdminRecord d'alice via leur display_name partagé"
+        );
+        let bob_is_root =
+            is_root_by_sub_or_display_name(Some(&key_bob), display_name, &root_admins, false);
+        assert!(
+            !bob_is_root,
+            "bob ne doit jamais hériter de l'autorité root d'alice via leur display_name partagé"
+        );
     }
 
     // --- resolve_protocol_version / resolve_whitelist / Leave (Task C3) --------------------
@@ -2242,15 +2568,17 @@ mod tests {
         assert_eq!(result, Ok("Lucas".to_string()));
     }
 
-    // --- Régression : identité admin reste indexée par display_name sur serveur public --------
+    // --- Migration D3 : identité admin résolue par sub OIDC vérifié sur serveur public ---------
     //
     // Task C2 a fait de `keys` la clé de PERSISTANCE effective (le `sub` OIDC vérifié sur un
-    // serveur public). Mais `root_admins`/`admin_store` restent indexés par `display_name`
-    // jusqu'à la migration Task D3 — ce test reproduit exactement le pipeline de la boucle
-    // Gateway (Join → maps `keys`/`display_names` → AdminCommand) et prouve que la résolution
-    // d'autorité admin utilise bien `display_names` (display_name brut), pas `keys` (le `sub`).
+    // serveur public). Jusqu'à Task D3, `root_admins`/`admin_store` restaient indexés
+    // exclusivement par `display_name`, même sur serveur public — ce test reproduit exactement le
+    // pipeline de la boucle Gateway (Join → maps `keys`/`display_names` → AdminCommand) et prouve
+    // que, depuis Task D3, l'autorité admin est reconnue quand le `sub` vérifié est listé dans
+    // `TESSERA_ROOT_ADMINS`, SANS qu'aucun display_name n'y figure — le comportement historique
+    // (repli display_name) reste par ailleurs intact.
     #[tokio::test]
-    async fn admin_command_resolves_issuer_from_display_name_not_sub_on_public_server() {
+    async fn admin_command_resolves_issuer_by_sub_on_public_server() {
         use crate::admin_commands::{
             execute as execute_admin_command, parse as parse_admin_command,
         };
@@ -2273,43 +2601,69 @@ mod tests {
             "précondition du test : le sub doit diverger du display_name"
         );
 
-        // Reproduit ce que le Join fait dans la boucle : `keys` reçoit la clé effective,
-        // `display_names` (le fix) reçoit toujours le display_name brut.
+        // Reproduit ce que le Join fait dans la boucle : `keys` reçoit la clé effective (le sub),
+        // `display_names` reçoit toujours le display_name brut.
         let cid = 42u64;
         let mut keys: HashMap<u64, String> = HashMap::new();
         let mut display_names: HashMap<u64, String> = HashMap::new();
         keys.insert(cid, effective_key.clone());
         display_names.insert(cid, display_name.to_string());
 
-        // `root_admins` (TESSERA_ROOT_ADMINS) liste le display_name, jamais le sub.
+        // `root_admins` (TESSERA_ROOT_ADMINS) liste désormais le `sub`, jamais le display_name —
+        // exactement le cas qu'un opérateur ayant fini sa migration vers Task D3 configure.
         let root_admins: std::collections::HashSet<String> =
-            [display_name.to_string()].into_iter().collect();
+            [effective_key.clone()].into_iter().collect();
 
-        // Bug reproduit : résoudre l'autorité depuis `keys` (le sub) échoue toujours.
-        let issuer_from_keys = keys.get(&cid).cloned().unwrap_or_default();
-        assert!(
-            !resolve_is_root(&issuer_from_keys, &root_admins, false),
-            "le sub OIDC ne doit jamais être reconnu comme root admin"
-        );
-
-        // Fix : résoudre depuis `display_names` reconnaît bien le root admin.
+        // Reproduit la résolution du call site Join/AdminCommand (Task D3) : `sub_for_admin` vient
+        // de `keys` UNIQUEMENT parce que `identity_public` est vrai ici.
         let issuer = display_names.get(&cid).cloned().unwrap_or_default();
-        assert_eq!(issuer, display_name);
-        let is_root = resolve_is_root(&issuer, &root_admins, false);
+        let sub_for_admin = keys.get(&cid).map(String::as_str);
+        let is_root = is_root_by_sub_or_display_name(sub_for_admin, &issuer, &root_admins, false);
         assert!(
             is_root,
-            "le display_name doit être reconnu comme root admin"
+            "le sub OIDC vérifié doit être reconnu comme root admin quand il est listé"
         );
 
-        // Et la commande admin s'exécute réellement avec cet issuer (comme au call site
-        // `gateway.rs` de la boucle événementielle) : `/creategroup` réservé aux admins racine.
+        // Et la commande admin s'exécute réellement avec l'issuer = display_name (lisible dans
+        // les logs/granted_by), comme au call site réel de `gateway.rs`.
         let mut groups = Vec::new();
         let mut admins = Vec::new();
         let parsed = parse_admin_command("/creategroup moderators").expect("commande valide");
         let outcome = execute_admin_command(parsed, is_root, &mut groups, &mut admins, 0, &issuer);
         assert!(
             outcome.success,
-            "la commande admin doit réussir : issuer = display_name, reconnu root admin"
+            "la commande admin doit réussir : sub reconnu root admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_command_still_falls_back_to_display_name_when_sub_not_listed() {
+        // Repli (Task D3) : `TESSERA_ROOT_ADMINS` liste encore un display_name (transition, ou
+        // serveur privé) — le sub vérifié ne doit rien casser, la résolution retombe sur le
+        // display_name exactement comme avant la migration.
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let claims = crate::jwks::Claims {
+            sub: "oidc-user-xyz".into(),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &material.encoding_key);
+        let display_name = "AdminDisplayName";
+        let effective_key = resolve_join_key(true, display_name, &token, &jwks_cache)
+            .expect("token valide, join accepté");
+
+        let root_admins: std::collections::HashSet<String> =
+            [display_name.to_string()].into_iter().collect();
+
+        let is_root = is_root_by_sub_or_display_name(
+            Some(effective_key.as_str()),
+            display_name,
+            &root_admins,
+            false,
+        );
+        assert!(
+            is_root,
+            "le repli display_name doit continuer de fonctionner"
         );
     }
 

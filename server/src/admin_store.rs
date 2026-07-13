@@ -41,7 +41,12 @@ impl AdminStore {
         let admins_path = admins_path.into();
         let groups = load_json(&groups_path);
         let admins = load_json(&admins_path);
-        Self { groups_path, admins_path, groups, admins }
+        Self {
+            groups_path,
+            admins_path,
+            groups,
+            admins,
+        }
     }
 
     /// Réécrit `permission_groups.json` atomiquement (write temp + rename).
@@ -63,7 +68,10 @@ mod tests {
     #[test]
     fn opens_empty_when_files_absent() {
         let dir = tempdir().unwrap();
-        let store = AdminStore::open(dir.path().join("groups.json"), dir.path().join("admins.json"));
+        let store = AdminStore::open(
+            dir.path().join("groups.json"),
+            dir.path().join("admins.json"),
+        );
         assert!(store.groups.is_empty());
         assert!(store.admins.is_empty());
     }
@@ -93,7 +101,10 @@ mod tests {
         let reopened = AdminStore::open(&groups_path, &admins_path);
         assert_eq!(
             reopened.groups,
-            vec![Group { name: "moderator".into(), permissions: vec!["admin.noclip".into()] }]
+            vec![Group {
+                name: "moderator".into(),
+                permissions: vec!["admin.noclip".into()]
+            }]
         );
     }
 
@@ -104,6 +115,7 @@ mod tests {
         let admins_path = dir.path().join("admins.json");
         let record = AdminRecord {
             display_name: "Compte1".into(),
+            sub: None,
             group: "moderator".into(),
             extra_permissions: vec![],
             revoked_permissions: vec![],
@@ -117,5 +129,23 @@ mod tests {
         }
         let reopened = AdminStore::open(&groups_path, &admins_path);
         assert_eq!(reopened.admins, vec![record]);
+    }
+
+    #[test]
+    fn admins_json_without_sub_field_still_loads_with_sub_none() {
+        // Rétrocompatibilité (Task D3) : un `server_admins.json` écrit avant l'ajout du champ
+        // `sub` à `AdminRecord` ne doit jamais empêcher le serveur de démarrer.
+        let dir = tempdir().unwrap();
+        let groups_path = dir.path().join("groups.json");
+        let admins_path = dir.path().join("admins.json");
+        std::fs::write(
+            &admins_path,
+            r#"[{"display_name":"Compte1","group":"moderator","extra_permissions":[],"revoked_permissions":[],"granted_at":1700000000000,"granted_by":"Root"}]"#,
+        )
+        .unwrap();
+        let store = AdminStore::open(&groups_path, &admins_path);
+        assert_eq!(store.admins.len(), 1);
+        assert_eq!(store.admins[0].display_name, "Compte1");
+        assert_eq!(store.admins[0].sub, None);
     }
 }
