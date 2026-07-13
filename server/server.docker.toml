@@ -10,8 +10,11 @@ max_players = 16
 tags = ["dev", "test"]
 discord_url = ""
 website_url = "https://tesserasynth.net"
-required_modset = "0.1.1"
+required_modset = "0.1.0"
 voice_required = false
+# Playtest 2 (2026-07-13+) : auth ZITADEL réelle exigée au Join (JWT vérifié), et bascule vers
+# PostgresStore (voir bin/gateway.rs) — nécessite TESSERA_POSTGRES_URL posée côté Dokploy.
+public = true
 
 [runtime]
 whitelist = false
@@ -21,33 +24,12 @@ store_path = "/data/players.json"
 listen_addr = "0.0.0.0:27020"
 advertise_addr = "51.38.189.234:27020"
 
+# Topologie d'autorité Voronoï (tools/authority-tessellation) : authority.json (copié à côté de
+# ce manifeste) porte la géométrie des cellules ; server_count sélectionne le groupement
+# assignment_patterns[N] de l'artefact (remplace l'ancien arbre de splits/shards).
 [runtime.topology]
-active_preset = "2-shards"
-
-[[runtime.topology.splits]]
-id = "root"
-axis = "x"
-# 2450 (pas 1000) : le spawn par défaut de shard-a est Watson (2387, -1295) — avec at=1000,
-# ce point tombait côté shard-b (x >= 1000), à ~1387 unités de la frontière, bien au-delà du
-# rayon de zone tampon (25-75) : le spawn était en fait mal rattaché à shard-a, et un playtest
-# n'aurait vu aucune frontière avant une longue marche. À 2450, Watson reste côté shard-a
-# (63 unités de marge, hors zone tampon de base) et une courte marche traverse la frontière.
-at = 2450.0
-left = "shard-a"
-right = "shard-b"
-
-# listen_addr = noms de service Docker : le Gateway s'y connecte via le réseau compose interne.
-# Chaque conteneur shard, lui, se bind sur 0.0.0.0:<port> (voir docker-compose.yml, `command:`).
-[[runtime.topology.shards]]
-id = "shard-a"
-listen_addr = "shard-a:27030"
-default_entry = true
-spawn_points = [[2387.0, -1295.0, 63.0]]
-
-[[runtime.topology.shards]]
-id = "shard-b"
-listen_addr = "shard-b:27031"
-spawn_points = []
+authority_artifact = "authority.json"
+server_count = 2
 
 [runtime.radius]
 base = 25.0

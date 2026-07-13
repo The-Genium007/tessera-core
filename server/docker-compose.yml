@@ -1,5 +1,5 @@
-# docker-compose.yml — topologie réelle TesseraSynth (Gateway + 2 Shards), miroir de
-# server.docker.toml. Le manifeste est monté en volume, pas embarqué dans l'image.
+# docker-compose.yml — topologie réelle TesseraSynth (Gateway + 2 Shards + Postgres + Redis),
+# miroir de server.docker.toml. Le manifeste est monté en volume, pas embarqué dans l'image.
 #
 # ⚠️ Le jeu parle en UDP (port du Gateway), pas HTTP — pas de tunnel Cloudflare pour ce port,
 # il doit être ouvert directement sur le pare-feu du serveur (voir server/README.md).
@@ -11,6 +11,16 @@
 # remplir le disque du VPS, et un shard qui fuit la mémoire ne doit pas affamer les autres
 # services du même hôte. Valeurs par défaut prudentes, ajustables par variable d'env sans
 # toucher ce fichier.
+#
+# Postgres/Redis colocalisés (chantier échelle self-host, 2026-07-13) : à l'échelle visée
+# (dizaine de joueurs simultanés en playtest), une instance managée dédiée par service serait un
+# coût et une étape de config superflus. Les deux tournent donc comme conteneurs sœurs sur le
+# même VPS, jamais exposés hors du réseau Docker interne (pas de `ports:` publié pour eux) — le
+# Gateway leur parle par nom de service DNS Compose (`postgres`, `redis`), donc
+# TESSERA_POSTGRES_URL/TESSERA_REDIS_URL n'ont plus besoin d'être renseignées manuellement (voir
+# leurs valeurs par défaut dans le service `gateway` ci-dessous). Si le trafic dépasse un jour ce
+# qu'une seule machine encaisse, migrer vers un Postgres/Redis managé reste un changement de ces
+# deux URLs seules — rien d'autre à toucher.
 x-logging: &default-logging
   driver: json-file
   options:
@@ -19,7 +29,7 @@ x-logging: &default-logging
 
 services:
   gateway:
-    image: ghcr.io/the-genium007/tessera-server:0.1.1
+    image: ghcr.io/the-genium007/tessera-server:0.1.0
     # Si ce service utilise l'image GHCR pré-construite (plutôt que `build:` ci-dessus) : sans
     # ça, un redeploy réutilise l'image locale en cache et ne re-tire pas un `:latest` plus
     # récent (même symptôme vécu sur platform-api le 2026-07-05 : redeploys sans effet).
@@ -47,16 +57,37 @@ services:
       # vitesse/téléportation). Positionner via l'environnement du déploiement (.env / export),
       # pas en dur ici.
       TESSERA_ROOT_ADMINS: ${TESSERA_ROOT_ADMINS:-}
-      # Vide/absent par défaut (comportement inchangé) — "true" rend TOUT compte connecté admin
-      # racine, sans lister le moindre display_name. Bypass temporaire de playtest uniquement :
-      # à retirer de l'environnement du déploiement une fois le playtest terminé.
-      TESSERA_PLAYTEST_ALL_ADMIN: ${TESSERA_PLAYTEST_ALL_ADMIN:-}
+      # Playtest 2 (2026-07-09+) : désactivé. Le flag rend TOUT compte connecté admin racine
+      # et contourne l'anti-triche (par design, pour staff/MJ). Avec auth réelle en place,
+      # on veut tester l'anti-triche aussi, pas seulement l'auth. À ne réactiver que si
+      # besoin d'un bypass de développement ultérieurement (ne jamais pour prod).
+      TESSERA_PLAYTEST_ALL_ADMIN: "false"
+      # TESSERA_REDIS_URL/TESSERA_POSTGRES_URL (surcharge directe, prioritaire) restent vides par
+      # défaut ; sans ces variables ET sans runtime.postgres_url dans le manifeste, le Gateway
+      # assemble lui-même l'URL Postgres depuis les composants TESSERA_PG_* ci-dessous (voir
+      # manifest::resolve_postgres_url) — pointant par défaut vers le service `postgres`
+      # colocalisé : aucune saisie d'URL complète requise pour un déploiement standard.
+      TESSERA_REDIS_URL: ${TESSERA_REDIS_URL:-redis://redis:6379}
+      TESSERA_POSTGRES_URL: ${TESSERA_POSTGRES_URL:-}
+      TESSERA_PG_HOST: postgres
+      TESSERA_PG_PORT: "5432"
+      TESSERA_PG_USER: tessera
+      TESSERA_PG_DATABASE: tessera
+      # Partagé avec le service `postgres` (même variable, voir sa définition) — jamais exposé
+      # hors du réseau Docker interne (Postgres colocalisé n'a pas de `ports:` publié).
+      TESSERA_PG_PASSWORD: ${TESSERA_POSTGRES_PASSWORD:-tessera-dev-only-change-in-prod}
     depends_on:
-      - shard-a
-      - shard-b
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      shard-a:
+        condition: service_started
+      shard-b:
+        condition: service_started
 
   shard-a:
-    image: ghcr.io/the-genium007/tessera-server:0.1.1
+    image: ghcr.io/the-genium007/tessera-server:0.1.0
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -69,7 +100,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-b:
-    image: ghcr.io/the-genium007/tessera-server:0.1.1
+    image: ghcr.io/the-genium007/tessera-server:0.1.0
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -82,7 +113,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   heartbeat:
-    image: ghcr.io/the-genium007/tessera-server:0.1.1
+    image: ghcr.io/the-genium007/tessera-server:0.1.0
     pull_policy: always
     entrypoint: ["tessera-directory"]
     command: ["heartbeat",
@@ -100,5 +131,45 @@ services:
     depends_on:
       - gateway
 
+  # Données joueur durables (PostgresStore, catégorie B du design stockage 2026-07-09) — voir
+  # note en tête de fichier sur le choix de colocalisation. `POSTGRES_PASSWORD` doit rester
+  # identique à `TESSERA_PG_PASSWORD`/`TESSERA_POSTGRES_PASSWORD` du service `gateway` (même
+  # variable d'environnement `TESSERA_POSTGRES_PASSWORD` référencée aux deux endroits).
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: ${POSTGRES_MEM_LIMIT:-256m}
+    cpus: ${POSTGRES_CPUS:-0.5}
+    logging: *default-logging
+    # Pas de `ports:` : jamais exposé hors du réseau Docker interne, seul le Gateway (et les
+    # migrations qu'il exécute lui-même au boot, voir bin/gateway.rs) s'y connecte.
+    environment:
+      POSTGRES_USER: tessera
+      POSTGRES_DB: tessera
+      POSTGRES_PASSWORD: ${TESSERA_POSTGRES_PASSWORD:-tessera-dev-only-change-in-prod}
+    volumes:
+      - tessera-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tessera -d tessera"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # État chaud (HotStateCache, catégorie A du design stockage 2026-07-09) — cache de reprise
+  # rapide, jamais la source de vérité durable ; pas de volume nécessaire (une perte au redémarrage
+  # dégrade la reprise, ne corrompt aucune donnée durable, cf. doc de module hot_state_cache.rs).
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: ${REDIS_MEM_LIMIT:-128m}
+    cpus: ${REDIS_CPUS:-0.3}
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   tessera-players:
+  tessera-postgres-data:
