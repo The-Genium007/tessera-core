@@ -18,6 +18,15 @@ use std::time::Duration;
 /// Applique un lot d'entrées dans la transaction fournie — implémenté par le futur domaine
 /// (pas encore écrit). `drain_batch` appelle `apply` puis avance la marque haute dans la MÊME
 /// transaction.
+///
+/// Ce trait n'est PAS `dyn`-compatible tel quel (`async fn` dans un trait empêche
+/// `Box<dyn BatchApplier>`), et le `Future` retourné ne porte aucune borne `Send` : sans
+/// conséquence pour l'unique appelant actuel, statiquement dispatché (`drain_batch` dans ce même
+/// crate). Mais le design anticipe plusieurs domaines futurs (inventaire/économie/progression/
+/// social), chacun avec son propre `stream_id`, ce qui suggère naturellement un registre
+/// `stream_id -> Box<dyn BatchApplier>` — une forme que ce trait ne peut pas supporter en l'état.
+/// À revisiter (probablement via la crate `async-trait`, une dépendance petite et peu coûteuse)
+/// si/quand un dispatch dynamique par `stream_id` devient nécessaire pour plusieurs domaines.
 // `async fn` dans un trait public est déconseillé par rustc car `Send` ne peut pas être
 // exprimé sur le `Future` résultant — sans conséquence ici : ce trait n'est appelé que depuis
 // `drain_batch` dans ce même crate (pas de borne `Send` requise par un exécuteur externe).
@@ -60,6 +69,12 @@ pub async fn read_progress(pool: &PgPool, stream_id: &str) -> Result<Option<u64>
 /// Applique `entries` (non vide) via `applier` et avance la marque haute à
 /// `entries.last().seq`, dans une seule transaction — voir doc de module pour la garantie
 /// d'atomicité que ça procure.
+///
+/// `drain_batch` n'est PAS auto-idempotent : l'appeler deux fois avec le MÊME lot d'entrées les
+/// applique deux fois (rien ici ne détecte ni ne rejette un rejeu). La garantie « au plus une
+/// fois » du mécanisme ne tient que parce que `drain_batch` est toujours alimenté exactement par
+/// la sortie d'`entries_to_replay`, qui ne resélectionne jamais une entrée déjà appliquée
+/// (filtrage `since = applied_seq + 1`) — jamais par un lot arbitraire ou répété directement.
 pub async fn drain_batch<A: BatchApplier>(
     pool: &PgPool,
     stream_id: &str,
@@ -108,7 +123,8 @@ pub const DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 /// Vrai dès que l'un des deux seuils est atteint — absorbe les rafales sans attendre
 /// inutilement en cas de calme.
 pub fn should_drain_now(pending_count: usize, elapsed_since_last_drain: Duration) -> bool {
-    pending_count >= DRAIN_BATCH_SIZE || elapsed_since_last_drain >= DRAIN_INTERVAL
+    pending_count >= DRAIN_BATCH_SIZE
+        || (pending_count > 0 && elapsed_since_last_drain >= DRAIN_INTERVAL)
 }
 
 #[cfg(test)]
@@ -259,6 +275,16 @@ mod tests {
             to_replay.iter().map(|e| e.seq).collect::<Vec<_>>(),
             vec![3, 4]
         );
+
+        // Ferme la boucle : les entrées rejouées sont réellement redraînées, avançant la
+        // marque haute jusqu'à la fin — la propriété "idempotence sous rejeu" tient de bout en
+        // bout via le filtrage d'entries_to_replay, pas parce que drain_batch serait lui-même
+        // idempotent (il ne l'est pas, voir sa doc) — c'est la partie de ce scénario que ce
+        // test ne fermait pas encore avant cette revue.
+        drain_batch(&pool, "test-stream", &to_replay, &NoopApplier)
+            .await
+            .unwrap();
+        assert_eq!(read_progress(&pool, "test-stream").await.unwrap(), Some(4));
     }
 
     #[test]
@@ -277,5 +303,10 @@ mod tests {
     #[test]
     fn should_drain_now_false_when_neither_threshold_reached() {
         assert!(!should_drain_now(1, std::time::Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn should_drain_now_false_when_nothing_pending_even_after_interval_elapsed() {
+        assert!(!should_drain_now(0, DRAIN_INTERVAL));
     }
 }

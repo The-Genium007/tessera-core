@@ -84,6 +84,17 @@ impl WriteBehindJournal {
     /// crash), relit la dernière entrée pour reprendre la numérotation de séquence là où elle
     /// s'était arrêtée — sans ça, un redémarrage réutiliserait des numéros déjà pris, cassant
     /// la monotonie dont dépend `read_since`.
+    ///
+    /// **Invariant pour toute future compaction du journal** (aucune compaction n'existe
+    /// aujourd'hui — le fichier grandit indéfiniment, `open()` le relit entièrement à chaque
+    /// redémarrage, cf. constat déjà noté en revue) : ne jamais tronquer le journal en dessous du
+    /// plus haut numéro de séquence jamais attribué sans persister `next_seq` séparément d'une
+    /// autre façon. `open()` recalcule `next_seq` depuis la dernière entrée *présente dans le
+    /// fichier* — si une compaction retire des entrées déjà durcies en Postgres tout en laissant
+    /// `open()` retomber sur un numéro plus bas, les prochains `append()` peuvent réattribuer des
+    /// numéros de séquence que `write_behind_progress` (voir `write_behind.rs`) croit déjà
+    /// appliqués : la marque haute Postgres peut alors reculer silencieusement, une corruption de
+    /// données (perte ou duplication d'effets économiques) qui ne se déclarerait jamais bruyamment.
     pub fn open(path: &Path) -> io::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
