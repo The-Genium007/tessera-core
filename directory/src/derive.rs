@@ -28,6 +28,7 @@ pub struct DirectoryEntry {
     pub required_modset: String,
     #[serde(rename = "voiceRequired")]
     pub voice_required: bool,
+    pub public: bool,
     #[serde(rename = "launchArgs")]
     pub launch_args: Vec<String>,
 }
@@ -53,6 +54,7 @@ pub fn derive_entry(m: &Manifest) -> DirectoryEntry {
         website_url: m.identity.website_url.clone(),
         required_modset: m.identity.required_modset.clone(),
         voice_required: m.identity.voice_required,
+        public: m.identity.public,
         launch_args: vec![
             "-skipStartScreen".to_string(),
             format!("--cyberverse-server-address={ip}"),
@@ -91,6 +93,7 @@ mod tests {
             "websiteUrl": "https://tesserasynth.net",
             "requiredModset": "0.1.0-dev10",
             "voiceRequired": false,
+            "public": false,
             "launchArgs": [
                 "-skipStartScreen",
                 "--cyberverse-server-address=51.38.189.234",
