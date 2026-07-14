@@ -74,7 +74,14 @@ pub fn assignment_patterns(
                 let gb = groups.remove(b);
                 groups[a].extend(gb);
             } else {
-                // graphe déconnecté : fusion des deux plus petits groupes restants
+                // graphe déconnecté : fusion des deux plus petits groupes restants.
+                // Filet de terminaison délibéré, pas le chemin normal : contrairement à la
+                // fusion adjacente ci-dessus, cette branche NE préserve PAS l'invariant de
+                // contiguïté des groupes (les deux groupes fusionnés peuvent n'être reliés par
+                // aucune arête de `adjacency`). Elle ne sert qu'à garantir que la boucle
+                // `while groups.len() > n` termine même sur un graphe déconnecté ; sur les
+                // données réelles (carte connexe), `best` trouve toujours une paire adjacente
+                // et cette branche n'est jamais empruntée.
                 groups.sort_by_key(|g| g.len());
                 let gb = groups.remove(1);
                 groups[0].extend(gb);
