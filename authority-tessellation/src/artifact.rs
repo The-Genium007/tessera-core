@@ -82,7 +82,8 @@ pub fn generate(
 
     let grid: Grid = rasterize(&protos, &districts, p);
     let adj = adjacency(&grid, protos.len());
-    let patterns = assignment_patterns(protos.len(), &adj);
+    let uniform = vec![1.0; protos.len()];
+    let patterns = assignment_patterns(protos.len(), &adj, &uniform);
 
     // event_weight par code (pour estimated_load)
     let w_by_code: BTreeMap<&str, f64> = districts
