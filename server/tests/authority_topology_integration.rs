@@ -36,24 +36,27 @@ fn gateway_routes_to_correct_shard_group_using_real_v3_artifact() {
     let topology = ShardTopology { shards: zones };
 
     // `assignment_patterns["4"]` du vrai authority.json v3 (vérifié via
-    // `python3 -c "json.load(...)"` avant d'écrire ce test) :
-    //   [[0,1,2,3,4,5,6], [7], [8], [9]]
-    // groupe 0 = 7 cellules fusionnées (dont la cellule 0, "ARR-CH-JT-VDR") ; groupes 1-3 =
-    // cellules seules (7 "JP", 8 "ORB", 9 "YUC"). Les seeds Voronoï de ces cellules (issus de
-    // l'artefact) sont par construction à l'intérieur de leur propre cellule.
+    // `python3 -c "json.load(...)"` avant d'écrire ce test ; ré-vérifié après le merge « cellules
+    // froides d'abord ») :
+    //   [[0, 1], [2, 4, 5, 6, 7, 8], [3], [9]]
+    // groupe 0 = 2 cellules fusionnées (dont la cellule 0, "ARR-CH-JT-VDR") ; groupe 1 = 6
+    // cellules fusionnées (dont la cellule 8, "ORB") ; groupe 2 = cellule seule (3,
+    // "CC-CP-DOW-GLE-WEL", non testée directement ici) ; groupe 3 = cellule seule (9, "YUC").
+    // Les seeds Voronoï de ces cellules (issus de l'artefact) sont par construction à l'intérieur
+    // de leur propre cellule.
 
-    // Groupe fusionné (7 cellules) : seed de la cellule 0 "ARR-CH-JT-VDR".
+    // Groupe fusionné (2 cellules) : seed de la cellule 0 "ARR-CH-JT-VDR".
     let placement = topology.locate(-524.740_86, -133.716_03, 0.0);
     assert_eq!(
         placement.authoritative, "group-0",
-        "le seed de la cellule 0 (groupe fusionné 7 cellules) doit router vers group-0"
+        "le seed de la cellule 0 (groupe fusionné 2 cellules) doit router vers group-0"
     );
 
-    // Groupe mono-cellule : seed de la cellule 8 "ORB".
+    // Groupe fusionné (6 cellules) : seed de la cellule 8 "ORB".
     let placement = topology.locate(4743.625, -1091.775, 0.0);
     assert_eq!(
-        placement.authoritative, "group-2",
-        "le seed de la cellule 8 (ORB) doit router vers group-2"
+        placement.authoritative, "group-1",
+        "le seed de la cellule 8 (ORB, groupe fusionné 6 cellules) doit router vers group-1"
     );
 
     // Groupe mono-cellule : seed de la cellule 9 "YUC".
