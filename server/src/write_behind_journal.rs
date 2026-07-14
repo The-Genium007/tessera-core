@@ -66,13 +66,33 @@ impl WriteBehindJournal {
             Err(e) => return Err(e),
         };
         let reader = BufReader::new(file);
+        let lines = reader
+            .lines()
+            .collect::<io::Result<Vec<String>>>()?
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        let last_index = lines.len().checked_sub(1);
+
         let mut entries = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            if line.is_empty() {
-                continue;
-            }
-            let entry: JournalEntry = serde_json::from_str(&line).map_err(io::Error::other)?;
+        for (index, line) in lines.iter().enumerate() {
+            let parsed: Result<JournalEntry, _> = serde_json::from_str(line);
+            let entry = match parsed {
+                Ok(entry) => entry,
+                Err(err) => {
+                    if Some(index) == last_index {
+                        // Dernière ligne illisible : écriture probablement interrompue par un
+                        // crash (SIGKILL, coupure) entre les deux syscalls d'un `writeln!` —
+                        // c'est exactement le scénario que ce journal doit permettre de
+                        // traverser. On l'ignore silencieusement plutôt que de faire échouer
+                        // `open`/`read_since` de façon permanente.
+                        break;
+                    }
+                    // Corruption ailleurs qu'en toute fin de fichier : un cas plus sérieux,
+                    // on continue à échouer bruyamment.
+                    return Err(io::Error::other(err));
+                }
+            };
             if entry.seq >= since_seq {
                 entries.push(entry);
             }
@@ -182,5 +202,63 @@ mod tests {
         let seq = journal.append(serde_json::json!({"a": 0})).unwrap();
 
         assert_eq!(seq, 0);
+    }
+
+    #[test]
+    fn read_since_discards_a_truncated_trailing_line_without_erroring() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        {
+            let mut journal = WriteBehindJournal::open(&path).unwrap();
+            journal.append(serde_json::json!({"a": 0})).unwrap();
+            journal.append(serde_json::json!({"a": 1})).unwrap();
+            journal.flush().unwrap();
+        }
+        // Simule une écriture interrompue par un crash (SIGKILL/coupure) : une ligne finale
+        // tronquée, ni valide JSON ni vide, ajoutée directement au fichier (pas via `append`,
+        // qui écrirait toujours une ligne complète).
+        use std::fs::OpenOptions;
+        use std::io::Write as _;
+        let mut raw = OpenOptions::new().append(true).open(&path).unwrap();
+        write!(raw, "{{\"seq\":2,\"payloa").unwrap(); // coupé en plein milieu, pas de \n final
+
+        let entries = WriteBehindJournal::read_since(&path, 0).unwrap();
+
+        assert_eq!(
+            entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1],
+            "la ligne tronquée finale doit être ignorée silencieusement, pas faire échouer la lecture"
+        );
+    }
+
+    #[test]
+    fn read_since_still_errors_on_corruption_that_is_not_the_last_line() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        {
+            let mut journal = WriteBehindJournal::open(&path).unwrap();
+            journal.append(serde_json::json!({"a": 0})).unwrap();
+            journal.flush().unwrap();
+        }
+        use std::fs::OpenOptions;
+        use std::io::Write as _;
+        let mut raw = OpenOptions::new().append(true).open(&path).unwrap();
+        // Ligne du milieu corrompue (pas la dernière), suivie d'une ligne valide complète —
+        // une vraie corruption, pas une écriture interrompue en fin de fichier.
+        writeln!(raw, "not valid json at all").unwrap();
+        {
+            // Ouvrir un nouveau journal pour ajouter une entrée valide APRÈS la ligne corrompue
+            // nécessiterait de connaître le prochain seq — on écrit directement la ligne JSON
+            // valide pour ne pas dépendre de open() (qui échouerait déjà à cause de la ligne
+            // corrompue avant la dernière).
+            writeln!(raw, "{{\"seq\":2,\"payload\":{{}}}}").unwrap();
+        }
+
+        let result = WriteBehindJournal::read_since(&path, 0);
+
+        assert!(
+            result.is_err(),
+            "une ligne corrompue qui N'EST PAS la dernière doit toujours faire échouer la lecture"
+        );
     }
 }
