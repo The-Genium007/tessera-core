@@ -58,8 +58,10 @@ Game.GetPlayer():Tessera_UiTest("phone", false)
 Noms d'écran valides : `phone`, `radio`, `radial`, `walkie`, `devconsole`,
 `kitchensink`. Fichiers :
 `overlay/r6/scripts/Tessera/uikit/UiTestConsole.reds` (dispatcheur) + un
-`UiTest<Écran>.reds` par écran, chacun un **stub documenté** (RTTI-vérifié
-via `tools/nativedb`, mais pas encore testé en jeu — palier H1).
+`UiTest<Écran>.reds` par écran, chacun un **stub documenté** — RTTI-vérifié
+via `tools/nativedb` là où un équivalent natif existe (phone/radio/radial/
+kitchensink), reconstruction pure sans recherche native pour walkie/
+devconsole (D-H7) — dans les deux cas, pas encore testé en jeu (palier H1).
 
 **Tester (H1)** : copier `tests/ui-test-log-TEMPLATE.md` en
 `tests/ui-test-log-YYYY-MM-DD.md`, suivre le protocole de la spec (Partie 4,
