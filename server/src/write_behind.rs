@@ -13,6 +13,7 @@
 use crate::write_behind_journal::{JournalEntry, WriteBehindJournal};
 use sqlx::{PgConnection, PgPool};
 use std::path::Path;
+use std::time::Duration;
 
 /// Applique un lot d'entrées dans la transaction fournie — implémenté par le futur domaine
 /// (pas encore écrit). `drain_batch` appelle `apply` puis avance la marque haute dans la MÊME
@@ -96,6 +97,18 @@ pub fn entries_to_replay(
 ) -> std::io::Result<Vec<JournalEntry>> {
     let since = applied_seq.map(|seq| seq + 1).unwrap_or(0);
     WriteBehindJournal::read_since(journal_path, since)
+}
+
+/// Seuils de déclenchement du lot — valeurs de départ, à affiner en charge (même esprit que
+/// `HOT_STATE_TTL_SECS` dans `hot_state_cache.rs`). Voir design 2026-07-14, "Vidange
+/// asynchrone + idempotence".
+pub const DRAIN_BATCH_SIZE: usize = 50;
+pub const DRAIN_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Vrai dès que l'un des deux seuils est atteint — absorbe les rafales sans attendre
+/// inutilement en cas de calme.
+pub fn should_drain_now(pending_count: usize, elapsed_since_last_drain: Duration) -> bool {
+    pending_count >= DRAIN_BATCH_SIZE || elapsed_since_last_drain >= DRAIN_INTERVAL
 }
 
 #[cfg(test)]
@@ -246,5 +259,23 @@ mod tests {
             to_replay.iter().map(|e| e.seq).collect::<Vec<_>>(),
             vec![3, 4]
         );
+    }
+
+    #[test]
+    fn should_drain_now_true_when_batch_size_threshold_reached() {
+        assert!(should_drain_now(
+            DRAIN_BATCH_SIZE,
+            std::time::Duration::from_millis(0)
+        ));
+    }
+
+    #[test]
+    fn should_drain_now_true_when_interval_elapsed_even_with_few_entries() {
+        assert!(should_drain_now(1, DRAIN_INTERVAL));
+    }
+
+    #[test]
+    fn should_drain_now_false_when_neither_threshold_reached() {
+        assert!(!should_drain_now(1, std::time::Duration::from_millis(1)));
     }
 }
