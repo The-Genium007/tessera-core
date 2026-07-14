@@ -57,7 +57,7 @@ local function loadShardMap()
     print("[TesseraHUD] shard-map.json trouvé mais JSON invalide : " .. tostring(data))
     return nil
   end
-  print("[TesseraHUD] shard-map.json chargé (" .. #(data.shards or {}) .. " shards, " .. #(data.splits or {}) .. " frontières)")
+  print("[TesseraHUD] shard-map.json chargé (" .. #(data.shards or {}) .. " shards)")
   return data
 end
 
@@ -65,36 +65,84 @@ TesseraHUD.shardMap = TesseraHUD.shardMap or loadShardMap()
 
 print("[TesseraHUD] init.lua chargé jusqu'au bout — hotkey en cours d'enregistrement")
 
-local function withinBounds(v, lo, hi)
-  if lo ~= nil and v < lo then return false end
-  if hi ~= nil and v > hi then return false end
-  return true
+-- Schéma Voronoï (shard_map.rs) : chaque shard est un id logique ("group-N") + `boundaryRings`,
+-- des anneaux polygonaux (pas de `minX/maxX` ni de `splits` axis-aligned — ce schéma a remplacé
+-- l'ancien format BSP le 2026-07-09, cf. Groupe G ; ce fichier n'avait pas suivi jusqu'ici et
+-- plantait sur `map.splits`/`ipairs(nil)` dès qu'un vrai shard-map.json post-Voronoï était chargé,
+-- trouvé le 2026-07-14). Point-in-polygon (ray casting) remplace les comparaisons de bornes.
+local function pointInRing(x, y, ring)
+  local inside = false
+  local n = #ring
+  local j = n
+  for i = 1, n do
+    local xi, yi = ring[i][1], ring[i][2]
+    local xj, yj = ring[j][1], ring[j][2]
+    if ((yi > y) ~= (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi) then
+      inside = not inside
+    end
+    j = i
+  end
+  return inside
 end
 
--- Résout l'id de shard contenant (x,y) + la distance à la frontière (split) la plus proche +
--- si on est dans sa zone tampon (± radius.base). nil si shard-map.json est absent/invalide.
+local function pointInShard(x, y, shard)
+  for _, ring in ipairs(shard.boundaryRings) do
+    if pointInRing(x, y, ring) then return true end
+  end
+  return false
+end
+
+local function distToSegment(px, py, ax, ay, bx, by)
+  local dx, dy = bx - ax, by - ay
+  local lenSq = dx * dx + dy * dy
+  if lenSq < 1e-9 then
+    return math.sqrt((px - ax) ^ 2 + (py - ay) ^ 2)
+  end
+  local t = ((px - ax) * dx + (py - ay) * dy) / lenSq
+  t = math.max(0, math.min(1, t))
+  local cx, cy = ax + t * dx, ay + t * dy
+  return math.sqrt((px - cx) ^ 2 + (py - cy) ^ 2)
+end
+
+-- Distance à l'arête la plus proche du polygone du shard courant : chaque arête est partagée
+-- avec la cellule Voronoï voisine, donc "distance à ma propre frontière" équivaut à "distance à
+-- la frontière la plus proche" — pas besoin d'itérer les shards voisins.
+local function nearestEdgeDist(x, y, shard)
+  local nearest = nil
+  for _, ring in ipairs(shard.boundaryRings) do
+    local n = #ring
+    for i = 1, n do
+      local a = ring[i]
+      local b = ring[(i % n) + 1]
+      local d = distToSegment(x, y, a[1], a[2], b[1], b[2])
+      if nearest == nil or d < nearest then nearest = d end
+    end
+  end
+  return nearest
+end
+
+-- Résout le shard contenant (x,y) + la distance à son arête de frontière la plus proche + si on
+-- est dans sa zone tampon (± radius.base). nil si shard-map.json est absent/invalide.
 function TesseraHUD:ComputeShardInfo(x, y)
   local map = TesseraHUD.shardMap
   if map == nil then return nil end
 
-  local currentId = "?"
+  local currentShard = nil
   for _, s in ipairs(map.shards) do
-    if withinBounds(x, s.minX, s.maxX) and withinBounds(y, s.minY, s.maxY) then
-      currentId = s.id
+    if pointInShard(x, y, s) then
+      currentShard = s
       break
     end
   end
 
-  local nearestDist = nil
-  for _, sp in ipairs(map.splits) do
-    local coord = (sp.axis == "x") and x or y
-    local d = math.abs(coord - sp.at)
-    if nearestDist == nil or d < nearestDist then nearestDist = d end
+  if currentShard == nil then
+    return { shardId = "?", borderDist = nil, inBuffer = false }
   end
 
-  local inBuffer = nearestDist ~= nil and nearestDist <= map.radius.base
+  local borderDist = nearestEdgeDist(x, y, currentShard)
+  local inBuffer = borderDist ~= nil and borderDist <= (map.radius.base or 0)
 
-  return { shardId = currentId, borderDist = nearestDist, inBuffer = inBuffer }
+  return { shardId = currentShard.id, borderDist = borderDist, inBuffer = inBuffer }
 end
 
 -- Radar 2D top-down (aligné sur les axes monde, ne tourne PAS avec le regard du joueur — plus
@@ -109,6 +157,11 @@ end
 local RADAR_SIZE = 140
 local RADAR_RANGE_M = 100.0
 
+-- Frontières polygonales Voronoï (pas de ligne de split axis-aligned unique à dessiner à travers
+-- tout le cadre) : dessine les arêtes du polygone du shard COURANT qui tombent dans la portée du
+-- radar, plus un cercle de zone tampon de rayon `radius.base` autour du joueur (approximation
+-- simple d'une distance-à-arête uniforme — une bande par segment suivrait l'angle exact de
+-- chaque arête mais ajoute une complexité géométrique non nécessaire pour un HUD de debug).
 function TesseraHUD:RenderRadar(pos)
   local map = TesseraHUD.shardMap
   if map == nil then return end
@@ -122,21 +175,39 @@ function TesseraHUD:RenderRadar(pos)
 
   drawList:AddRectFilled(originX, originY, originX + RADAR_SIZE, originY + RADAR_SIZE, ImGui.GetColorU32(0.0, 0.0, 0.0, 0.35))
 
-  for _, sp in ipairs(map.splits) do
-    local axisIsX = sp.axis == "x"
-    local playerCoord = axisIsX and pos.x or pos.y
-    local offset = (sp.at - playerCoord) * scale
-    if math.abs(offset) <= RADAR_SIZE / 2 then
-      local bufferPx = (map.radius.base or 0) * scale
-      local bufferColor = ImGui.GetColorU32(1.0, 0.7, 0.0, 0.25)
-      local lineColor = ImGui.GetColorU32(1.0, 0.3, 0.3, 1.0)
-      if axisIsX then
-        drawList:AddRectFilled(cx + offset - bufferPx, originY, cx + offset + bufferPx, originY + RADAR_SIZE, bufferColor)
-        drawList:AddLine(cx + offset, originY, cx + offset, originY + RADAR_SIZE, lineColor, 2.0)
-      else
-        drawList:AddRectFilled(originX, cy + offset - bufferPx, originX + RADAR_SIZE, cy + offset + bufferPx, bufferColor)
-        drawList:AddLine(originX, cy + offset, originX + RADAR_SIZE, cy + offset, lineColor, 2.0)
+  local shardInfo = TesseraHUD:ComputeShardInfo(pos.x, pos.y)
+  local currentShard = nil
+  if shardInfo ~= nil and shardInfo.shardId ~= "?" then
+    for _, s in ipairs(map.shards) do
+      if s.id == shardInfo.shardId then
+        currentShard = s
+        break
       end
+    end
+  end
+
+  if currentShard ~= nil then
+    local lineColor = ImGui.GetColorU32(1.0, 0.3, 0.3, 1.0)
+    local halfSize = RADAR_SIZE / 2
+    for _, ring in ipairs(currentShard.boundaryRings) do
+      local n = #ring
+      for i = 1, n do
+        local a = ring[i]
+        local b = ring[(i % n) + 1]
+        local ax, ay = (a[1] - pos.x) * scale, (a[2] - pos.y) * scale
+        local bx, by = (b[1] - pos.x) * scale, (b[2] - pos.y) * scale
+        -- Ne dessine que les arêtes qui touchent au moins partiellement le cadre du radar.
+        if (math.abs(ax) <= halfSize or math.abs(bx) <= halfSize)
+            and (math.abs(ay) <= halfSize or math.abs(by) <= halfSize) then
+          drawList:AddLine(cx + ax, cy + ay, cx + bx, cy + by, lineColor, 2.0)
+        end
+      end
+    end
+
+    local bufferPx = (map.radius.base or 0) * scale
+    if bufferPx > 0 then
+      local bufferColor = ImGui.GetColorU32(1.0, 0.7, 0.0, 0.6)
+      drawList:AddCircle(cx, cy, bufferPx, bufferColor, 32, 2.0)
     end
   end
 

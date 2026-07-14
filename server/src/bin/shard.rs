@@ -21,7 +21,7 @@ async fn main() -> std::io::Result<()> {
         .position(|a| a == "--manifest")
         .and_then(|i| v.get(i + 1))
         .unwrap_or_else(|| {
-            eprintln!("usage: shard <listen_addr> --manifest <path/to/server.toml> [--group-id <n>] [--metrics-addr <addr>]");
+            eprintln!("usage: shard <listen_addr> --manifest <path/to/server.toml> --group-id <n> [--metrics-addr <addr>]");
             std::process::exit(1);
         });
     let metrics_addr = v

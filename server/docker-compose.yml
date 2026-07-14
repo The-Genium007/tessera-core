@@ -1,5 +1,10 @@
-# docker-compose.yml — topologie réelle TesseraSynth (Gateway + 2 Shards + Postgres + Redis),
+# docker-compose.yml — topologie réelle TesseraSynth (Gateway + 10 Shards + Postgres + Redis),
 # miroir de server.docker.toml. Le manifeste est monté en volume, pas embarqué dans l'image.
+#
+# 10 shards (2026-07-14) : granularité maximale de l'artefact d'autorité Voronoï pour
+# server_count = 10 (1 cellule par groupe, cf. commentaire --group-id du service shard-a
+# ci-dessous). Topologie statique/froide — pas de re-sharding à chaud tant qu'un seul VPS est en
+# jeu (voir §5.6/§7.5 de la roadmap production).
 #
 # ⚠️ Le jeu parle en UDP (port du Gateway), pas HTTP — pas de tunnel Cloudflare pour ce port,
 # il doit être ouvert directement sur le pare-feu du serveur (voir server/README.md).
@@ -49,6 +54,11 @@ services:
       # accessible depuis l'intérieur du réseau Docker (ex. un futur Prometheus interne).
     volumes:
       - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+      # `authority_artifact = "authority.json"` du manifeste est un chemin relatif résolu contre
+      # le répertoire du manifeste (/etc/tessera/) — sans ce montage, le Gateway boucle en crash
+      # au boot ("artefact d'autorité illisible", trouvé en test local 2026-07-14). Seul le
+      # Gateway en a besoin (bin/shard.rs n'appelle jamais load_authority_topology).
+      - ${AUTHORITY_ARTIFACT_PATH:-./authority.json}:/etc/tessera/authority.json:ro
       - tessera-players:/data
     environment:
       RUST_LOG: ${RUST_LOG:-info}
@@ -88,11 +98,33 @@ services:
         condition: service_started
       shard-b:
         condition: service_started
+      shard-c:
+        condition: service_started
+      shard-d:
+        condition: service_started
+      shard-e:
+        condition: service_started
+      shard-f:
+        condition: service_started
+      shard-g:
+        condition: service_started
+      shard-h:
+        condition: service_started
+      shard-i:
+        condition: service_started
+      shard-j:
+        condition: service_started
 
+  # 10 shards = granularité maximale de l'artefact Voronoï pour `server_count = 10`
+  # (`assignment_patterns["10"]` = 1 cellule par groupe, pas de fusion — vérifié via
+  # `python3 -c "json.load(...)"` sur authority.json le 2026-07-14) : topologie **froide**,
+  # figée au démarrage (§5.6/§7.5 — pas de re-sharding à chaud pour l'instant, inutile tant
+  # qu'un seul VPS est en jeu). `--group-id <n>` = index dans `assignment_patterns["10"]`,
+  # traçabilité/logging uniquement (le routage reste au Gateway, `ShardTopology::locate`).
   shard-a:
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
     pull_policy: always
-    command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
+    command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--group-id", "0", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
     mem_limit: ${SHARD_MEM_LIMIT:-512m}
     cpus: ${SHARD_CPUS:-1.0}
@@ -105,7 +137,111 @@ services:
   shard-b:
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
     pull_policy: always
-    command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--metrics-addr", "0.0.0.0:9101"]
+    command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--group-id", "1", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-c:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    command: ["tessera-shard", "0.0.0.0:27032", "--manifest", "/etc/tessera/server.toml", "--group-id", "2", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-d:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    command: ["tessera-shard", "0.0.0.0:27033", "--manifest", "/etc/tessera/server.toml", "--group-id", "3", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-e:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    command: ["tessera-shard", "0.0.0.0:27034", "--manifest", "/etc/tessera/server.toml", "--group-id", "4", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-f:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    command: ["tessera-shard", "0.0.0.0:27035", "--manifest", "/etc/tessera/server.toml", "--group-id", "5", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-g:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    command: ["tessera-shard", "0.0.0.0:27036", "--manifest", "/etc/tessera/server.toml", "--group-id", "6", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-h:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    command: ["tessera-shard", "0.0.0.0:27037", "--manifest", "/etc/tessera/server.toml", "--group-id", "7", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-i:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    command: ["tessera-shard", "0.0.0.0:27038", "--manifest", "/etc/tessera/server.toml", "--group-id", "8", "--metrics-addr", "0.0.0.0:9101"]
+    restart: unless-stopped
+    mem_limit: ${SHARD_MEM_LIMIT:-512m}
+    cpus: ${SHARD_CPUS:-1.0}
+    logging: *default-logging
+    volumes:
+      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+
+  shard-j:
+    image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
+    pull_policy: always
+    command: ["tessera-shard", "0.0.0.0:27039", "--manifest", "/etc/tessera/server.toml", "--group-id", "9", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
     mem_limit: ${SHARD_MEM_LIMIT:-512m}
     cpus: ${SHARD_CPUS:-1.0}
