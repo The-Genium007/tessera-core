@@ -25,6 +25,7 @@ pub mod snapshot_merge;
 pub mod transport;
 pub mod world;
 pub mod world_clock;
+pub mod write_behind;
 pub mod write_behind_journal;
 
 #[cfg(feature = "gns")]
