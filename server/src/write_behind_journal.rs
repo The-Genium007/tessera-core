@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -19,6 +19,66 @@ pub struct WriteBehindJournal {
     next_seq: u64,
 }
 
+/// Résultat interne du scan d'un journal : les entrées valides (respectant `since_seq`), et la
+/// longueur en octets du fichier jusqu'à la fin de la dernière entrée valide complète — ignore
+/// les octets d'une éventuelle ligne finale tronquée par un crash. `open()` utilise cette
+/// longueur pour tronquer physiquement le fichier (un seul appel `set_len`, atomique) avant de
+/// reprendre l'écriture — voir sa doc pour pourquoi une réécriture complète a été écartée.
+struct ScanOutcome {
+    entries: Vec<JournalEntry>,
+    clean_len: u64,
+}
+
+/// Lit `path` en octets bruts (pas ligne par ligne) pour pouvoir suivre précisément la position
+/// en octets de chaque ligne — nécessaire à `ScanOutcome::clean_len`. Une ligne complète (`\n`
+/// terminale présente) qui échoue à parser est une vraie corruption (erreur immédiate). Un
+/// reste final SANS `\n` est traité comme une écriture tronquée par un crash : ignoré
+/// silencieusement, jamais compté dans `clean_len` ni dans les entrées retournées.
+fn scan(path: &Path, since_seq: u64) -> io::Result<ScanOutcome> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(ScanOutcome {
+                entries: Vec::new(),
+                clean_len: 0,
+            })
+        }
+        Err(e) => return Err(e),
+    };
+
+    let mut entries = Vec::new();
+    let mut clean_len: u64 = 0;
+    let mut pos: usize = 0;
+
+    while pos < bytes.len() {
+        let rest = &bytes[pos..];
+        match rest.iter().position(|&b| b == b'\n') {
+            Some(newline_index) => {
+                let line = &rest[..newline_index];
+                let consumed = newline_index + 1;
+                if !line.is_empty() {
+                    let text = std::str::from_utf8(line).map_err(io::Error::other)?;
+                    let entry: JournalEntry =
+                        serde_json::from_str(text).map_err(io::Error::other)?;
+                    if entry.seq >= since_seq {
+                        entries.push(entry);
+                    }
+                }
+                pos += consumed;
+                clean_len = pos as u64;
+            }
+            None => {
+                // Reste final sans `\n` : soit vide, soit une écriture tronquée par un crash —
+                // dans les deux cas on s'arrête ici sans avancer clean_len, sans erreur (voir
+                // doc de fonction).
+                break;
+            }
+        }
+    }
+
+    Ok(ScanOutcome { entries, clean_len })
+}
+
 impl WriteBehindJournal {
     /// Ouvre (ou crée) le journal à `path`. Si le fichier existe déjà (redémarrage après
     /// crash), relit la dernière entrée pour reprendre la numérotation de séquence là où elle
@@ -28,25 +88,25 @@ impl WriteBehindJournal {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let entries = Self::read_since(path, 0)?;
-        let next_seq = entries.last().map(|entry| entry.seq + 1).unwrap_or(0);
-
-        // Réécrit le fichier propre à partir des entrées valides (une éventuelle dernière ligne
-        // tronquée par un crash, déjà écartée par read_since ci-dessus, n'existe plus après cette
-        // réécriture) — sans ça, le prochain append() écrirait à la suite des octets tronqués,
-        // fusionnant deux lignes en une seule illisible et perdant silencieusement la nouvelle
-        // entrée au prochain redémarrage (trouvé en re-revue de cette tâche).
-        {
-            let mut rewritten = File::create(path)?;
-            for entry in &entries {
-                let line =
-                    serde_json::to_string(entry).expect("JournalEntry serialization cannot fail");
-                writeln!(rewritten, "{line}")?;
-            }
-            rewritten.sync_data()?;
-        }
+        let outcome = scan(path, 0)?;
+        let next_seq = outcome
+            .entries
+            .last()
+            .map(|entry| entry.seq + 1)
+            .unwrap_or(0);
 
         let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let current_len = file.metadata()?.len();
+        if outcome.clean_len < current_len {
+            // Une ligne tronquée par un crash traîne en fin de fichier (voir `scan`) — retirée
+            // par un seul appel `set_len`, atomique : contrairement à une réécriture complète
+            // du fichier (essayée dans un correctif précédent, écartée en revue), `set_len` ne
+            // déplace aucune donnée et n'a pas d'état intermédiaire interrompable — soit il
+            // aboutit, soit il n'a aucun effet, jamais une perte partielle d'entrées déjà
+            // durcies. Appelé seulement quand nécessaire : un redémarrage propre (pas de ligne
+            // tronquée) ne touche pas le fichier du tout.
+            file.set_len(outcome.clean_len)?;
+        }
         Ok(Self { file, next_seq })
     }
 
@@ -74,44 +134,7 @@ impl WriteBehindJournal {
     /// `open` (reprise de numérotation) et par la récupération après crash (`write_behind.rs`,
     /// `entries_to_replay`).
     pub fn read_since(path: &Path, since_seq: u64) -> io::Result<Vec<JournalEntry>> {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e),
-        };
-        let reader = BufReader::new(file);
-        let lines = reader
-            .lines()
-            .collect::<io::Result<Vec<String>>>()?
-            .into_iter()
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
-        let last_index = lines.len().checked_sub(1);
-
-        let mut entries = Vec::new();
-        for (index, line) in lines.iter().enumerate() {
-            let parsed: Result<JournalEntry, _> = serde_json::from_str(line);
-            let entry = match parsed {
-                Ok(entry) => entry,
-                Err(err) => {
-                    if Some(index) == last_index {
-                        // Dernière ligne illisible : écriture probablement interrompue par un
-                        // crash (SIGKILL, coupure) entre les deux syscalls d'un `writeln!` —
-                        // c'est exactement le scénario que ce journal doit permettre de
-                        // traverser. On l'ignore silencieusement plutôt que de faire échouer
-                        // `open`/`read_since` de façon permanente.
-                        break;
-                    }
-                    // Corruption ailleurs qu'en toute fin de fichier : un cas plus sérieux,
-                    // on continue à échouer bruyamment.
-                    return Err(io::Error::other(err));
-                }
-            };
-            if entry.seq >= since_seq {
-                entries.push(entry);
-            }
-        }
-        Ok(entries)
+        Ok(scan(path, since_seq)?.entries)
     }
 }
 
@@ -320,6 +343,39 @@ mod tests {
                     payload: serde_json::json!({"a": 1})
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn open_on_a_clean_journal_does_not_truncate_any_valid_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        {
+            let mut journal = WriteBehindJournal::open(&path).unwrap();
+            journal.append(serde_json::json!({"a": 0})).unwrap();
+            journal.append(serde_json::json!({"a": 1})).unwrap();
+            journal.flush().unwrap();
+        }
+
+        // Aucune ligne tronquée ici (arrêt propre) — un redémarrage ne doit rien perdre.
+        let reopened_entries = {
+            let _journal = WriteBehindJournal::open(&path).unwrap();
+            WriteBehindJournal::read_since(&path, 0).unwrap()
+        };
+
+        assert_eq!(
+            reopened_entries,
+            vec![
+                JournalEntry {
+                    seq: 0,
+                    payload: serde_json::json!({"a": 0})
+                },
+                JournalEntry {
+                    seq: 1,
+                    payload: serde_json::json!({"a": 1})
+                },
+            ],
+            "un redémarrage propre (sans ligne tronquée) ne doit jamais perdre d'entrée valide"
         );
     }
 }
