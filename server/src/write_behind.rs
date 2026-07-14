@@ -10,8 +10,9 @@
 //! de `BatchApplier` plutôt que d'être câblé en dur ici (voir design 2026-07-14, "Ce que cette
 //! spec ne couvre pas").
 
-use crate::write_behind_journal::JournalEntry;
+use crate::write_behind_journal::{JournalEntry, WriteBehindJournal};
 use sqlx::{PgConnection, PgPool};
+use std::path::Path;
 
 /// Applique un lot d'entrées dans la transaction fournie — implémenté par le futur domaine
 /// (pas encore écrit). `drain_batch` appelle `apply` puis avance la marque haute dans la MÊME
@@ -84,6 +85,17 @@ pub async fn drain_batch<A: BatchApplier>(
     .map_err(DrainError::Sqlx)?;
     tx.commit().await.map_err(DrainError::Sqlx)?;
     Ok(last_seq)
+}
+
+/// Calcule les entrées du journal local à rejouer après un redémarrage du Gateway : celles
+/// dont le numéro de séquence dépasse `applied_seq` (marque haute Postgres). `None` = ce flux
+/// n'a jamais été drainé, tout le journal doit être rejoué.
+pub fn entries_to_replay(
+    journal_path: &Path,
+    applied_seq: Option<u64>,
+) -> std::io::Result<Vec<JournalEntry>> {
+    let since = applied_seq.map(|seq| seq + 1).unwrap_or(0);
+    WriteBehindJournal::read_since(journal_path, since)
 }
 
 #[cfg(test)]
@@ -166,6 +178,73 @@ mod tests {
             read_progress(&pool, "test-stream").await.unwrap(),
             None,
             "la marque haute ne doit jamais avancer si l'application du domaine échoue"
+        );
+    }
+
+    #[test]
+    fn entries_to_replay_returns_everything_when_never_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = WriteBehindJournal::open(&path).unwrap();
+        journal.append(serde_json::json!({"a": 0})).unwrap();
+        journal.append(serde_json::json!({"a": 1})).unwrap();
+        journal.flush().unwrap();
+
+        let to_replay = entries_to_replay(&path, None).unwrap();
+
+        assert_eq!(
+            to_replay.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn entries_to_replay_returns_only_entries_after_the_applied_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = WriteBehindJournal::open(&path).unwrap();
+        journal.append(serde_json::json!({"a": 0})).unwrap();
+        journal.append(serde_json::json!({"a": 1})).unwrap();
+        journal.append(serde_json::json!({"a": 2})).unwrap();
+        journal.flush().unwrap();
+
+        let to_replay = entries_to_replay(&path, Some(0)).unwrap();
+
+        assert_eq!(
+            to_replay.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn recovery_replays_exactly_the_entries_not_yet_durably_applied(pool: PgPool) {
+        // Reproduit le scénario du plan de test du design 2026-07-14 : 5 actions journalisées
+        // localement, seules les 3 premières durcies en Postgres avant un crash simulé.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = WriteBehindJournal::open(&path).unwrap();
+        for i in 0..5 {
+            journal.append(serde_json::json!({"a": i})).unwrap();
+        }
+        journal.flush().unwrap();
+
+        let first_batch: Vec<JournalEntry> = WriteBehindJournal::read_since(&path, 0)
+            .unwrap()
+            .into_iter()
+            .take(3)
+            .collect();
+        drain_batch(&pool, "test-stream", &first_batch, &NoopApplier)
+            .await
+            .unwrap();
+
+        // "Redémarrage" : on relit la marque haute Postgres, puis on calcule ce qu'il reste à
+        // rejouer depuis le journal local — exactement les entrées jamais durcies.
+        let progress = read_progress(&pool, "test-stream").await.unwrap();
+        let to_replay = entries_to_replay(&path, progress).unwrap();
+
+        assert_eq!(
+            to_replay.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 4]
         );
     }
 }
