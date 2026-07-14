@@ -239,7 +239,10 @@ mod tests {
             .iter()
             .max_by(|a, b| a.estimated_load.partial_cmp(&b.estimated_load).unwrap())
             .unwrap();
-        assert_eq!(hottest.code, "AAA", "la plus petite aire doit être la plus chaude");
+        assert_eq!(
+            hottest.code, "AAA",
+            "la plus petite aire doit être la plus chaude"
+        );
         let n = art.cells.len() - 1;
         let pattern = &art.assignment_patterns[&n];
         let hot_group = pattern.iter().find(|g| g.contains(&hottest.id)).unwrap();
@@ -249,5 +252,4 @@ mod tests {
             "la cellule la plus chaude ne doit pas participer à la première fusion: {pattern:?}"
         );
     }
-
 }
