@@ -28,10 +28,24 @@ impl WriteBehindJournal {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let next_seq = Self::read_since(path, 0)?
-            .last()
-            .map(|entry| entry.seq + 1)
-            .unwrap_or(0);
+        let entries = Self::read_since(path, 0)?;
+        let next_seq = entries.last().map(|entry| entry.seq + 1).unwrap_or(0);
+
+        // Réécrit le fichier propre à partir des entrées valides (une éventuelle dernière ligne
+        // tronquée par un crash, déjà écartée par read_since ci-dessus, n'existe plus après cette
+        // réécriture) — sans ça, le prochain append() écrirait à la suite des octets tronqués,
+        // fusionnant deux lignes en une seule illisible et perdant silencieusement la nouvelle
+        // entrée au prochain redémarrage (trouvé en re-revue de cette tâche).
+        {
+            let mut rewritten = File::create(path)?;
+            for entry in &entries {
+                let line =
+                    serde_json::to_string(entry).expect("JournalEntry serialization cannot fail");
+                writeln!(rewritten, "{line}")?;
+            }
+            rewritten.sync_data()?;
+        }
+
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self { file, next_seq })
     }
@@ -259,6 +273,53 @@ mod tests {
         assert!(
             result.is_err(),
             "une ligne corrompue qui N'EST PAS la dernière doit toujours faire échouer la lecture"
+        );
+    }
+
+    #[test]
+    fn open_after_a_torn_trailing_line_cleans_the_file_so_subsequent_appends_stay_valid() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        {
+            let mut journal = WriteBehindJournal::open(&path).unwrap();
+            journal.append(serde_json::json!({"a": 0})).unwrap();
+            journal.flush().unwrap();
+        }
+        // Simule un crash en pleine écriture : ligne tronquée ajoutée directement au fichier
+        // (pas via `append`, qui écrirait toujours une ligne complète avec son `\n` final).
+        use std::fs::OpenOptions;
+        use std::io::Write as _;
+        {
+            let mut raw = OpenOptions::new().append(true).open(&path).unwrap();
+            write!(raw, "{{\"seq\":1,\"payloa").unwrap(); // pas de \n final
+        }
+
+        // Redémarrage : open() doit nettoyer le fichier (retirer les octets tronqués) avant de
+        // reprendre l'écriture — sinon le prochain append() se fusionnerait avec ces octets.
+        let mut reopened = WriteBehindJournal::open(&path).unwrap();
+        let seq = reopened.append(serde_json::json!({"a": 1})).unwrap();
+        reopened.flush().unwrap();
+
+        assert_eq!(
+            seq, 1,
+            "la numérotation doit reprendre après l'entrée 0, la ligne tronquée ne comptant pas"
+        );
+
+        // Relire tout le journal depuis le disque : la nouvelle entrée doit être lisible et
+        // correcte, pas fusionnée avec les octets tronqués laissés par le crash simulé.
+        let entries = WriteBehindJournal::read_since(&path, 0).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                JournalEntry {
+                    seq: 0,
+                    payload: serde_json::json!({"a": 0})
+                },
+                JournalEntry {
+                    seq: 1,
+                    payload: serde_json::json!({"a": 1})
+                },
+            ]
         );
     }
 }
