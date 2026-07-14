@@ -82,8 +82,6 @@ pub fn generate(
 
     let grid: Grid = rasterize(&protos, &districts, p);
     let adj = adjacency(&grid, protos.len());
-    let uniform = vec![1.0; protos.len()];
-    let patterns = assignment_patterns(protos.len(), &adj, &uniform);
 
     // event_weight par code (pour estimated_load)
     let w_by_code: BTreeMap<&str, f64> = districts
@@ -91,6 +89,22 @@ pub fn generate(
         .map(|d| (d.code.as_str(), event_weight(d)))
         .collect();
     let total_w: f64 = w_by_code.values().sum();
+
+    // Charge estimée par proto-cellule, indexée exactement comme `protos` (donc comme
+    // `adj` et `grid.owner`) — calculée AVANT les patterns : la fusion pondérée en dépend.
+    let loads: Vec<f64> = protos
+        .iter()
+        .map(|proto| {
+            proto
+                .district_codes
+                .iter()
+                .filter_map(|c| w_by_code.get(c.as_str()))
+                .sum::<f64>()
+                / if total_w > 0.0 { total_w } else { 1.0 }
+        })
+        .collect();
+
+    let patterns = assignment_patterns(protos.len(), &adj, &loads);
 
     let cell_area = grid.step * grid.step;
     let mut counts = vec![0usize; protos.len()];
@@ -106,12 +120,6 @@ pub fn generate(
             .iter()
             .map(|r| inscribed_radius(r, 30))
             .fold(0.0, f64::max);
-        let load: f64 = proto
-            .district_codes
-            .iter()
-            .filter_map(|c| w_by_code.get(c.as_str()))
-            .sum::<f64>()
-            / if total_w > 0.0 { total_w } else { 1.0 };
         cells.push(Cell {
             id: i,
             code: cell_code(&proto.district_codes),
@@ -123,7 +131,7 @@ pub fn generate(
             r_min: p.r_min(proto.regime),
             r_inscribed,
             area: counts[i] as f64 * cell_area,
-            estimated_load: load,
+            estimated_load: loads[i],
             boundary_rings: rings,
         });
     }
@@ -208,4 +216,38 @@ mod tests {
             "générer sans quartier doit échouer proprement, pas paniquer"
         );
     }
+    #[test]
+    fn hottest_cell_stays_alone_at_first_merge() {
+        // Trois quartiers en périphérie (aire > DENSE_AREA_THRESHOLD = 3.2 km², donc une
+        // proto-cellule chacun, triés par code : AAA=0, MMM=1, ZZZ=2). event_weight = 1/aire :
+        // AAA (2×2 km, 4 km²) est la cellule CHAUDE ; MMM et ZZZ (4×4 km, 16 km²) sont froides.
+        // Disposés en trois bandes verticales dans le raster → adjacence en chaîne AAA—MMM—ZZZ.
+        // À N = cells-1 (une seule fusion), la paire fusionnée doit être la plus froide
+        // (MMM, ZZZ) — et surtout NE PAS contenir AAA.
+        let sample = r#"{"entries":[
+          {"id":"a","tweakdb_path":"Districts.HotSpot","code":"AAA","has_transform":true,
+           "polygon":[[-7000,-1000],[-5000,-1000],[-5000,1000],[-7000,1000]]},
+          {"id":"b","tweakdb_path":"Districts.ColdMid","code":"MMM","has_transform":true,
+           "polygon":[[-3000,-2000],[1000,-2000],[1000,2000],[-3000,2000]]},
+          {"id":"c","tweakdb_path":"Districts.ColdEast","code":"ZZZ","has_transform":true,
+           "polygon":[[3000,-2000],[7000,-2000],[7000,2000],[3000,2000]]}
+        ],"warnings":[]}"#;
+        let art = generate(sample, None, &Params::default()).unwrap();
+        assert_eq!(art.cells.len(), 3);
+        let hottest = art
+            .cells
+            .iter()
+            .max_by(|a, b| a.estimated_load.partial_cmp(&b.estimated_load).unwrap())
+            .unwrap();
+        assert_eq!(hottest.code, "AAA", "la plus petite aire doit être la plus chaude");
+        let n = art.cells.len() - 1;
+        let pattern = &art.assignment_patterns[&n];
+        let hot_group = pattern.iter().find(|g| g.contains(&hottest.id)).unwrap();
+        assert_eq!(
+            hot_group.len(),
+            1,
+            "la cellule la plus chaude ne doit pas participer à la première fusion: {pattern:?}"
+        );
+    }
+
 }
