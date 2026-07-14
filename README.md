@@ -5,7 +5,7 @@ reste le client visuel (moddé au runtime), et un **serveur Rust autoritaire** h
 monde partagé. Modèle **self-host** : chaque opérateur fait tourner son propre serveur,
 il n'y a pas d'infrastructure centrale.
 
-**Licence : à déterminer.**
+**Licence : [MIT](LICENSE).**
 
 ## Ce que fait le moteur
 
@@ -27,9 +27,10 @@ il n'y a pas d'infrastructure centrale.
 | `directory/` | Outil `tessera-directory` : dérive et signe (Ed25519) le `servers.json` public d'un opérateur depuis son manifeste serveur | Rust | macOS / Linux / Windows |
 | `voip/` | Voix de proximité spatiale (les joueurs n'entendent que les voix proches en jeu) | Mumble/Murmur | macOS / Linux / Windows |
 
-Décisions d'architecture détaillées dans [`docs/`](docs/) (ADR 0001 à 0005) : version de
-jeu épinglée, réutilisation de Cyberverse, binding GNS, chaîne de modding Windows,
-port du client vers 2.31.
+Décisions d'architecture détaillées dans [`docs/`](docs/) — voir l'[index des ADR](docs/README.md) :
+version de jeu épinglée, réutilisation de Cyberverse, binding GNS, chaîne de modding
+Windows, port du client vers 2.31, distribution & signature des modsets, autorité
+serveur sur l'heure du monde.
 
 ## Builder
 
@@ -113,3 +114,12 @@ exclusivement en **modding runtime** sur une installation légitime du jeu.
 
 Voir [CONTRIBUTING.md](CONTRIBUTING.md) : conventions de commits, TDD, formatage,
 et politique vis-à-vis des assets CDPR.
+
+## Signaler une vulnérabilité
+
+Voir [SECURITY.md](SECURITY.md) — ne pas ouvrir d'issue publique pour une faille de
+sécurité.
+
+## Historique des changements
+
+Voir [CHANGELOG.md](CHANGELOG.md).

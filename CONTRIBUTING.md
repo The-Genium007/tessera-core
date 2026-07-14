@@ -59,5 +59,10 @@ Toute PR contenant des assets, données ou binaires issus du jeu sera refusée.
 
 ## Licence
 
-Licence : à déterminer. En contribuant, tu acceptes que ta contribution soit publiée
-sous la licence qui sera retenue pour le projet.
+Ce projet est sous licence [MIT](LICENSE). En contribuant, tu acceptes que ta
+contribution soit publiée sous cette licence.
+
+## Signaler une vulnérabilité
+
+Une faille de sécurité (pas un bug fonctionnel) ? Suis [SECURITY.md](SECURITY.md) —
+ne pas ouvrir d'issue publique.
