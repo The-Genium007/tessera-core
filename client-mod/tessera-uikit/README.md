@@ -9,9 +9,11 @@ rationale complets dans
 pour piocher dedans au moment de construire un écran précis.
 
 **Plateforme :** Windows-only (redscript compile en jeu au lancement). Se
-conçoit/écrit sur macOS, se **teste en jeu**. Ce fichier précède le code : au
-2026-07-06, aucun palier (U0+) n'a démarré — voir la spec pour l'état des
-paliers.
+conçoit/écrit sur macOS, se **teste en jeu**. Au 2026-07-06, aucun palier
+(U0+) n'avait démarré. Depuis le 2026-07-14, un **harnais de test
+exploratoire** (paliers H0/H1, spec `2026-07-14-ui-test-harness-design.md`)
+existe en parallèle du chantier U0+ — voir §0 ci-dessous. U0+ (catalogue
+d'atlas + réutilisation prouvée) n'a toujours pas démarré.
 
 **Contrainte dure (CLAUDE.md) :** ne rien redistribuer des assets CDPR. Tout ce
 qui suit est construit **autour** de cette contrainte — voir Partie 4 de la
@@ -32,6 +34,37 @@ spec pour le détail de la ligne rouge.
    technique et l'exemple de code.
 4. Mets à jour le catalogue (§5) avec ce que tu as trouvé/prouvé — comme
    `tessera-desossage/README.md` le fait pour ses leviers.
+
+---
+
+## 0. Harnais de test exploratoire (paliers H0/H1)
+
+Spec dédiée : `docs/superpowers/specs/2026-07-14-ui-test-harness-design.md`
+(D-H1 à D-H7). Objectif : qualifier rapidement l'affichage d'un florilège de
+6 écrans candidats, avant de choisir lesquels deviennent des features
+réelles — distinct du chantier U0+ (catalogue d'atlas) ci-dessous, qui n'a
+pas démarré.
+
+**Mécanisme (H0)** : `Tessera_UiTest(name: String, open: Bool)`, méthode
+`@addMethod` sur `PlayerPuppet`, appelable depuis la console CET sans
+rebuild — même pattern que `Tessera_SetLever`
+(`tessera-desossage/README.md`).
+
+```lua
+Game.GetPlayer():Tessera_UiTest("phone", true)
+Game.GetPlayer():Tessera_UiTest("phone", false)
+```
+
+Noms d'écran valides : `phone`, `radio`, `radial`, `walkie`, `devconsole`,
+`kitchensink`. Fichiers :
+`overlay/r6/scripts/Tessera/uikit/UiTestConsole.reds` (dispatcheur) + un
+`UiTest<Écran>.reds` par écran, chacun un **stub documenté** (RTTI-vérifié
+via `tools/nativedb`, mais pas encore testé en jeu — palier H1).
+
+**Tester (H1)** : copier `tests/ui-test-log-TEMPLATE.md` en
+`tests/ui-test-log-YYYY-MM-DD.md`, suivre le protocole de la spec (Partie 4,
+D-H2) — un fichier log + des captures manuelles par session, partagés après
+coup pour mettre à jour ce guide.
 
 ---
 
@@ -224,8 +257,9 @@ moment de la spec dans
 
 | Catégorie | Écran RP visé | Base officielle candidate | Stratégie candidate | Statut |
 |---|---|---|---|---|
-| Communication | Téléphone (appels, contacts, textos) | Écran d'appel/contacts (fixeurs) | 1a/1b à explorer, sinon 2 | Pas exploré |
-| Communication | Walkie-talkie / radio (canaux, PTT) | Variante du téléphone | 2 (variante, pas verbatim) | Pas exploré |
+| Communication | Téléphone (appels, contacts, textos) | `HudPhoneGameController`/`PhoneSystem` (RTTI confirmé, palier H0) | 1a à tester en premier (H1) | Repéré (harnais H0) |
+| Communication | Radio véhicule (stations partagées) | `VehicleRadioPopupGameController.Activate()` (RTTI confirmé, palier H0) | 1a à tester en premier (H1) | Repéré (harnais H0) |
+| Communication | Walkie-talkie / radio (canaux, PTT) | Aucune (concept 100% Tessera, D-H7) | 2 (reconstruction, pas de recherche native) | Repéré (harnais H0, stub) |
 | Commerce | Magasin (achat/vente) | Écran vendeur/marchand | 1a/1b à explorer, sinon 2 | Pas exploré |
 | Commerce | Distributeur / kiosque | `VendingMachineControllerPS` | 1b (déjà hooké par désossage pour autre chose) | Repéré (désossage) |
 | Commerce | Échange entre joueurs | Pas d'équivalent direct | 2, inspiré du vendeur/inventaire | Pas exploré |
@@ -237,7 +271,7 @@ moment de la spec dans
 | Identité | **[PRIORITÉ]** Fiche de personnage | Écran de caractéristiques/attributs | 1a/1b à explorer, sinon 2 | Pas exploré |
 | Identité | **[PRIORITÉ]** Montée personnelle / attribution de points | Écran d'attribution (level-up, partagé avec le creator) | 1b présentation seulement — jamais la donnée | Pas exploré |
 | Identité | **[PRIORITÉ]** Création de personnage | Character creator natif | 1a — **propriété de `2026-07-06-character-creation-design.md` B2, ne pas dupliquer ici** | Recherche en cours (spec dédiée) |
-| Social | Menu d'interaction / roue contextuelle | Roue de dialogue / menu quickhack | 1a/1b à explorer, sinon 2 | Pas exploré |
+| Social | Menu d'interaction / roue contextuelle (+ radial imbriqué/émotes) | `RadialMenuGameController.SetVisible(Bool)` (RTTI confirmé, palier H0) | 1a à tester en premier (H1) | Repéré (harnais H0) |
 | Feedback | Notifications système | Popups HUD natifs | 1a/1b à explorer, sinon 2 | Pas exploré |
 | Feedback | Barre de progression / timer | Cercle breach protocol / barre de craft | 1a/1b à explorer, sinon 2 | Pas exploré |
 | Navigation | Statut logement/loyer | `ApartmentScreenControllerPS` | 1a/1b déjà repéré | Repéré (désossage) |
