@@ -3,6 +3,7 @@
 pub mod admin_commands;
 pub mod admin_store;
 pub mod anticheat;
+pub mod attestation;
 pub mod framing;
 pub mod gateway;
 pub mod gateway_routing;
