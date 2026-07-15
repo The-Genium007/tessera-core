@@ -340,6 +340,51 @@ mod tests {
         );
     }
 
+    /// Octets d'un `Join` produits par le VRAI encodeur C++ du client (fork Cyberverse,
+    /// `NetworkGameSystem::SendJoin`, flatc 25.12.19), capturés le 2026-07-15 et figés ici.
+    ///
+    /// Pourquoi en dur plutôt que ré-encodés en Rust : tous les autres tests de ce module encodent
+    /// ET décodent avec le même code Rust — ils prouvent que le serveur est cohérent avec
+    /// lui-même, jamais qu'il s'entend avec le client. C'est exactement l'angle mort qui a rendu
+    /// le jeu injouable le 2026-07-15 : `protocol_version` ajouté au schéma le 07-13, netcode
+    /// publié le 06-29 dont l'en-tête généré ignorait le champ → `CreateJoin` ne le posait pas →
+    /// le serveur lisait le défaut 0 → kick à chaque connexion. Les deux suites de tests étaient
+    /// vertes ; le fil était cassé.
+    ///
+    /// Ce buffer transforme cette hypothèse implicite en assertion : si le schéma bouge sans que
+    /// l'en-tête du fork soit régénéré (ou l'inverse), ce test rougit ici, en `cargo test` sur
+    /// macOS — sans PC Windows, sans build du jeu, sans lancer une partie.
+    ///
+    /// Le regénérer : voir `kTesseraProtocolVersion` dans `NetworkGameSystem.cpp` (fork).
+    const CPP_CLIENT_JOIN_V1: &[u8] = &[
+        0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0e, 0x00, 0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x0c, 0x00,
+        0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x4c, 0x75, 0x63, 0x61, 0x73, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn server_decodes_a_join_encoded_by_the_real_cpp_client() {
+        let (name, token, version) =
+            extract_join_fields(CPP_CLIENT_JOIN_V1).expect("le Join du client C++ doit se décoder");
+        assert_eq!(name, "Lucas");
+        assert_eq!(token, ""); // pas encore câblé côté client (JWT ZITADEL à venir)
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn the_cpp_client_join_is_accepted_by_the_version_check() {
+        // Le test qui aurait attrapé le kick du 2026-07-15 avant qu'il n'atteigne un joueur :
+        // ce sont les octets réels du client, passés à la fonction réelle qui kicke.
+        let (_, _, version) = extract_join_fields(CPP_CLIENT_JOIN_V1).unwrap();
+        assert_eq!(
+            version, CURRENT_PROTOCOL_VERSION,
+            "le client C++ publié doit parler la version courante — sinon le Gateway le kicke \
+             (« kick : version protocole incompatible ») et le jeu est injouable"
+        );
+        assert!(crate::gateway::resolve_protocol_version(version).is_ok());
+    }
+
     #[test]
     fn extract_leave_reads_leave_and_ignores_other_messages() {
         assert_eq!(extract_leave(&client_leave()), Some(()));
