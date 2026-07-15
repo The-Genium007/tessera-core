@@ -11,6 +11,29 @@ pub struct Manifest {
     pub runtime: Runtime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerKind {
+    Official,
+    Community,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerChannel {
+    Dev,
+    Playtest,
+    Release,
+}
+
+fn default_server_kind() -> ServerKind {
+    ServerKind::Community
+}
+
+fn default_server_channel() -> ServerChannel {
+    ServerChannel::Release
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Identity {
     pub id: String,
@@ -26,6 +49,13 @@ pub struct Identity {
     pub voice_required: bool,
     #[serde(default)]
     pub public: bool,
+    /// "official" | "community" — défaut "community" pour qu'un opérateur qui ne connaît pas
+    /// encore ce champ ne se retrouve jamais étiqueté "officiel" par accident.
+    #[serde(default = "default_server_kind")]
+    pub kind: ServerKind,
+    /// "dev" | "playtest" | "release" — défaut "release" (comportement le moins alarmant).
+    #[serde(default = "default_server_channel")]
+    pub channel: ServerChannel,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1094,5 +1124,38 @@ mod tests {
         assert!(url.contains("5432"));
         assert!(url.contains("pw9"));
         assert!(url.starts_with("postgres"));
+    }
+
+    // --- Identity::kind / Identity::channel (badges launcher, defaults non-alarmants) --------
+
+    #[test]
+    fn identity_defaults_kind_to_community_and_channel_to_release_when_absent() {
+        let m: Manifest = toml::from_str(MINIMAL_TOML).expect("manifest should parse with defaults");
+        assert_eq!(m.identity.kind, ServerKind::Community);
+        assert_eq!(m.identity.channel, ServerChannel::Release);
+    }
+
+    #[test]
+    fn identity_reads_explicit_kind_and_channel() {
+        let toml_str = MINIMAL_TOML.replace(
+            "voice_required = false",
+            "voice_required = false\n        kind = \"official\"\n        channel = \"dev\"",
+        );
+        let m: Manifest = toml::from_str(&toml_str).expect("manifest should parse");
+        assert_eq!(m.identity.kind, ServerKind::Official);
+        assert_eq!(m.identity.channel, ServerChannel::Dev);
+    }
+
+    #[test]
+    fn identity_rejects_invalid_kind_value() {
+        let toml_str = MINIMAL_TOML.replace(
+            "voice_required = false",
+            "voice_required = false\n        kind = \"not-a-real-kind\"",
+        );
+        let result: Result<Manifest, _> = toml::from_str(&toml_str);
+        assert!(
+            result.is_err(),
+            "un kind invalide doit échouer au parsing, pas être silencieusement ignoré"
+        );
     }
 }
