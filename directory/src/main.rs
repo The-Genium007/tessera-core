@@ -1,3 +1,4 @@
+mod attestation_verify;
 mod derive;
 mod render;
 mod server_identity;
