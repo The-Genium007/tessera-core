@@ -54,13 +54,15 @@ public func Tessera_ApplyVendors(game: GameInstance, e: ref<DesossageEntry>) -> 
 // PIN IN-GAME : jamais testé — risque identifié par la recherche (Fable 5, 2026-07-07) : la scène
 // de dialogue qui a mené à ce scénario attend peut-être un événement de fermeture de menu
 // spécifique ; si `GotoIdleState()` seul ne suffit pas, il faudra investiguer plus loin en jeu.
+// Déclaré `cb func ... -> Bool` (pas `event ... -> Void`) : redscript 0.5.31 n'annote pas un
+// `event`, et le RTTI donne `OnEnterScenario(CName, handle:IScriptable) -> Bool`.
 @wrapMethod(MenuScenario_Vendor)
-protected event OnEnterScenario(prevScenario: CName, userData: ref<IScriptable>) -> Void {
+protected cb func OnEnterScenario(prevScenario: CName, userData: ref<IScriptable>) -> Bool {
   if !DesossageSystem.GetLiveConfig(GetGameInstance()).vendors.active {
     this.GotoIdleState();
-    return;
+    return true;
   }
-  wrappedMethod(prevScenario, userData);
+  return wrappedMethod(prevScenario, userData);
 }
 
 public func Tessera_ApplyWorldDevices(game: GameInstance, vending: ref<DesossageEntry>, inter: ref<DesossageEntry>) -> Void {
