@@ -18,9 +18,36 @@ Le cloud GitHub construit l'image automatiquement et la publie sur **GHCR** (le 
 de GitHub) à chaque mise à jour. Tu n'as donc **rien à compiler** : Dokploy **tire** l'image finie.
 
 1. Sur Dokploy, crée une app de type **Compose**, source = ce dépôt, fichier
-   `server/docker-compose.yml`. Ce compose décrit la topologie réelle : un **Gateway** et deux
-   **Shards** (`shard-a`, `shard-b`), tous les trois construits depuis la même image mais lancés
-   avec des `command:` différents (voir `## Détails techniques`).
+   `server/docker-compose.yml`. Ce compose décrit la topologie réelle : un **Gateway** et
+   **10 Shards** (`shard-a` … `shard-j`, une cellule Voronoï par shard depuis le 2026-07-14),
+   tous construits depuis la même image mais lancés avec des `command:` différents (voir
+   `## Détails techniques`).
+
+   **Quelle branche suivre ?** `release.yml` pousse le bundle serveur publié sur une branche
+   portant le nom du canal — `dev`, `playtest`, `main`. Pointer Dokploy sur `playtest` +
+   `server/docker-compose.yml` + auto-deploy suffit : chaque promotion vers ce canal redéploie
+   toute seule, avec une image **épinglée par version** (jamais `:latest`, pour ne pas rejouer
+   l'incident platform-api du 2026-07-05 : un redeploy qui réutilise l'image en cache).
+
+   **Vérifier ce qui tourne vraiment** — au boot, le Gateway logge sa bannière de version :
+
+   ```text
+   INFO gateway: Gateway TesseraSynth — serveur v0.1.1 · modset client requis v0.1.1
+     server_version="0.1.1" required_modset=0.1.1 channel=Playtest server_name=...
+   ```
+
+   Elle sort **avant** tout ce qui peut échouer (topologie, Postgres, bind UDP) : si le boot
+   casse, elle est souvent la seule preuve de *quel* binaire tourne. `required_modset` est la
+   version du modset **client** que ce serveur exige ; le launcher la lit via l'annuaire et
+   résout le modset à installer. Les deux sortent en lockstep du même run de release, donc un
+   écart entre `server_version` et le tag de l'image = déploiement incohérent (à ceci près
+   qu'un *hollow re-tag* — côté serveur inchangé — réutilise l'image d'origine sans rebuild :
+   `server_version` peut alors afficher légitimement moins que le tag, le binaire étant
+   bit-pour-bit celui de cette version-là).
+
+   `server_version` vient du build (`--build-arg TESSERA_RELEASE_VERSION`, gravé via
+   `option_env!`), **pas** de `CARGO_PKG_VERSION` — le crate est figé à `0.0.1` et ne suit pas
+   les releases. Hors CI, la bannière affiche `dev-build (non publié)`.
 2. Le compose construit l'image depuis le dépôt (`build:`) par défaut. Pour utiliser l'image
    **déjà construite** par le cloud sur GHCR à la place (plus rapide, pas de compilation GNS à
    chaque déploiement), positionne les variables d'environnement du compose, par exemple :
