@@ -94,11 +94,14 @@ protected func OnGameAttach() -> Void {
 // perçoivent toujours le joueur normalement) — seul l'affichage disparaît. Rattaché au levier
 // `mapMarkers` existant plutôt qu'un nouveau, même famille "cacher les marqueurs".
 // PIN IN-GAME : jamais testé — à confirmer (icône de détection absente au-dessus des PNJ).
-// Classe = `gameuiStealthMappinController` (préfixe `gameui`), PAS `StealthMappinController` :
-// ce dernier n'existe pas au RTTI (`StealthMappinGameController`, lui, existe mais n'expose que
-// OnInitialize — c'est le game controller du widget, pas le controller du mappin). Vérifié au dump
-// 2026-07-15 : ShouldDisableMappin() -> Bool n'est déclaré que sur gameuiStealthMappinController.
-@wrapMethod(gameuiStealthMappinController)
+// ⚠️ NE PAS "corriger" `StealthMappinController` vers le nom RTTI `gameuiStealthMappinController` :
+// fait le 2026-07-15 en se fiant au dump (qui ne liste que les noms natifs), ça casse la compilation
+// en [UNRESOLVED_REFERENCE] — redscript ne connaît que l'alias court importé. Preuve dans le script
+// décompilé officiel, stealthMappins.script:34 : `import class StealthMappinController extends
+// BaseInteractionMappinController`, et c'est bien lui qui porte ShouldDisableMappin (ligne 299).
+// Le dump RTTI n'est PAS la source de vérité pour un NOM de classe côté redscript — cf. le piège
+// déjà documenté ligne 84 ci-dessus et tools/nativedb/findings.md.
+@wrapMethod(StealthMappinController)
 private final func ShouldDisableMappin() -> Bool {
   if !DesossageSystem.GetLiveConfig(GetGameInstance()).mapMarkers.active {
     return true;
