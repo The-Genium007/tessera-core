@@ -1130,7 +1130,8 @@ mod tests {
 
     #[test]
     fn identity_defaults_kind_to_community_and_channel_to_release_when_absent() {
-        let m: Manifest = toml::from_str(MINIMAL_TOML).expect("manifest should parse with defaults");
+        let m: Manifest =
+            toml::from_str(MINIMAL_TOML).expect("manifest should parse with defaults");
         assert_eq!(m.identity.kind, ServerKind::Community);
         assert_eq!(m.identity.channel, ServerChannel::Release);
     }
