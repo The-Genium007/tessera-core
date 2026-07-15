@@ -26,6 +26,14 @@ RUN curl -fsSL -o /tmp/flatc.zip \
 WORKDIR /src
 COPY . .
 
+# Version de release, injectée par release.yml (--build-arg TESSERA_RELEASE_VERSION=X.Y.Z) et
+# gravée dans le binaire à la compilation (lue via option_env! côté Rust). Le crate reste figé à
+# 0.0.1 : CARGO_PKG_VERSION ne dit RIEN de la version déployée — sans cet ARG, la bannière de boot
+# annoncerait « v0.0.1 » sur tous les serveurs. Vide en build local : la bannière retombe alors sur
+# un repli explicite plutôt que de mentir.
+ARG TESSERA_RELEASE_VERSION=""
+ENV TESSERA_RELEASE_VERSION=${TESSERA_RELEASE_VERSION}
+
 # Gateway seul a besoin de la feature `gns` (seul binaire qui lie GNS/protobuf au runtime).
 RUN cargo build --release --features gns -p server --bin gateway
 # Shard et directory n'en ont pas besoin — builds séparés (invocations distinctes) pour ne pas

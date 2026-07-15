@@ -22,6 +22,41 @@ async fn main() -> std::io::Result<()> {
         eprintln!("manifeste invalide ({manifest_path}): {e}");
         std::process::exit(1);
     });
+    // Bannière de version, posée AVANT tout ce qui peut échouer (topologie, Postgres, bind UDP) :
+    // quand le boot casse, elle est souvent la seule preuve de QUEL binaire tourne et de QUEL
+    // modset il exige. Aurait tranché en une seconde l'incident Dokploy du 2026-07-14 (conteneur
+    // réutilisé avec un mount périmé : on débuggait un vieux binaire sans le savoir).
+    //
+    // - server_version : injectée au build d'image (ARG TESSERA_RELEASE_VERSION -> option_env!,
+    //   gravée à la compilation). PAS CARGO_PKG_VERSION : le crate est figé à 0.0.1 et ne suit pas
+    //   les versions de release, il annoncerait « v0.0.1 » partout. `option_env!` (compile-time) et
+    //   pas `std::env::var` (runtime) : même piège que TESSERASYNTH_ZITADEL_CLIENT_ID côté launcher
+    //   — une var lue au runtime est vide en prod. Build hors CI => "dev-build (non publié)",
+    //   un repli qui se voit au lieu d'un numéro faux.
+    // - required_modset : version du modset CLIENT que ce serveur exige ; le launcher la lit via
+    //   l'annuaire et résout le modset à installer. Les deux sortent en lockstep du même run de
+    //   release.yml (--required-modset), donc server_version != required_modset sur un serveur
+    //   publié = déploiement incohérent (image et bundle de deux runs différents).
+    //
+    // LIMITE ASSUMÉE — hollow re-tag : quand le côté serveur n'a pas changé, release.yml re-tague
+    // l'image existante (`imagetools create`, même digest) au lieu de la rebuilder. server_version
+    // reste donc celui du build d'origine et peut afficher moins que le tag de l'image. Ce n'est
+    // pas un bug : le binaire EST bit-pour-bit celui de cette version-là, la bannière dit la vérité
+    // sur le code qui tourne. required_modset, lui, est repatché à chaque run et reste exact.
+    let server_version = option_env!("TESSERA_RELEASE_VERSION").filter(|v| !v.is_empty());
+    let server_version_display = server_version
+        .map(|v| format!("v{v}"))
+        .unwrap_or_else(|| "dev-build (non publié)".to_string());
+    tracing::info!(
+        server_version = server_version.unwrap_or("dev-build"),
+        required_modset = %manifest.identity.required_modset,
+        channel = ?manifest.identity.channel,
+        server_name = %manifest.identity.name,
+        "Gateway TesseraSynth — serveur {} · modset client requis v{}",
+        server_version_display,
+        manifest.identity.required_modset,
+    );
+
     let manifest_dir = manifest_path_buf.parent().unwrap_or_else(|| {
         eprintln!("manifeste invalide ({manifest_path}): chemin sans répertoire parent");
         std::process::exit(1);
