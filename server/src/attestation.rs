@@ -8,13 +8,26 @@ use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ServiceAccountKey {
     #[serde(rename = "userId")]
     pub user_id: String,
     #[serde(rename = "keyId")]
     pub key_id: String,
     pub key: String,
+}
+
+// `Debug` est écrit à la main (plutôt que dérivé) pour ne jamais imprimer `key` (clé privée RSA
+// PEM) : un `{:?}` accidentel plus tard (panic, log de debug de `AttestationCache`) ne doit pas
+// finir par dumper la clé privée en clair dans les logs/stdout.
+impl std::fmt::Debug for ServiceAccountKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceAccountKey")
+            .field("user_id", &self.user_id)
+            .field("key_id", &self.key_id)
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -199,5 +212,23 @@ mod tests {
         // chemin d'erreur sans dépendre d'un vrai serveur ZITADEL.
         let cache = AttestationCache::new("http://127.0.0.1:1", &test_key_json()).unwrap();
         assert!(cache.current_token().await.is_none());
+    }
+
+    #[test]
+    fn service_account_key_debug_redacts_the_private_key() {
+        let key_json = test_key_json();
+        let parsed: ServiceAccountKey = serde_json::from_str(&key_json).unwrap();
+        let raw_pem = parsed.key.clone();
+
+        let debug_output = format!("{:?}", parsed);
+
+        assert!(
+            !debug_output.contains(&raw_pem),
+            "le Debug de ServiceAccountKey ne doit jamais contenir la clé PEM brute"
+        );
+        assert!(
+            debug_output.contains("<redacted>"),
+            "le Debug de ServiceAccountKey doit indiquer que le champ key est masqué"
+        );
     }
 }
