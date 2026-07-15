@@ -31,6 +31,30 @@ système**, chacun une `DesossageEntry { active, density }`. Défaut = **tout co
 | `DesossageWorld.reds` | échelle du cycle jour/nuit |
 | `DesossageConsole.reds` | bascule un levier en jeu via la console CET, sans rebuild (voir « Tester ») |
 
+## ⚠️ Avant de toucher un `@wrapMethod` : le dump RTTI ne donne PAS les noms redscript
+
+Deux vagues d'échecs de compilation (2026-07-05, puis **récidive le 2026-07-15**) ont la même
+cause : un nom de classe pris dans le dump RTTI (`tools/nativedb`, qui liste les noms **natifs**)
+et écrit tel quel en redscript, qui ne connaît que l'**alias importé court**.
+
+| Écrit (RTTI) | Correct (redscript) | Résultat de l'erreur |
+|---|---|---|
+| `gamemappinsMappinSystem` | `MappinSystem` | 3 échecs, 2026-07-05 |
+| `gameuiStealthMappinController` | `StealthMappinController` | `[UNRESOLVED_REF]`, 2026-07-15 |
+
+Et la règle **n'est pas uniforme** : `gameTimeSystem` garde son préfixe. Il n'y a donc pas de
+transformation mécanique à appliquer — chaque nom se confirme au cas par cas.
+
+**Source de vérité pour un nom de classe** : le script décompilé officiel
+(`CDPR-Modding-Documentation/Cyberpunk-Scripts` — chercher `import class X` / `class X extends`),
+ou un mod publié qui compile. Le dump RTTI sert à *trouver* un candidat et à vérifier les
+**méthodes** ; il ne dit rien des **noms** visibles côté redscript, ni des méthodes `private`
+scriptées (absentes du RTTI — c'est ce qui a fait croire à tort que `StealthMappinController`
+n'existait pas). Détail complet : `tools/nativedb/findings.md`.
+
+Corollaire vécu : un script de vérification qui n'interroge que le dump **valide à tort** et
+casse du code correct. Ne pas "corriger" un nom court vers un nom préfixé sans preuve.
+
 ## État des leviers (mis à jour 2026-07-07)
 
 Table de suivi — **la** référence pour éviter de re-creuser un levier déjà tranché. Champs :
