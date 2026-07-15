@@ -123,19 +123,15 @@ protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetAct
   return wrappedMethod(actions, context);
 }
 
-// Distributeurs d'armes — classe PS sœur de VendingMachineControllerPS (2026-07-07), rattachée au
-// même levier `vendingDevices` (demandé explicitement : "distributeurs d'armes ... il faut les
-// activer" avec le même interrupteur que boissons/nourriture, pas un levier séparé).
-// PIN IN-GAME : jamais testé — à confirmer (menu d'achat absent sur un distributeur d'armes).
-@wrapMethod(WeaponVendingMachineControllerPS)
-protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
-  if !DesossageSystem.GetLiveConfig(GetGameInstance()).vendingDevices.active {
-    return false;
-  }
-  return wrappedMethod(actions, context);
-}
+// Distributeurs d'armes : PAS de hook propre. WeaponVendingMachineControllerPS hérite de
+// VendingMachineControllerPS (vérifié au dump RTTI, 2026-07-15) et n'override PAS GetActions —
+// le @wrapMethod qui vivait ici échouait donc en [UNRESOLVED_METHOD] (`no method with this name
+// exists on the target type`), exactement le piège documenté plus haut pour AccessPointControllerPS.
+// Les distributeurs d'armes sont déjà couverts par le wrap de VendingMachineControllerPS ci-dessus
+// (dispatch virtuel : la classe fille hérite du GetActions wrappé), donc même levier
+// `vendingDevices` que voulu, sans code supplémentaire.
 
-// Droppoints — classe PS sœur également, même levier `vendingDevices`.
+// Droppoints — GetActions déclaré en propre (vérifié RTTI), donc wrappable. Même levier.
 // PIN IN-GAME : jamais testé — à confirmer (menu de dépôt absent sur un droppoint).
 @wrapMethod(DropPointControllerPS)
 protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {

@@ -94,7 +94,11 @@ protected func OnGameAttach() -> Void {
 // perçoivent toujours le joueur normalement) — seul l'affichage disparaît. Rattaché au levier
 // `mapMarkers` existant plutôt qu'un nouveau, même famille "cacher les marqueurs".
 // PIN IN-GAME : jamais testé — à confirmer (icône de détection absente au-dessus des PNJ).
-@wrapMethod(StealthMappinController)
+// Classe = `gameuiStealthMappinController` (préfixe `gameui`), PAS `StealthMappinController` :
+// ce dernier n'existe pas au RTTI (`StealthMappinGameController`, lui, existe mais n'expose que
+// OnInitialize — c'est le game controller du widget, pas le controller du mappin). Vérifié au dump
+// 2026-07-15 : ShouldDisableMappin() -> Bool n'est déclaré que sur gameuiStealthMappinController.
+@wrapMethod(gameuiStealthMappinController)
 private final func ShouldDisableMappin() -> Bool {
   if !DesossageSystem.GetLiveConfig(GetGameInstance()).mapMarkers.active {
     return true;

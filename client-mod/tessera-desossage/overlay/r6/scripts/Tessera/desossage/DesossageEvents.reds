@@ -58,8 +58,8 @@ public func Tessera_ApplyTutorials(game: GameInstance, e: ref<DesossageEntry>) -
   // disable_tutorials=1. Ne pas inverser : cf. le même piège corrigé sur ce fichier ci-dessous.
   let value: Int32 = 1;
   if e.active { value = 0; }
-  GameInstance.GetQuestsSystem(game).SetFactStr(n"disable_tutorials", value);
-  FTLog(s"[Tessera/Desossage] tutoriels → fact disable_tutorials=\(value) (SetFactStr)");
+  GameInstance.GetQuestsSystem(game).SetFact(n"disable_tutorials", value);
+  FTLog(s"[Tessera/Desossage] tutoriels → fact disable_tutorials=\(value) (SetFact)");
 }
 
 // Trafic aérien (AVs dans le ciel) : même mécanisme que les tutoriels ci-dessus — fact save
@@ -70,6 +70,6 @@ public func Tessera_ApplyAirTraffic(game: GameInstance, e: ref<DesossageEntry>) 
   // Même polarité que tutorials ci-dessus : e.active=false (défaut, monde vide) → air_traffic_off=1.
   let value: Int32 = 1;
   if e.active { value = 0; }
-  GameInstance.GetQuestsSystem(game).SetFactStr(n"air_traffic_off", value);
-  FTLog(s"[Tessera/Desossage] trafic aérien → fact air_traffic_off=\(value) (SetFactStr)");
+  GameInstance.GetQuestsSystem(game).SetFact(n"air_traffic_off", value);
+  FTLog(s"[Tessera/Desossage] trafic aérien → fact air_traffic_off=\(value) (SetFact)");
 }

@@ -66,8 +66,11 @@ public func Tessera_ApplyWorldState(game: GameInstance, hour: Int32, minute: Int
 public func Tessera_ReadLocalTime(game: GameInstance) -> array<Int32> {
   let t = GameInstance.GetTimeSystem(game).GetGameTime();
   let out: array<Int32>;
-  ArrayPush(out, t.Hour());
-  ArrayPush(out, t.Minute());
-  ArrayPush(out, t.Sec());
+  // Hours()/Minutes()/Seconds() (pluriel) = getters d'instance -> Int32. Hour()/Minute() (singulier)
+  // sont STATIQUES et retournent un GameTime (constructeurs d'unité : « une heure »), d'où le
+  // [INVALID_STATIC_USE] qu'on avait ici ; `Sec()` n'existe pas du tout. Vérifié au dump RTTI.
+  ArrayPush(out, t.Hours());
+  ArrayPush(out, t.Minutes());
+  ArrayPush(out, t.Seconds());
   return out;
 }
