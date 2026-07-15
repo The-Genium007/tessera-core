@@ -4,7 +4,7 @@
 //! de lancement du jeu, communautaire et documenté, qui saute la vidéo d'intro.
 
 use serde::Serialize;
-use server::manifest::Manifest;
+use server::manifest::{Manifest, ServerChannel, ServerKind};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct DirectoryEntry {
@@ -29,6 +29,9 @@ pub struct DirectoryEntry {
     #[serde(rename = "voiceRequired")]
     pub voice_required: bool,
     pub public: bool,
+    pub kind: String,
+    pub whitelist: bool,
+    pub channel: String,
     #[serde(rename = "launchArgs")]
     pub launch_args: Vec<String>,
 }
@@ -55,6 +58,16 @@ pub fn derive_entry(m: &Manifest) -> DirectoryEntry {
         required_modset: m.identity.required_modset.clone(),
         voice_required: m.identity.voice_required,
         public: m.identity.public,
+        kind: match m.identity.kind {
+            ServerKind::Official => "official".to_string(),
+            ServerKind::Community => "community".to_string(),
+        },
+        whitelist: m.runtime.whitelist,
+        channel: match m.identity.channel {
+            ServerChannel::Dev => "dev".to_string(),
+            ServerChannel::Playtest => "playtest".to_string(),
+            ServerChannel::Release => "release".to_string(),
+        },
         launch_args: vec![
             "-skipStartScreen".to_string(),
             format!("--cyberverse-server-address={ip}"),
@@ -94,6 +107,9 @@ mod tests {
             "requiredModset": "0.1.0-dev10",
             "voiceRequired": false,
             "public": false,
+            "kind": "community",
+            "whitelist": false,
+            "channel": "release",
             "launchArgs": [
                 "-skipStartScreen",
                 "--cyberverse-server-address=51.38.189.234",
@@ -101,5 +117,16 @@ mod tests {
             ]
         });
         assert_eq!(json, expected);
+    }
+
+    #[test]
+    fn derive_entry_propagates_runtime_whitelist_to_directory_entry() {
+        let mut manifest = example_manifest();
+        manifest.runtime.whitelist = true;
+        let entry = derive_entry(&manifest);
+        assert!(
+            entry.whitelist,
+            "runtime.whitelist=true doit se propager jusqu'à DirectoryEntry.whitelist"
+        );
     }
 }
