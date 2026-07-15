@@ -122,7 +122,10 @@ fn signing_key() -> anyhow::Result<ed25519_dalek::SigningKey> {
 
 fn cmd_publish(manifest_path: &std::path::Path, out_dir: &std::path::Path) -> anyhow::Result<()> {
     let manifest = server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
-    let entry = derive_entry(&manifest);
+
+    let attested_official = resolve_attestation(&manifest);
+
+    let entry = derive_entry(&manifest, attested_official);
     let bytes = serde_json::to_vec_pretty(&vec![entry])?;
     let key = signing_key()?;
     let sig = signing::sign_detached_b64(&key, &bytes);
@@ -132,6 +135,89 @@ fn cmd_publish(manifest_path: &std::path::Path, out_dir: &std::path::Path) -> an
     std::fs::write(out_dir.join("servers.json.sig"), sig)?;
     println!("Publié dans {}", out_dir.display());
     Ok(())
+}
+
+/// Résout si CE manifeste peut légitimement être republié "official" : interroge l'endpoint
+/// interne du serveur pour son token d'attestation courant, le vérifie contre le JWKS ZITADEL,
+/// puis confirme via le CMS. `false` pour toute étape manquante/en échec — jamais bloquant pour
+/// la publication (spec §objectif : repli silencieux, pas d'erreur fatale).
+fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
+    if manifest.identity.kind != server::manifest::ServerKind::Official {
+        // Pas la peine d'interroger quoi que ce soit si le manifeste ne déclare même pas
+        // "official" — évite un appel réseau inutile à chaque publication d'un serveur
+        // community, le cas le plus courant.
+        return false;
+    }
+
+    let internal_attestation_url = match std::env::var("TESSERA_INTERNAL_ATTESTATION_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!(
+                "TESSERA_INTERNAL_ATTESTATION_URL absente — impossible de vérifier l'attestation, kind rétrogradé à community"
+            );
+            return false;
+        }
+    };
+    let zitadel_jwks_uri = match std::env::var("TESSERA_ZITADEL_JWKS_URI") {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!("TESSERA_ZITADEL_JWKS_URI absente — kind rétrogradé à community");
+            return false;
+        }
+    };
+    let zitadel_issuer = match std::env::var("TESSERA_ZITADEL_ISSUER") {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!("TESSERA_ZITADEL_ISSUER absente — kind rétrogradé à community");
+            return false;
+        }
+    };
+    let cms_url = match std::env::var("TESSERA_CMS_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!("TESSERA_CMS_URL absente — kind rétrogradé à community");
+            return false;
+        }
+    };
+
+    let client = reqwest::blocking::Client::new();
+    let token = match client
+        .get(&internal_attestation_url)
+        .send()
+        .and_then(|r| r.json::<serde_json::Value>())
+    {
+        Ok(body) => match body.get("token").and_then(|t| t.as_str()) {
+            Some(t) => t.to_string(),
+            None => {
+                eprintln!("aucun token d'attestation disponible sur {internal_attestation_url}");
+                return false;
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "endpoint d'attestation interne injoignable ({internal_attestation_url}) : {e}"
+            );
+            return false;
+        }
+    };
+
+    let jwks = match attestation_verify::fetch_jwks(&zitadel_jwks_uri) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("{e}");
+            return false;
+        }
+    };
+
+    let sub = match attestation_verify::verify_attestation(&token, &jwks, &zitadel_issuer) {
+        Some(s) => s,
+        None => {
+            eprintln!("token d'attestation invalide (signature/issuer/expiration) — kind rétrogradé à community");
+            return false;
+        }
+    };
+
+    attestation_verify::confirm_official_server(&cms_url, &sub)
 }
 
 fn cmd_verify(
@@ -244,7 +330,9 @@ fn build_register_payload(
         id: manifest.identity.id.clone(),
         name: manifest.identity.name.clone(),
         public_key_b64,
-        metadata: derive_entry(manifest),
+        // register/heartbeat n'établissent pas l'attestation officielle (c'est `publish` qui la
+        // résout, via resolve_attestation) — le metadata annoncé reste plafonné à "community".
+        metadata: derive_entry(manifest, false),
     }
 }
 

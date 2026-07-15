@@ -36,7 +36,7 @@ pub struct DirectoryEntry {
     pub launch_args: Vec<String>,
 }
 
-pub fn derive_entry(m: &Manifest) -> DirectoryEntry {
+pub fn derive_entry(m: &Manifest, attested_official: bool) -> DirectoryEntry {
     let addr = &m.runtime.gateway.advertise_addr;
     let (ip, port) = addr
         .rsplit_once(':')
@@ -59,7 +59,17 @@ pub fn derive_entry(m: &Manifest) -> DirectoryEntry {
         voice_required: m.identity.voice_required,
         public: m.identity.public,
         kind: match m.identity.kind {
-            ServerKind::Official => "official".to_string(),
+            ServerKind::Official if attested_official => "official".to_string(),
+            // Un TOML qui déclare "official" sans attestation valide est silencieusement
+            // rétrogradé à "community" (spec §objectif : jamais "official" par défaut, log
+            // d'avertissement plutôt qu'erreur bloquante — un opérateur tiers qui copie un
+            // manifeste existant ne doit pas planter son serveur pour ça).
+            ServerKind::Official => {
+                eprintln!(
+                    "avertissement : identity.kind=\"official\" déclaré mais aucune attestation valide — rétrogradé à \"community\""
+                );
+                "community".to_string()
+            }
             ServerKind::Community => "community".to_string(),
         },
         whitelist: m.runtime.whitelist,
@@ -88,7 +98,7 @@ mod tests {
 
     #[test]
     fn derives_expected_json_shape() {
-        let entry = derive_entry(&example_manifest());
+        let entry = derive_entry(&example_manifest(), false);
         let json = serde_json::to_value(&entry).unwrap();
         let expected = serde_json::json!({
             "id": "tessera-dev-01",
@@ -123,10 +133,34 @@ mod tests {
     fn derive_entry_propagates_runtime_whitelist_to_directory_entry() {
         let mut manifest = example_manifest();
         manifest.runtime.whitelist = true;
-        let entry = derive_entry(&manifest);
+        let entry = derive_entry(&manifest, false);
         assert!(
             entry.whitelist,
             "runtime.whitelist=true doit se propager jusqu'à DirectoryEntry.whitelist"
         );
+    }
+
+    #[test]
+    fn derive_entry_caps_declared_official_kind_to_community_without_attestation() {
+        let mut manifest = example_manifest();
+        manifest.identity.kind = ServerKind::Official;
+        let entry = derive_entry(&manifest, false);
+        assert_eq!(entry.kind, "community");
+    }
+
+    #[test]
+    fn derive_entry_honors_official_kind_when_attested() {
+        let mut manifest = example_manifest();
+        manifest.identity.kind = ServerKind::Official;
+        let entry = derive_entry(&manifest, true);
+        assert_eq!(entry.kind, "official");
+    }
+
+    #[test]
+    fn derive_entry_never_upgrades_a_declared_community_kind_even_when_attested() {
+        // attested_official=true ne doit jamais forcer "official" si le TOML dit "community" —
+        // l'attestation plafonne, elle n'élève jamais.
+        let entry = derive_entry(&example_manifest(), true);
+        assert_eq!(entry.kind, "community");
     }
 }
