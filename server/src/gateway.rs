@@ -13,6 +13,20 @@ use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Client_id OIDC du client natif `launcher` de l'instance officielle TesseraSynth — audience
+/// (`aud`) attendue dans l'`id_token` au Join sur un serveur public. Un client_id OIDC public/natif
+/// n'est **pas un secret** : il transite en clair dans l'URL d'autorisation ZITADEL (visible côté
+/// navigateur à chaque login). Il est donc épinglé en dur, exactement comme `ZITADEL_JWKS_URL`
+/// (bin/gateway.rs) — l'auth du jeu est déjà mono-instance. Surchargeable par
+/// `TESSERA_ZITADEL_LAUNCHER_CLIENT_ID` pour un opérateur tiers ayant sa propre app ZITADEL (cf.
+/// `docs/architecture/0010-launcher-oidc-audience-pinned.md`). DOIT rester égal au secret de build
+/// `TESSERASYNTH_ZITADEL_CLIENT_ID` du launcher (c'est ce même client_id qui signe l'`aud`).
+///
+/// `#[cfg(feature = "gns")]` : consommé uniquement par `gateway_main` (lui-même gns-gated) —
+/// sans ce garde, la const serait « dead code » en build par défaut.
+#[cfg(feature = "gns")]
+const DEFAULT_LAUNCHER_CLIENT_ID: &str = "381763954952634746";
+
 /// Une connexion TCP interne vers un Shard, avec son `FrameReader` de lecture persistant.
 pub struct ShardLink {
     sock: TcpStream,
@@ -786,21 +800,19 @@ pub async fn gateway_main(
         .map(|v| v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    // Audience OIDC attendue au Join sur un serveur public : le client_id ZITADEL du launcher.
-    // Le launcher envoie son `id_token`, dont le `aud` vaut son propre client_id — ce n'est jamais
-    // la chaîne littérale "launcher" (ancien placeholder qui rejetait tout token réel en
-    // WrongAudience). Lue ici par `std::env::var` (comme root_admins/playtest_all_admin ci-dessus)
-    // plutôt qu'ajoutée à la signature de `gateway_main`, pour ne pas imposer un rebuild
-    // `--features gns` (cf. CLAUDE.md). Absente sur serveur public = misconfiguration dure :
-    // aucun Join authentifié ne pourra aboutir, donc on le crie fort au boot.
-    let launcher_audience = std::env::var("TESSERA_ZITADEL_LAUNCHER_CLIENT_ID").unwrap_or_default();
-    if identity_public && launcher_audience.trim().is_empty() {
-        tracing::warn!(
-            "identity.public=true mais TESSERA_ZITADEL_LAUNCHER_CLIENT_ID absent : l'audience \
-             attendue est vide, tout Join authentifié sera rejeté (session invalide). Renseigner \
-             le client_id ZITADEL du launcher côté déploiement."
-        );
-    }
+    // Audience OIDC attendue au Join sur un serveur public : le client_id ZITADEL du client
+    // `launcher`. Le launcher envoie son `id_token`, dont le `aud` vaut CE client_id — jamais la
+    // chaîne littérale "launcher" (ancien placeholder qui rejetait tout token réel en
+    // WrongAudience). Défaut EN DUR sur le client_id de l'instance officielle
+    // (`DEFAULT_LAUNCHER_CLIENT_ID`, non secret — cf. sa doc) : aucune config requise pour le
+    // déploiement officiel, exactement comme `ZITADEL_JWKS_URL`. `TESSERA_ZITADEL_LAUNCHER_CLIENT_ID`
+    // reste un OVERRIDE optionnel (opérateur tiers, ADR 0010), lu par `std::env::var` (comme
+    // root_admins/playtest_all_admin) pour ne pas changer la signature de `gateway_main` (rebuild
+    // `--features gns` évité, cf. CLAUDE.md). Une valeur vide/blanche retombe sur le défaut.
+    let launcher_audience = std::env::var("TESSERA_ZITADEL_LAUNCHER_CLIENT_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_LAUNCHER_CLIENT_ID.to_string());
 
     // Journal de session (spec playtest-shards §#4) : vérité autoritaire des handoffs/stalls.
     let session_log_path =
