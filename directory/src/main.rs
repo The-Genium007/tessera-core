@@ -475,6 +475,118 @@ mod register_tests {
 }
 
 #[cfg(test)]
+mod attestation_resolution_tests {
+    //! Seul test du chemin **positif** de bout en bout de l'attestation : token valide → vérifié
+    //! contre le JWKS → confirmé par le CMS → `resolve_attestation` renvoie `true`. Tous les autres
+    //! tests de la feature (attestation_verify.rs) couvrent des branches d'échec (fail-closed) ;
+    //! celui-ci verrouille la seule branche où un bug importerait vraiment — la frontière de
+    //! confiance qui accorde le badge `official`.
+    //!
+    //! Trois faux serveurs HTTP montés en local (aucun réseau externe, aucun vrai ZITADEL), chacun
+    //! sur son propre `127.0.0.1:0` dans son `std::thread` : `resolve_attestation` utilise
+    //! `reqwest::blocking`, donc on reste en `std::net::TcpListener` synchrone (le crate `directory`
+    //! ne dépend pas de tokio) plutôt que le motif tokio de `server::jwks`. Crypto RSA réelle : la
+    //! signature du JWT est réellement vérifiée par les composants publics servis par le faux JWKS,
+    //! ce n'est pas un raccourci.
+    //!
+    //! ISOLATION ENV : `resolve_attestation` lit 4 variables d'env process-globales. Aucun autre
+    //! test du crate ne lit/écrit ces mêmes noms (`TESSERA_INTERNAL_ATTESTATION_URL`,
+    //! `TESSERA_ZITADEL_JWKS_URI`, `TESSERA_ZITADEL_ISSUER`, `TESSERA_CMS_URL` — vérifié par grep),
+    //! et ce module ne contient qu'un seul test qui les écrit, donc pas de course inter-tests même
+    //! en exécution parallèle par défaut. Pas de crate `serial_test` ajouté pour ça.
+    use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use rsa::pkcs1::EncodeRsaPrivateKey;
+    use rsa::traits::PublicKeyParts;
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    const TEST_KID: &str = "test-key-1";
+    const TEST_ISSUER: &str = "https://auth.test.example.com";
+    const TEST_SUB: &str = "srv-user-official-1";
+
+    /// Répond à UNE connexion HTTP avec `body` (JSON), puis termine. Renvoie l'adresse écoutée.
+    /// Sépare volontairement la lecture (best-effort, on ignore la requête : chaque faux endpoint
+    /// n'attend qu'un GET) de l'écriture de la réponse — même esprit que le mock de `server::jwks`.
+    fn spawn_json_once(body: String) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind du faux serveur HTTP");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept du client HTTP");
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes());
+        });
+        addr
+    }
+
+    #[test]
+    fn resolve_attestation_returns_true_for_a_fully_valid_chain() {
+        // 1. Matériel RSA de test généré à la volée (jamais de vraie clé ZITADEL en dur).
+        let mut rng = rand::rngs::OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("génération clé RSA de test");
+        let public_key = RsaPublicKey::from(&private_key);
+        let pem = private_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .expect("encodage PKCS1 PEM");
+        let encoding_key =
+            EncodingKey::from_rsa_pem(pem.as_bytes()).expect("clé RSA illisible par jsonwebtoken");
+        let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
+        let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+
+        // 2. Un vrai JWT fraîchement signé (issuer correct, exp lointaine) → réellement vérifié.
+        let claims = serde_json::json!({
+            "sub": TEST_SUB,
+            "iss": TEST_ISSUER,
+            "exp": 9_999_999_999u64,
+        });
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = encode(&header, &claims, &encoding_key).expect("encodage du JWT de test");
+
+        // 3. Trois faux endpoints locaux, chacun sur son port, chacun dans son thread.
+        let attestation_addr = spawn_json_once(format!("{{\"token\":\"{token}\"}}"));
+        let jwks_addr = spawn_json_once(format!(
+            "{{\"keys\":[{{\"kid\":\"{TEST_KID}\",\"kty\":\"RSA\",\"n\":\"{n_b64}\",\"e\":\"{e_b64}\"}}]}}"
+        ));
+        // confirm_official_server appelle GET {cms_url}/api/public/... ; notre mock répond quel
+        // que soit le chemin, il suffit qu'il renvoie {"found": true}.
+        let cms_addr = spawn_json_once("{\"found\":true}".to_string());
+
+        // 4. Les 4 variables d'env pointent vers nos faux serveurs.
+        std::env::set_var(
+            "TESSERA_INTERNAL_ATTESTATION_URL",
+            format!("http://{attestation_addr}/internal/attestation"),
+        );
+        std::env::set_var(
+            "TESSERA_ZITADEL_JWKS_URI",
+            format!("http://{jwks_addr}/oauth/v2/keys"),
+        );
+        std::env::set_var("TESSERA_ZITADEL_ISSUER", TEST_ISSUER);
+        std::env::set_var("TESSERA_CMS_URL", format!("http://{cms_addr}"));
+
+        // 5. Manifeste déclarant kind=official (sinon resolve_attestation court-circuite).
+        let manifest_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/server.example.toml");
+        let mut manifest =
+            server::manifest::load(&manifest_path).expect("manifeste exemple valide");
+        manifest.identity.kind = server::manifest::ServerKind::Official;
+
+        assert!(
+            resolve_attestation(&manifest),
+            "une chaîne d'attestation entièrement valide doit résoudre à official (true)"
+        );
+    }
+}
+
+#[cfg(test)]
 mod heartbeat_tests {
     use super::*;
 
