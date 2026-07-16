@@ -75,6 +75,13 @@ services:
       # on veut tester l'anti-triche aussi, pas seulement l'auth. À ne réactiver que si
       # besoin d'un bypass de développement ultérieurement (ne jamais pour prod).
       TESSERA_PLAYTEST_ALL_ADMIN: "false"
+      # Audience OIDC attendue au Join sur un serveur public (identity.public = true) : le
+      # client_id ZITADEL du client `launcher`. Le launcher envoie son id_token, dont le `aud`
+      # vaut CE client_id — pas la chaîne "launcher" (ancien placeholder qui rejetait tout token
+      # réel en WrongAudience). DOIT être identique à TESSERASYNTH_ZITADEL_CLIENT_ID gravé dans le
+      # binaire du launcher (build CI). Vide sur un serveur public = aucun Join authentifié ne
+      # passe (warn crié au boot du Gateway). Sans effet sur un serveur privé (public = false).
+      TESSERA_ZITADEL_LAUNCHER_CLIENT_ID: ${TESSERA_ZITADEL_LAUNCHER_CLIENT_ID:-}
       # TESSERA_REDIS_URL/TESSERA_POSTGRES_URL (surcharge directe, prioritaire) restent vides par
       # défaut ; sans ces variables ET sans runtime.postgres_url dans le manifeste, le Gateway
       # assemble lui-même l'URL Postgres depuis les composants TESSERA_PG_* ci-dessous (voir

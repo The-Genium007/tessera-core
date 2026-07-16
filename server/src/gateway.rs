@@ -355,12 +355,19 @@ pub fn resolve_admin_record<'a>(
 ///   `display_name` libre non vérifié, root cause du bug playtest 1 (deux comptes distincts avec
 ///   le même display_name partageaient silencieusement un enregistrement).
 ///
+/// `expected_aud` est l'audience OIDC attendue dans le token : le **client_id ZITADEL du launcher**
+/// (config `TESSERA_ZITADEL_LAUNCHER_CLIENT_ID`, lue dans `gateway_main`). Le launcher envoie son
+/// `id_token`, dont le `aud` vaut son propre client_id — d'où la nécessité de le passer en config
+/// plutôt que de coder une chaîne en dur (l'ancien `"launcher"` était un placeholder jamais
+/// réconcilié avec un vrai client_id, donc tout token réel était rejeté en `WrongAudience`).
+///
 /// `Err` porte le message `Kicked` à renvoyer au client avant de couper la connexion (token
 /// absent ou invalide) — jamais un timeout silencieux.
 pub fn resolve_join_key(
     identity_public: bool,
     name: &str,
     token: &str,
+    expected_aud: &str,
     jwks_cache: &crate::jwks::JwksCache,
 ) -> Result<String, &'static str> {
     if !identity_public {
@@ -370,7 +377,7 @@ pub fn resolve_join_key(
     if token.is_empty() {
         return Err("compte requis sur ce serveur");
     }
-    match jwks_cache.verify(token, "launcher") {
+    match jwks_cache.verify(token, expected_aud) {
         Ok(claims) => Ok(claims.sub),
         Err(_) => Err("session invalide, reconnectez-vous"),
     }
@@ -779,6 +786,22 @@ pub async fn gateway_main(
         .map(|v| v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
+    // Audience OIDC attendue au Join sur un serveur public : le client_id ZITADEL du launcher.
+    // Le launcher envoie son `id_token`, dont le `aud` vaut son propre client_id — ce n'est jamais
+    // la chaîne littérale "launcher" (ancien placeholder qui rejetait tout token réel en
+    // WrongAudience). Lue ici par `std::env::var` (comme root_admins/playtest_all_admin ci-dessus)
+    // plutôt qu'ajoutée à la signature de `gateway_main`, pour ne pas imposer un rebuild
+    // `--features gns` (cf. CLAUDE.md). Absente sur serveur public = misconfiguration dure :
+    // aucun Join authentifié ne pourra aboutir, donc on le crie fort au boot.
+    let launcher_audience = std::env::var("TESSERA_ZITADEL_LAUNCHER_CLIENT_ID").unwrap_or_default();
+    if identity_public && launcher_audience.trim().is_empty() {
+        tracing::warn!(
+            "identity.public=true mais TESSERA_ZITADEL_LAUNCHER_CLIENT_ID absent : l'audience \
+             attendue est vide, tout Join authentifié sera rejeté (session invalide). Renseigner \
+             le client_id ZITADEL du launcher côté déploiement."
+        );
+    }
+
     // Journal de session (spec playtest-shards §#4) : vérité autoritaire des handoffs/stalls.
     let session_log_path =
         std::env::var("TESSERA_SESSION_LOG_PATH").unwrap_or_else(|_| "session.jsonl".to_string());
@@ -936,17 +959,22 @@ pub async fn gateway_main(
                             rate_states.remove(&cid);
                             continue;
                         }
-                        let effective_key =
-                            match resolve_join_key(identity_public, &name, &token, &jwks_cache) {
-                                Ok(key) => key,
-                                Err(reason) => {
-                                    tracing::warn!(client = cid, %reason, "kick : Join refusé");
-                                    client.send(cid, &encode_kicked(reason));
-                                    client.disconnect(cid);
-                                    rate_states.remove(&cid);
-                                    continue;
-                                }
-                            };
+                        let effective_key = match resolve_join_key(
+                            identity_public,
+                            &name,
+                            &token,
+                            &launcher_audience,
+                            &jwks_cache,
+                        ) {
+                            Ok(key) => key,
+                            Err(reason) => {
+                                tracing::warn!(client = cid, %reason, "kick : Join refusé");
+                                client.send(cid, &encode_kicked(reason));
+                                client.disconnect(cid);
+                                rate_states.remove(&cid);
+                                continue;
+                            }
+                        };
                         if reject_join_if_server_full(
                             keys.contains_key(&cid),
                             keys.len(),
@@ -2316,9 +2344,9 @@ mod tests {
         let token_bob = encode_join_test_token(&claims_bob, &material.encoding_key);
 
         // Les deux Join sont traités (pas de kick sur la collision de display_name).
-        let key_alice = resolve_join_key(true, display_name, &token_alice, &jwks_cache)
+        let key_alice = resolve_join_key(true, display_name, &token_alice, "launcher", &jwks_cache)
             .expect("alice : join accepté malgré la collision de display_name");
-        let key_bob = resolve_join_key(true, display_name, &token_bob, &jwks_cache)
+        let key_bob = resolve_join_key(true, display_name, &token_bob, "launcher", &jwks_cache)
             .expect("bob : join accepté malgré la collision de display_name");
 
         // Clés de persistance distinctes : deux enregistrements Postgres/FileStore distincts.
@@ -2400,9 +2428,9 @@ mod tests {
         let token_bob = encode_join_test_token(&claims_bob, &material.encoding_key);
 
         // --- Étage Gateway : les deux Join sont acceptés, avec des clés de persistance distinctes.
-        let key_alice = resolve_join_key(true, display_name, &token_alice, &jwks_cache)
+        let key_alice = resolve_join_key(true, display_name, &token_alice, "launcher", &jwks_cache)
             .expect("alice : join accepté malgré la collision de display_name");
-        let key_bob = resolve_join_key(true, display_name, &token_bob, &jwks_cache)
+        let key_bob = resolve_join_key(true, display_name, &token_bob, "launcher", &jwks_cache)
             .expect("bob : join accepté malgré la collision de display_name");
         assert_ne!(
             key_alice, key_bob,
@@ -2680,7 +2708,7 @@ mod tests {
     async fn join_rejected_when_public_server_receives_no_token() {
         // Serveur public, display_name rempli mais token vide : rejet propre, jamais un timeout.
         let jwks_cache = crate::jwks::JwksCache::new();
-        let result = resolve_join_key(true, "SomeDisplayName", "", &jwks_cache);
+        let result = resolve_join_key(true, "SomeDisplayName", "", "launcher", &jwks_cache);
         assert_eq!(result, Err("compte requis sur ce serveur"));
     }
 
@@ -2697,7 +2725,7 @@ mod tests {
         };
         let token = encode_join_test_token(&claims, &other_material.encoding_key);
 
-        let result = resolve_join_key(true, "SomeDisplayName", &token, &jwks_cache);
+        let result = resolve_join_key(true, "SomeDisplayName", &token, "launcher", &jwks_cache);
         assert_eq!(result, Err("session invalide, reconnectez-vous"));
     }
 
@@ -2714,8 +2742,33 @@ mod tests {
         // Le display_name fourni ("DisplayNameLibre") n'est PAS la clé retenue : la clé
         // effective doit être le `sub` vérifié, jamais le texte libre non vérifié (root cause
         // du bug playtest 1).
-        let result = resolve_join_key(true, "DisplayNameLibre", &token, &jwks_cache);
+        let result = resolve_join_key(true, "DisplayNameLibre", &token, "launcher", &jwks_cache);
         assert_eq!(result, Ok("oidc-user-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn join_audience_must_match_configured_launcher_client_id() {
+        // Régression du placeholder "launcher" jamais réconcilié (nuit du 2026-07-16) : un
+        // id_token ZITADEL réel porte `aud` = client_id OIDC du launcher (ex. "340098...@tessera"),
+        // JAMAIS la chaîne littérale "launcher". Le serveur doit vérifier ce client_id CONFIGURÉ
+        // (`TESSERA_ZITADEL_LAUNCHER_CLIENT_ID`) — sinon tout token réel était rejeté en
+        // WrongAudience et personne ne pouvait se connecter à un serveur public.
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let real_client_id = "340098765@tessera"; // forme d'un client_id ZITADEL réel
+        let claims = crate::jwks::Claims {
+            sub: "oidc-user-abc".into(),
+            aud: real_client_id.into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &material.encoding_key);
+
+        // Audience configurée ≠ aud du token → rejet propre (jamais un timeout muet).
+        let wrong = resolve_join_key(true, "N", &token, "un-autre-client-id", &jwks_cache);
+        assert_eq!(wrong, Err("session invalide, reconnectez-vous"));
+
+        // Audience configurée = le vrai client_id du token → accepté, clé = sub vérifié.
+        let ok = resolve_join_key(true, "N", &token, real_client_id, &jwks_cache);
+        assert_eq!(ok, Ok("oidc-user-abc".to_string()));
     }
 
     #[tokio::test]
@@ -2723,7 +2776,7 @@ mod tests {
         // identity.public = false (ou absent) : comportement historique, token ignoré
         // intégralement, même vide, même si le JwksCache est vide/jamais rafraîchi.
         let jwks_cache = crate::jwks::JwksCache::new();
-        let result = resolve_join_key(false, "Lucas", "", &jwks_cache);
+        let result = resolve_join_key(false, "Lucas", "", "launcher", &jwks_cache);
         assert_eq!(result, Ok("Lucas".to_string()));
     }
 
@@ -2753,7 +2806,7 @@ mod tests {
 
         // Join sur un serveur public : la clé effective (persistance) est le `sub` vérifié, pas
         // le display_name — exactement ce que fait `resolve_join_key` (Task C2) dans la boucle.
-        let effective_key = resolve_join_key(true, display_name, &token, &jwks_cache)
+        let effective_key = resolve_join_key(true, display_name, &token, "launcher", &jwks_cache)
             .expect("token valide, join accepté");
         assert_ne!(
             effective_key, display_name,
@@ -2808,7 +2861,7 @@ mod tests {
         };
         let token = encode_join_test_token(&claims, &material.encoding_key);
         let display_name = "AdminDisplayName";
-        let effective_key = resolve_join_key(true, display_name, &token, &jwks_cache)
+        let effective_key = resolve_join_key(true, display_name, &token, "launcher", &jwks_cache)
             .expect("token valide, join accepté");
 
         let root_admins: std::collections::HashSet<String> =
