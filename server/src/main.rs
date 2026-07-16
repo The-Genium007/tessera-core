@@ -8,6 +8,37 @@ use std::time::{Duration, Instant};
 
 fn main() {
     tracing_subscriber::fmt::init();
+
+    // Attestation officielle (optionnel) — voir docs/superpowers/specs/
+    // 2026-07-15-official-server-zitadel-attestation-design.md. Absente = ce serveur ne peut
+    // jamais être republié "official" par `directory`, quelle que soit `identity.kind`.
+    if let Ok(key_json) = std::env::var("ZITADEL_SERVICE_ACCOUNT_KEY_JSON") {
+        let issuer = std::env::var("ZITADEL_ISSUER")
+            .unwrap_or_else(|_| "https://auth.tesserasynth.net".to_string());
+        match server::attestation::AttestationCache::new(&issuer, &key_json) {
+            Ok(cache) => {
+                let cache = std::sync::Arc::new(cache);
+                let listen_addr = std::env::var("TESSERA_INTERNAL_ATTESTATION_LISTEN_ADDR")
+                    .unwrap_or_else(|_| "127.0.0.1:27099".to_string());
+                let rt = tokio::runtime::Runtime::new()
+                    .expect("runtime tokio pour le serveur d'attestation interne");
+                std::thread::spawn(move || {
+                    rt.block_on(async move {
+                        if let Err(e) =
+                            server::internal_attestation_http::serve(&listen_addr, cache).await
+                        {
+                            tracing::error!(error = %e, "serveur d'attestation interne arrêté");
+                        }
+                    });
+                });
+                tracing::info!("attestation ZITADEL activée");
+            }
+            Err(e) => {
+                tracing::error!(error = ?e, "clé d'attestation ZITADEL invalide — attestation désactivée, ce serveur ne sera jamais republié \"official\"");
+            }
+        }
+    }
+
     let hz = server::default_tick_rate_hz();
     let period = Duration::from_secs_f64(1.0 / hz as f64);
     tracing::info!(

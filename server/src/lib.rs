@@ -3,11 +3,13 @@
 pub mod admin_commands;
 pub mod admin_store;
 pub mod anticheat;
+pub mod attestation;
 pub mod framing;
 pub mod gateway;
 pub mod gateway_routing;
 pub mod handoff;
 pub mod hot_state_cache;
+pub mod internal_attestation_http;
 pub mod internal_net;
 pub mod jwks;
 pub mod manifest;
