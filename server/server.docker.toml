@@ -10,7 +10,7 @@ max_players = 16
 tags = ["dev", "test"]
 discord_url = ""
 website_url = "https://tesserasynth.net"
-required_modset = "0.1.2"
+required_modset = "0.1.3"
 voice_required = false
 # Playtest 2 (2026-07-13+) : auth ZITADEL réelle exigée au Join (JWT vérifié), et bascule vers
 # PostgresStore (voir bin/gateway.rs) — nécessite TESSERA_POSTGRES_URL posée côté Dokploy.
