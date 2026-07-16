@@ -110,7 +110,7 @@ dans cette table.
 
 Un instrument d'observation log-only (canaux nœuds de quête, facts, état désossage effectif,
 marqueurs d'action joueur) est ajouté à ce module pour préparer un futur Palier 2 (blocage
-sélectif). Voir `gate-observation-protocol.md` (ce dossier) pour le protocole de session, et
+sélectif). Voir `gate-observation-protocol.md` (racine du dépôt) pour le protocole de session, et
 `docs/superpowers/specs/2026-07-16-desossage-campagne-gelee-observation-design.md` pour le design
 complet. Ces canaux ne modifient AUCUN comportement de jeu — ils journalisent seulement.
 
@@ -131,8 +131,8 @@ confirmé). redscript (dépendance toolchain) compile les `.reds` au lancement.
 
 ## Gate — protocole d'observation
 
-Voir `gate-observation-protocol.md` (ce dossier) pour le déroulé complet d'une session
-d'observation, et `gate-observations-TEMPLATE.md` pour consigner les résultats. Quatre canaux
+Voir `gate-observation-protocol.md` (racine du dépôt) pour le déroulé complet d'une session
+d'observation, et `gate-observations-TEMPLATE.md` (ce dossier) pour consigner les résultats. Quatre canaux
 log-only : nœuds de quête (`tessera-client`, `red4ext.log`), facts
 (`DesossageGateFacts.reds`), état désossage effectif (`DesossageSystem.LogGateSnapshot`),
 marqueurs d'action joueur (`Tessera_GateMark`, console CET ou panneau) — les trois derniers
