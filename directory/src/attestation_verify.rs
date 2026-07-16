@@ -1,101 +1,33 @@
-//! Vérifie un token d'attestation ZITADEL récupéré depuis `/internal/attestation` d'un serveur,
-//! puis confirme via le CMS que le `sub` correspond à une entrée `officialServers` connue.
-//! Duplique volontairement le mécanisme JWKS déjà présent côté launcher
-//! (`launcher/src-tauri/src/lib.rs`) et site (`zitadelVerify.ts`) — troisième implémentation
-//! indépendante, cf. spec §points-ouverts (un crate partagé reste une extension possible mais
-//! pas nécessaire pour cette première version : les trois usages ont des contraintes de runtime
-//! différentes — async Tokio, async Nuxt/Nitro, et ici du `reqwest::blocking` synchrone dans un
-//! outil CLI ponctuel).
-//!
-//! `fetch_jwks`/`verify_attestation`/`confirm_official_server` ne sont pas encore appelées
-//! depuis `main.rs` (câblage dans `cmd_publish` = tâche suivante du plan) : `dead_code` autorisé
-//! localement à ce module le temps de cette transition, pas globalement au crate.
-#![allow(dead_code)]
+//! Vérifie un JWT d'attestation « serveur officiel » signé par le CMS (EdDSA), contre une clé
+//! publique statique — plus aucun JWKS/issuer ZITADEL (spec 2026-07-16). Renvoie le `sub` (slug)
+//! si le token est valide (signature + iss + exp). Puis confirme via le CMS que ce slug est
+//! toujours listé (révocation live). Jamais de panique : toute défaillance ⇒ community.
+#![allow(dead_code)] // câblé depuis main.rs en Task 7
 
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
-struct JwksDocumentRaw {
-    keys: Vec<JwkEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JwkEntry {
-    kid: String,
-    kty: String,
-    #[serde(default)]
-    n: Option<String>,
-    #[serde(default)]
-    e: Option<String>,
-}
-
-pub struct JwksDocument {
-    keys: HashMap<String, DecodingKey>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct AttestationClaims {
     sub: String,
-    iss: String,
-    exp: u64,
 }
 
-/// Récupère et parse le document JWKS ZITADEL. Entrées malformées/non-RSA ignorées avec un
-/// avertissement (même tolérance que `server::jwks::JwksCache::refresh`), jamais une erreur
-/// bloquante pour une seule clé invalide dans un trousseau par ailleurs valide.
-pub fn fetch_jwks(jwks_url: &str) -> Result<JwksDocument, String> {
-    let client = reqwest::blocking::Client::new();
-    let response = client
-        .get(jwks_url)
-        .send()
-        .map_err(|e| format!("JWKS injoignable ({jwks_url}) : {e}"))?;
-    let document: JwksDocumentRaw = response
-        .json()
-        .map_err(|e| format!("JWKS illisible ({jwks_url}) : {e}"))?;
-
-    let mut keys = HashMap::with_capacity(document.keys.len());
-    for entry in document.keys {
-        if entry.kty != "RSA" {
-            eprintln!("clé JWKS ignorée (kid={}) : kty non supporté", entry.kid);
-            continue;
-        }
-        let (Some(n), Some(e)) = (entry.n.as_deref(), entry.e.as_deref()) else {
-            eprintln!(
-                "clé JWKS ignorée (kid={}) : composants n/e manquants",
-                entry.kid
-            );
-            continue;
-        };
-        match DecodingKey::from_rsa_components(n, e) {
-            Ok(key) => {
-                keys.insert(entry.kid, key);
-            }
-            Err(err) => eprintln!("clé JWKS ignorée (kid={}) : {err}", entry.kid),
-        }
-    }
-    Ok(JwksDocument { keys })
-}
-
-/// Vérifie le token (signature via JWKS + issuer + expiration) et renvoie le `sub` si valide.
-/// `None` pour toute défaillance (signature invalide, issuer différent, expiré, kid inconnu) —
-/// jamais de panique, l'appelant retombe sur `kind = "community"` (spec §4).
+/// Vérifie la signature EdDSA (contre `public_key_pem`, une clé publique statique — plus de
+/// trousseau JWKS à rafraîchir), l'issuer et l'expiration. Renvoie le `sub` (slug du serveur) si
+/// valide, `None` pour toute défaillance (signature, issuer, expiration, PEM malformé) — jamais
+/// de panique, l'appelant retombe sur `kind = "community"` (spec §4).
 pub fn verify_attestation(
     token: &str,
-    jwks: &JwksDocument,
+    public_key_pem: &str,
     expected_issuer: &str,
 ) -> Option<String> {
-    let header = decode_header(token).ok()?;
-    let kid = header.kid?;
-    let key = jwks.keys.get(&kid)?;
-
-    let mut validation = Validation::new(Algorithm::RS256);
+    let key = DecodingKey::from_ed_pem(public_key_pem.as_bytes()).ok()?;
+    let mut validation = Validation::new(Algorithm::EdDSA);
     validation.set_issuer(&[expected_issuer]);
     validation.validate_exp = true;
-
-    let token_data = decode::<AttestationClaims>(token, key, &validation).ok()?;
-    Some(token_data.claims.sub)
+    validation.set_required_spec_claims(&["exp", "iss", "sub"]);
+    let data = decode::<AttestationClaims>(token, &key, &validation).ok()?;
+    Some(data.claims.sub)
 }
 
 #[derive(Deserialize)]
@@ -103,12 +35,12 @@ struct OfficialServerLookupResponse {
     found: bool,
 }
 
-/// Interroge `GET {cms_url}/api/public/official-server-by-zitadel-user?userId=...` (Task 4).
-/// `false` pour toute erreur réseau/HTTP non-2xx — jamais bloquant pour le reste de la
-/// publication (spec §4).
-pub fn confirm_official_server(cms_url: &str, sub: &str) -> bool {
+/// Interroge `GET {cms_url}/api/public/official-server-by-slug?slug=...` (Task 3/4) pour
+/// confirmer que le slug attesté est toujours listé (révocation live). `false` pour toute erreur
+/// réseau/HTTP non-2xx/réponse illisible — jamais bloquant (spec §Objectif).
+pub fn confirm_official_server(cms_url: &str, slug: &str) -> bool {
     let client = reqwest::blocking::Client::new();
-    let url = format!("{cms_url}/api/public/official-server-by-zitadel-user?userId={sub}");
+    let url = format!("{cms_url}/api/public/official-server-by-slug?slug={slug}");
     let response = match client.get(&url).send() {
         Ok(r) => r,
         Err(e) => {
@@ -135,114 +67,93 @@ pub fn confirm_official_server(cms_url: &str, sub: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use ed25519_dalek::SigningKey;
     use jsonwebtoken::{encode, EncodingKey, Header};
-    use rsa::pkcs1::EncodeRsaPrivateKey;
-    use rsa::traits::PublicKeyParts;
-    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use serde::Serialize;
 
-    const TEST_KID: &str = "test-key-1";
-    const TEST_ISSUER: &str = "https://auth.example.com";
+    const ISSUER: &str = "tessera-cms";
 
-    struct TestKeyMaterial {
-        encoding_key: EncodingKey,
-        jwks: JwksDocument,
+    #[derive(Serialize)]
+    struct Claims {
+        iss: String,
+        sub: String,
+        iat: u64,
+        exp: u64,
     }
 
-    fn test_key_material() -> TestKeyMaterial {
-        let mut rng = rand::rngs::OsRng;
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let public_key = RsaPublicKey::from(&private_key);
-        let pem = private_key
-            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
-            .unwrap();
-        let encoding_key = EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap();
+    struct Pair {
+        private_pem: String,
+        public_pem: String,
+    }
 
-        let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
-        let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
-        let decoding_key = DecodingKey::from_rsa_components(&n_b64, &e_b64).unwrap();
-
-        let mut keys = HashMap::new();
-        keys.insert(TEST_KID.to_string(), decoding_key);
-
-        TestKeyMaterial {
-            encoding_key,
-            jwks: JwksDocument { keys },
+    fn gen_pair() -> Pair {
+        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+        Pair {
+            private_pem: sk.to_pkcs8_pem(LineEnding::LF).unwrap().to_string(),
+            public_pem: sk.verifying_key().to_public_key_pem(LineEnding::LF).unwrap(),
         }
     }
 
-    fn far_future() -> u64 {
-        9_999_999_999
-    }
-
-    fn encode_test_token(claims: &AttestationClaims, key: &EncodingKey) -> String {
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(TEST_KID.to_string());
-        encode(&header, claims, key).unwrap()
+    fn sign(private_pem: &str, sub: &str, iss: &str, exp: u64) -> String {
+        let key = EncodingKey::from_ed_pem(private_pem.as_bytes()).unwrap();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some("JWT".into());
+        encode(
+            &header,
+            &Claims {
+                iss: iss.into(),
+                sub: sub.into(),
+                iat: 0,
+                exp,
+            },
+            &key,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn verify_attestation_accepts_valid_token_and_returns_sub() {
-        let material = test_key_material();
-        let claims = AttestationClaims {
-            sub: "srv-user-1".into(),
-            iss: TEST_ISSUER.into(),
-            exp: far_future(),
-        };
-        let token = encode_test_token(&claims, &material.encoding_key);
-
+    fn accepts_valid_token_and_returns_sub() {
+        let p = gen_pair();
+        let t = sign(&p.private_pem, "srv-1", ISSUER, 9_999_999_999);
         assert_eq!(
-            verify_attestation(&token, &material.jwks, TEST_ISSUER),
-            Some("srv-user-1".to_string())
+            verify_attestation(&t, &p.public_pem, ISSUER),
+            Some("srv-1".into())
         );
     }
 
     #[test]
-    fn verify_attestation_rejects_wrong_issuer() {
-        let material = test_key_material();
-        let claims = AttestationClaims {
-            sub: "srv-user-1".into(),
-            iss: "https://not-the-real-issuer.example.com".into(),
-            exp: far_future(),
-        };
-        let token = encode_test_token(&claims, &material.encoding_key);
-
-        assert_eq!(
-            verify_attestation(&token, &material.jwks, TEST_ISSUER),
-            None
-        );
+    fn rejects_wrong_issuer() {
+        let p = gen_pair();
+        let t = sign(&p.private_pem, "srv-1", "someone-else", 9_999_999_999);
+        assert_eq!(verify_attestation(&t, &p.public_pem, ISSUER), None);
     }
 
     #[test]
-    fn verify_attestation_rejects_expired_token() {
-        let material = test_key_material();
-        let claims = AttestationClaims {
-            sub: "srv-user-1".into(),
-            iss: TEST_ISSUER.into(),
-            exp: 1,
-        };
-        let token = encode_test_token(&claims, &material.encoding_key);
-
-        assert_eq!(
-            verify_attestation(&token, &material.jwks, TEST_ISSUER),
-            None
-        );
+    fn rejects_expired() {
+        let p = gen_pair();
+        let t = sign(&p.private_pem, "srv-1", ISSUER, 1);
+        assert_eq!(verify_attestation(&t, &p.public_pem, ISSUER), None);
     }
 
     #[test]
-    fn verify_attestation_rejects_token_signed_by_unknown_key() {
-        let material = test_key_material();
-        let other = test_key_material(); // paire RSA différente, jamais dans le jwks testé
-        let claims = AttestationClaims {
-            sub: "srv-user-1".into(),
-            iss: TEST_ISSUER.into(),
-            exp: far_future(),
-        };
-        let token = encode_test_token(&claims, &other.encoding_key);
+    fn rejects_unknown_key() {
+        let signer = gen_pair();
+        let other = gen_pair();
+        let t = sign(&signer.private_pem, "srv-1", ISSUER, 9_999_999_999);
+        assert_eq!(verify_attestation(&t, &other.public_pem, ISSUER), None);
+    }
 
+    #[test]
+    fn verifies_real_cms_wire_token() {
+        // Token produit par le VRAI signeur jose (fixtures, Task 6 step 1) — rougit si le contrat
+        // de fil casse (leçon CLAUDE.md : tester le fil, pas chaque côté isolément).
+        let token = include_str!("../tests/fixtures/wire-token.jwt").trim();
+        let public_pem = include_str!("../tests/fixtures/wire-public.pem");
         assert_eq!(
-            verify_attestation(&token, &material.jwks, TEST_ISSUER),
-            None
+            verify_attestation(token, public_pem, "tessera-cms"),
+            Some("wire-fixture-slug".into())
         );
     }
 }
