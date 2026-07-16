@@ -30,6 +30,7 @@ système**, chacun une `DesossageEntry { active, density }`. Défaut = **tout co
 | `DesossageEvents.reds` | rencontres (par type) / quêtes / tutoriels |
 | `DesossageWorld.reds` | échelle du cycle jour/nuit |
 | `DesossageConsole.reds` | bascule un levier en jeu via la console CET, sans rebuild (voir « Tester ») |
+| `DesossageGateFacts.reds` | Gate — journalise chaque écriture de fact (`QuestsSystem.SetFact`), log-only |
 
 ## ⚠️ Avant de toucher un `@wrapMethod` : le dump RTTI ne donne PAS les noms redscript
 
@@ -127,6 +128,16 @@ confirmé). redscript (dépendance toolchain) compile les `.reds` au lancement.
    - lignes `[Tessera/Desossage] système attaché`, `application des leviers…`, puis les stubs.
 3. (Après pinning des leviers) observer : rues vides, pas de police/vendeurs/kiosques/quêtes ; et
    **smoke-test du bouton** : `pedestrians = DesossageEntry.New(true, 0.3)` → piétons clairsemés.
+
+## Gate — protocole d'observation
+
+Voir `gate-observation-protocol.md` (ce dossier) pour le déroulé complet d'une session
+d'observation, et `gate-observations-TEMPLATE.md` pour consigner les résultats. Quatre canaux
+log-only : nœuds de quête (`tessera-client`, `red4ext.log`), facts
+(`DesossageGateFacts.reds`), état désossage effectif (`DesossageSystem.LogGateSnapshot`),
+marqueurs d'action joueur (`Tessera_GateMark`, console CET ou panneau) — les trois derniers
+écrivent dans `scripting.log`. Objectif : identifier nommément ce qui déclenche Takemura et les
+PNJ résiduels avant d'écrire le moindre blocage (Palier 2, plan séparé).
 
 ## Itérer sans rebuild : console CET
 
