@@ -138,9 +138,12 @@ fn cmd_publish(manifest_path: &std::path::Path, out_dir: &std::path::Path) -> an
 }
 
 /// Résout si CE manifeste peut légitimement être republié "official" : interroge l'endpoint
-/// interne du serveur pour son token d'attestation courant, le vérifie contre le JWKS ZITADEL,
-/// puis confirme via le CMS. `false` pour toute étape manquante/en échec — jamais bloquant pour
-/// la publication (spec §objectif : repli silencieux, pas d'erreur fatale).
+/// interne du serveur pour son token d'attestation courant, le vérifie contre la clé publique
+/// statique de l'autorité d'attestation (CMS, EdDSA — plus de JWKS/issuer ZITADEL depuis
+/// 2026-07-16), vérifie que le `sub` du token correspond au slug déclaré du manifeste (défense en
+/// profondeur), puis confirme via le CMS que ce slug n'est pas révoqué. `false` pour toute étape
+/// manquante/en échec — jamais bloquant pour la publication (spec §objectif : repli silencieux,
+/// pas d'erreur fatale).
 fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
     if manifest.identity.kind != server::manifest::ServerKind::Official {
         // Pas la peine d'interroger quoi que ce soit si le manifeste ne déclare même pas
@@ -158,17 +161,10 @@ fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
             return false;
         }
     };
-    let zitadel_jwks_uri = match std::env::var("TESSERA_ZITADEL_JWKS_URI") {
-        Ok(url) => url,
+    let public_key_pem = match std::env::var("TESSERA_ATTESTATION_PUBLIC_KEY") {
+        Ok(v) => v.replace("\\n", "\n"), // tolère les \n échappés en env
         Err(_) => {
-            eprintln!("TESSERA_ZITADEL_JWKS_URI absente — kind rétrogradé à community");
-            return false;
-        }
-    };
-    let zitadel_issuer = match std::env::var("TESSERA_ZITADEL_ISSUER") {
-        Ok(url) => url,
-        Err(_) => {
-            eprintln!("TESSERA_ZITADEL_ISSUER absente — kind rétrogradé à community");
+            eprintln!("TESSERA_ATTESTATION_PUBLIC_KEY absente — kind rétrogradé à community");
             return false;
         }
     };
@@ -184,6 +180,7 @@ fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
     let token = match client
         .get(&internal_attestation_url)
         .send()
+        .and_then(|r| r.error_for_status())
         .and_then(|r| r.json::<serde_json::Value>())
     {
         Ok(body) => match body.get("token").and_then(|t| t.as_str()) {
@@ -201,22 +198,22 @@ fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
         }
     };
 
-    let jwks = match attestation_verify::fetch_jwks(&zitadel_jwks_uri) {
-        Ok(j) => j,
-        Err(e) => {
-            eprintln!("{e}");
-            return false;
-        }
-    };
-
-    let sub = match attestation_verify::verify_attestation(&token, &jwks, &zitadel_issuer) {
+    let sub = match attestation_verify::verify_attestation(&token, &public_key_pem, "tessera-cms")
+    {
         Some(s) => s,
         None => {
             eprintln!("token d'attestation invalide (signature/issuer/expiration) — kind rétrogradé à community");
             return false;
         }
     };
-
+    // Défense en profondeur : le sub du token DOIT être le slug déclaré du manifeste.
+    if sub != manifest.identity.id {
+        eprintln!(
+            "sub du token ({sub}) ≠ identity.id ({}) — kind rétrogradé à community",
+            manifest.identity.id
+        );
+        return false;
+    }
     attestation_verify::confirm_official_server(&cms_url, &sub)
 }
 
@@ -477,35 +474,32 @@ mod register_tests {
 #[cfg(test)]
 mod attestation_resolution_tests {
     //! Seul test du chemin **positif** de bout en bout de l'attestation : token valide → vérifié
-    //! contre le JWKS → confirmé par le CMS → `resolve_attestation` renvoie `true`. Tous les autres
-    //! tests de la feature (attestation_verify.rs) couvrent des branches d'échec (fail-closed) ;
-    //! celui-ci verrouille la seule branche où un bug importerait vraiment — la frontière de
-    //! confiance qui accorde le badge `official`.
+    //! contre la clé publique statique → confirmé par le CMS → `resolve_attestation` renvoie
+    //! `true`. Tous les autres tests de la feature (attestation_verify.rs) couvrent des branches
+    //! d'échec (fail-closed) ; celui-ci verrouille la seule branche où un bug importerait vraiment
+    //! — la frontière de confiance qui accorde le badge `official`.
     //!
-    //! Trois faux serveurs HTTP montés en local (aucun réseau externe, aucun vrai ZITADEL), chacun
-    //! sur son propre `127.0.0.1:0` dans son `std::thread` : `resolve_attestation` utilise
-    //! `reqwest::blocking`, donc on reste en `std::net::TcpListener` synchrone (le crate `directory`
-    //! ne dépend pas de tokio) plutôt que le motif tokio de `server::jwks`. Crypto RSA réelle : la
-    //! signature du JWT est réellement vérifiée par les composants publics servis par le faux JWKS,
-    //! ce n'est pas un raccourci.
+    //! Deux faux serveurs HTTP montés en local (aucun réseau externe, aucun vrai CMS), chacun sur
+    //! son propre `127.0.0.1:0` dans son `std::thread` : `resolve_attestation` utilise
+    //! `reqwest::blocking`, donc on reste en `std::net::TcpListener` synchrone (le crate
+    //! `directory` ne dépend pas de tokio). Crypto Ed25519 réelle : la signature du JWT est
+    //! réellement vérifiée contre la clé publique statique, ce n'est pas un raccourci.
     //!
-    //! ISOLATION ENV : `resolve_attestation` lit 4 variables d'env process-globales. Aucun autre
+    //! ISOLATION ENV : `resolve_attestation` lit 3 variables d'env process-globales. Aucun autre
     //! test du crate ne lit/écrit ces mêmes noms (`TESSERA_INTERNAL_ATTESTATION_URL`,
-    //! `TESSERA_ZITADEL_JWKS_URI`, `TESSERA_ZITADEL_ISSUER`, `TESSERA_CMS_URL` — vérifié par grep),
-    //! et ce module ne contient qu'un seul test qui les écrit, donc pas de course inter-tests même
-    //! en exécution parallèle par défaut. Pas de crate `serial_test` ajouté pour ça.
+    //! `TESSERA_ATTESTATION_PUBLIC_KEY`, `TESSERA_CMS_URL` — vérifié par grep), et ce module ne
+    //! contient qu'un seul test qui les écrit, donc pas de course inter-tests même en exécution
+    //! parallèle par défaut. Pas de crate `serial_test` ajouté pour ça.
     use super::*;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use ed25519_dalek::pkcs8::EncodePublicKey;
+    use ed25519_dalek::SigningKey;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-    use rsa::pkcs1::EncodeRsaPrivateKey;
-    use rsa::traits::PublicKeyParts;
-    use rsa::{RsaPrivateKey, RsaPublicKey};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    const TEST_KID: &str = "test-key-1";
-    const TEST_ISSUER: &str = "https://auth.test.example.com";
-    const TEST_SUB: &str = "srv-user-official-1";
+    const TEST_ISSUER: &str = "tessera-cms";
 
     /// Répond à UNE connexion HTTP avec `body` (JSON), puis termine. Renvoie l'adresse écoutée.
     /// Sépare volontairement la lecture (best-effort, on ignore la requête : chaque faux endpoint
@@ -529,55 +523,53 @@ mod attestation_resolution_tests {
 
     #[test]
     fn resolve_attestation_returns_true_for_a_fully_valid_chain() {
-        // 1. Matériel RSA de test généré à la volée (jamais de vraie clé ZITADEL en dur).
-        let mut rng = rand::rngs::OsRng;
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("génération clé RSA de test");
-        let public_key = RsaPublicKey::from(&private_key);
-        let pem = private_key
-            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
-            .expect("encodage PKCS1 PEM");
-        let encoding_key =
-            EncodingKey::from_rsa_pem(pem.as_bytes()).expect("clé RSA illisible par jsonwebtoken");
-        let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
-        let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
-
-        // 2. Un vrai JWT fraîchement signé (issuer correct, exp lointaine) → réellement vérifié.
-        let claims = serde_json::json!({
-            "sub": TEST_SUB,
-            "iss": TEST_ISSUER,
-            "exp": 9_999_999_999u64,
-        });
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(TEST_KID.to_string());
-        let token = encode(&header, &claims, &encoding_key).expect("encodage du JWT de test");
-
-        // 3. Trois faux endpoints locaux, chacun sur son port, chacun dans son thread.
-        let attestation_addr = spawn_json_once(format!("{{\"token\":\"{token}\"}}"));
-        let jwks_addr = spawn_json_once(format!(
-            "{{\"keys\":[{{\"kid\":\"{TEST_KID}\",\"kty\":\"RSA\",\"n\":\"{n_b64}\",\"e\":\"{e_b64}\"}}]}}"
-        ));
-        // confirm_official_server appelle GET {cms_url}/api/public/... ; notre mock répond quel
-        // que soit le chemin, il suffit qu'il renvoie {"found": true}.
-        let cms_addr = spawn_json_once("{\"found\":true}".to_string());
-
-        // 4. Les 4 variables d'env pointent vers nos faux serveurs.
-        std::env::set_var(
-            "TESSERA_INTERNAL_ATTESTATION_URL",
-            format!("http://{attestation_addr}/internal/attestation"),
-        );
-        std::env::set_var(
-            "TESSERA_ZITADEL_JWKS_URI",
-            format!("http://{jwks_addr}/oauth/v2/keys"),
-        );
-        std::env::set_var("TESSERA_ZITADEL_ISSUER", TEST_ISSUER);
-        std::env::set_var("TESSERA_CMS_URL", format!("http://{cms_addr}"));
-
-        // 5. Manifeste déclarant kind=official (sinon resolve_attestation court-circuite).
+        // 0. Manifeste déclarant kind=official (sinon resolve_attestation court-circuite) — le
+        // `sub` du token DOIT correspondre à `identity.id` (défense en profondeur récemment
+        // ajoutée), donc on le lit ici plutôt que d'utiliser un slug de test arbitraire.
         let manifest_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/server.example.toml");
         let mut manifest =
             server::manifest::load(&manifest_path).expect("manifeste exemple valide");
         manifest.identity.kind = server::manifest::ServerKind::Official;
+        let sub = manifest.identity.id.clone();
+
+        // 1. Paire Ed25519 de test générée à la volée (jamais de vraie clé CMS en dur).
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let private_pem = signing_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("encodage PKCS8 PEM")
+            .to_string();
+        let public_pem = signing_key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("encodage SPKI PEM");
+
+        // 2. Un vrai JWT fraîchement signé (issuer correct, exp lointaine) → réellement vérifié.
+        let claims = serde_json::json!({
+            "sub": sub,
+            "iss": TEST_ISSUER,
+            "iat": 0,
+            "exp": 9_999_999_999u64,
+        });
+        let encoding_key = EncodingKey::from_ed_pem(private_pem.as_bytes())
+            .expect("clé Ed25519 illisible par jsonwebtoken");
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some("JWT".into());
+        let token = encode(&header, &claims, &encoding_key).expect("encodage du JWT de test");
+
+        // 3. Deux faux endpoints locaux, chacun sur son port, chacun dans son thread.
+        let attestation_addr = spawn_json_once(format!("{{\"token\":\"{token}\"}}"));
+        // confirm_official_server appelle GET {cms_url}/api/public/... ; notre mock répond quel
+        // que soit le chemin, il suffit qu'il renvoie {"found": true}.
+        let cms_addr = spawn_json_once("{\"found\":true}".to_string());
+
+        // 4. Les 3 variables d'env pointent vers nos faux serveurs / la clé publique de test.
+        std::env::set_var(
+            "TESSERA_INTERNAL_ATTESTATION_URL",
+            format!("http://{attestation_addr}/internal/attestation"),
+        );
+        std::env::set_var("TESSERA_ATTESTATION_PUBLIC_KEY", &public_pem);
+        std::env::set_var("TESSERA_CMS_URL", format!("http://{cms_addr}"));
 
         assert!(
             resolve_attestation(&manifest),
