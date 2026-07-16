@@ -1,22 +1,21 @@
 module Tessera.Desossage
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Gate — canal facts (2026-07-16) : journalise CHAQUE écriture de fact de quête (SetFact), pas
-// seulement celles posées par nous (DesossageEvents.reds) — objectif : voir si le jeu lui-même
-// pose/lit un fact de progression de campagne pendant la session d'observation (Gate, spec
-// docs/superpowers/specs/2026-07-16-desossage-campagne-gelee-observation-design.md §2b).
+// Gate — canal Fact NEUTRALISÉ (2026-07-16).
 //
-// Wrap sur QuestsSystem.SetFact(CName, Int32) — signature et visibilité `public` confirmées par
-// l'appel externe existant `GameInstance.GetQuestsSystem(game).SetFact(n"disable_tutorials",
-// value)` dans DesossageEvents.reds (un appel externe à une méthode non publique ne compilerait
-// pas). Strictement log-only : `wrappedMethod` est toujours appelée, aucun blocage.
+// L'implémentation d'origine (wrapMethod sur QuestsSystem.SetFact(CName, Int32)) NE COMPILE PAS :
+// SetFact est une méthode NATIVE du moteur, et wrapMethod n'injecte que dans du bytecode scripté.
+// Une native publique est appelable mais PAS wrappable — même classe d'échec que RegisterMappin
+// (natif, même message [UNRESOLVED_METHOD], retiré le 05/07, cf. DesossageMappins.reds). Le
+// raisonnement d'origine (« publique donc wrappable ») était le piège : public ≠ scriptée.
 //
-// PIN IN-GAME : jamais testé — à confirmer que le log apparaît bien à chaque
-// disable_tutorials/air_traffic_off posé par nous ET, si le jeu en pose un pendant le Gate, à
-// chaque fact de progression de campagne.
+// Cette version cassée a été publiée dans le modset 0.1.4 (canal playtest) et rendait le jeu
+// INJOUABLE : redscript refuse tout r6/scripts dès qu'un fichier échoue, faisant tomber le
+// désossage entier + Cyberverse. Kick systématique / échec de compilation au lancement.
+//
+// La capture GLOBALE des facts posés par le jeu lui-même doit passer par un hook C++ RED4ext dans
+// le fork Cyberverse (décidé 2026-07-16), pas par redscript. Nos PROPRES écritures de facts
+// (disable_tutorials / air_traffic_off) sont déjà journalisées dans DesossageEvents.reds.
+//
+// Fichier laissé volontairement vide (compile no-op) pour ne pas faire tomber tout r6/scripts.
 // ─────────────────────────────────────────────────────────────────────────────
-@wrapMethod(QuestsSystem)
-public func SetFact(factName: CName, value: Int32) -> Void {
-  FTLog(s"[Tessera/Gate/Fact] SetFact \(factName) = \(value)");
-  wrappedMethod(factName, value);
-}
