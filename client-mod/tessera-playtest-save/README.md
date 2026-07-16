@@ -38,6 +38,17 @@ sur macOS, testé en jeu.
   modset reste valide (juste un menu normal au lancement plutôt que l'auto-load).
   `cargo test` vert (27/27), jamais testé en conditions réelles (build Windows).
 
+## Note (2026-07-16) — état narratif hors périmètre de ce module
+
+Cette save est fin acte 2 (StreetKid) : au chargement, une quête principale est active et
+**Takemura contacte le joueur** peu après le spawn. Ni ce module ni les facts posés par
+`tessera-desossage` (`air_traffic_off`, `disable_tutorials`) ne neutralisent cet état — les facts
+couvrent des interrupteurs isolés, pas la progression de quête. Le gel de la campagne est traité
+par le **Palier 2** du chantier désossage (blocage sélectif de nœuds de quête via le hook C++
+`tessera-client`), gaté sur les résultats du **Gate d'observation** — voir
+`docs/superpowers/specs/2026-07-16-desossage-campagne-gelee-observation-design.md`. Aucune édition
+manuelle du graphe de quête de cette save n'est prévue (fragile, non versionnable).
+
 ## À faire ensuite
 
 - Build Windows + test en jeu réel : la save doit apparaître dans la liste des sauvegardes sous le

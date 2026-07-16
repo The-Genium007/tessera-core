@@ -105,6 +105,14 @@ Windows). Toute future implémentation doit citer une source réelle (mod publi�
 dump RTTI local — `tools/nativedb/search.py`) — sinon rester en stub et le documenter comme tel
 dans cette table.
 
+## Note (2026-07-16) — Gate d'observation profonde
+
+Un instrument d'observation log-only (canaux nœuds de quête, facts, état désossage effectif,
+marqueurs d'action joueur) est ajouté à ce module pour préparer un futur Palier 2 (blocage
+sélectif). Voir `gate-observation-protocol.md` (ce dossier) pour le protocole de session, et
+`docs/superpowers/specs/2026-07-16-desossage-campagne-gelee-observation-design.md` pour le design
+complet. Ces canaux ne modifient AUCUN comportement de jeu — ils journalisent seulement.
+
 ## Où ça se déploie
 
 Overlay enraciné à la racine du jeu : `<racine Cyberpunk>/r6/scripts/Tessera/desossage/*.reds`.
