@@ -15,7 +15,10 @@
 // `Query()` sur pourquoi ce n'est pas encore épinglé à 2.31 spécifiquement.
 
 #include <RED4ext/RED4ext.hpp>
+#include <chrono>
 #include <cstdint>
+#include <string>
+#include <unordered_map>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Désossage natif — PHASE 1 : hook LOG-ONLY, aucun blocage.
@@ -49,6 +52,15 @@
 // natif échoue bruyamment au chargement (boîte d'erreur RED4ext, processus terminé) — échec
 // propre et déterministe, pas un crash aléatoire (comportement documenté du SDK,
 // `UniversalRelocBase::Resolve`).
+//
+// GATE (2026-07-16) — élargi de « spawn nodes seulement » à « tous les nœuds vus » : le but n'est
+// plus seulement de confirmer les nœuds spawn, mais de DÉCOUVRIR par leur nom de classe ce qui
+// correspond à l'appel Takemura / aux PNJ statiques Community / aux hustles — inconnu à l'avance.
+// Dédupliqué par nom de classe (3 premières occurrences en détail, puis comptage silencieux + un
+// résumé tous les `kSummaryEveryNCalls` appels) pour ne pas noyer le log : `ExecuteNode` est le
+// dispatcheur central, appelé en continu pour toutes les quêtes en cours. Toujours strictement
+// log-only : `g_original(...)` est appelé inconditionnellement dans tous les cas, aucun retour
+// anticipé, aucun changement de comportement.
 namespace TesseraDesossageNative
 {
 using ExecuteNode_t = std::uint8_t (*)(void* aPhase, RED4ext::CClass* aNodeClass, void* aNode,
@@ -60,10 +72,23 @@ ExecuteNode_t g_original = nullptr;
 RED4ext::v1::Sdk const* g_sdk = nullptr;
 RED4ext::v1::PluginHandle g_handle = nullptr;
 
-// Nom RTTI de la classe de nœud visée — englobe questSpawner_NodeType/questSpawnSet_NodeType/
+// Nom RTTI de la classe de nœud spawn — englobe questSpawner_NodeType/questSpawnSet_NodeType/
 // questCommunityTemplate_NodeType (tous héritent de questSpawnManagerNodeDefinition, confirmé
-// via le SDK). Un seul test IsA() suffit.
+// via le SDK). Conservé pour marquer les nœuds spawn dans le log élargi ci-dessous.
 constexpr const char* kSpawnNodeClassName = "questSpawnManagerNodeDefinition";
+
+constexpr std::uint64_t kDetailedLogLimit = 3;
+constexpr std::uint64_t kSummaryEveryNCalls = 500;
+
+std::unordered_map<std::string, std::uint64_t> g_classSeenCount;
+std::uint64_t g_totalCalls = 0;
+
+std::uint64_t NowMillis()
+{
+    using namespace std::chrono;
+    return static_cast<std::uint64_t>(
+        duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
+}
 
 std::uint8_t Detour(void* aPhase, RED4ext::CClass* aNodeClass, void* aNode, void* aContext,
     void* aInputSocket, void* aOutputSockets)
@@ -71,15 +96,33 @@ std::uint8_t Detour(void* aPhase, RED4ext::CClass* aNodeClass, void* aNode, void
     // Garde-fou : tout doute (pointeur nul, classe introuvable) → on ne fait QUE journaliser,
     // jamais bloquer. Phase 1 = observation, aucune logique de blocage tant que la sémantique du
     // retour/des sockets de sortie n'est pas comprise en jeu.
-    if (aNodeClass != nullptr)
+    ++g_totalCalls;
+    if (aNodeClass != nullptr && g_sdk != nullptr)
     {
-        auto* rtti = RED4ext::CRTTISystem::Get();
-        auto* spawnCls = rtti != nullptr ? rtti->GetClass(kSpawnNodeClassName) : nullptr;
-        if (spawnCls != nullptr && aNodeClass->IsA(spawnCls) && g_sdk != nullptr)
+        const char* className = aNodeClass->name.ToString();
+        std::string key(className != nullptr ? className : "<sans nom>");
+        std::uint64_t& count = g_classSeenCount[key];
+        ++count;
+
+        if (count <= kDetailedLogLimit)
+        {
+            auto* rtti = RED4ext::CRTTISystem::Get();
+            auto* spawnCls = rtti != nullptr ? rtti->GetClass(kSpawnNodeClassName) : nullptr;
+            bool isSpawnNode = spawnCls != nullptr && aNodeClass->IsA(spawnCls);
+            g_sdk->logger->InfoF(g_handle,
+                "[Tessera/Gate/Node] t=%llu seq=%llu classe=%s occurrence=%llu spawnNode=%d — log seul, phase 1",
+                static_cast<unsigned long long>(NowMillis()),
+                static_cast<unsigned long long>(g_totalCalls), className,
+                static_cast<unsigned long long>(count), isSpawnNode ? 1 : 0);
+        }
+
+        if (g_totalCalls % kSummaryEveryNCalls == 0)
         {
             g_sdk->logger->InfoF(g_handle,
-                "[Tessera/DesossageNative] ExecuteNode sur un nœud spawn (%s) — log seul, phase 1",
-                aNodeClass->name.ToString());
+                "[Tessera/Gate/Summary] t=%llu total=%llu classesDistinctes=%zu",
+                static_cast<unsigned long long>(NowMillis()),
+                static_cast<unsigned long long>(g_totalCalls),
+                static_cast<size_t>(g_classSeenCount.size()));
         }
     }
     return g_original(aPhase, aNodeClass, aNode, aContext, aInputSocket, aOutputSockets);
