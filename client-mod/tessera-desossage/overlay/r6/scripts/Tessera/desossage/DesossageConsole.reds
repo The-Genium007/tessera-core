@@ -67,3 +67,13 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
 public func Tessera_JumpToTime(hour: Int32, minute: Int32) -> Void {
   Tessera_DoJumpToTime(this.GetGame(), hour, minute);
 }
+
+// Gate — canal actions joueur (2026-07-16) : marqueur manuel horodaté, posé à la volée pendant
+// une session d'observation, pour corréler "j'ai fait X" avec les logs des autres canaux au même
+// moment. Mirroir exact du pattern Tessera_SetLever/Tessera_JumpToTime ci-dessus (@addMethod sur
+// PlayerPuppet, déjà éprouvé dans ce fichier) — aucun nouveau symbole moteur, uniquement notre
+// propre méthode. Usage console CET : Game.GetPlayer():Tessera_GateMark("sortie appartement").
+@addMethod(PlayerPuppet)
+public func Tessera_GateMark(label: String) -> Void {
+  FTLog(s"[Tessera/Gate/Action] \(label)");
+}

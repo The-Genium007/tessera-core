@@ -68,6 +68,22 @@ function TesseraDesossage:RenderWorld()
   end
   ImGui.SameLine()
   ImGui.TextDisabled("(saut direct, n'affecte pas le joueur/combat — PIN IN-GAME)")
+
+  ImGui.Separator()
+  ImGui.Text("Gate — marqueurs d'action joueur")
+  local gateMarks = {
+    "sortie appartement",
+    "Takemura appelle",
+    "PNJ statique croisé",
+    "tentative donneur de quête",
+    "rencontre/hustle spontanée",
+  }
+  for _, mark in ipairs(gateMarks) do
+    if ImGui.Button(mark) then
+      Game.GetPlayer():Tessera_GateMark(mark)
+    end
+  end
+  ImGui.TextDisabled("(log [Tessera/Gate/Action], pour corréler avec les autres canaux pendant l'observation)")
 end
 
 local isOverlayVisible = false
