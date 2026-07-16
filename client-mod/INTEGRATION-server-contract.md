@@ -16,6 +16,28 @@ autoritaire. **Tout existe et est testé côté serveur** (milestone « 2 client
   `GetCommandLineA()` dans `OnNetworkUpdate`) → on réutilise ce mécanisme, le launcher injectera l'IP.
 - Le serveur attribue un `ClientId` (u64) au niveau transport à la connexion (`TransportEvent::Connected`).
 
+## Authentification (serveur public, `identity.public = true`)
+
+Sur un serveur public, le Gateway **exige un JWT ZITADEL** dans le `Join` et le vérifie hors-ligne
+(JWKS) avant d'accepter la connexion (`gateway.rs::resolve_join_key`). Le contrat launcher → jeu :
+
+- **Canal : variable d'environnement `TESSERA_JOIN_TOKEN`** (décision 2026-07-16). Le launcher pose
+  cette variable sur le process du jeu au lancement (`launch_game`, `Command::env`). Le JWT n'est
+  **jamais** passé en argument de ligne de commande (il serait visible dans la liste des process),
+  ni écrit sur disque. **À FAIRE côté fork Cyberverse** (`The-Genium007/Cyberverse@port/2.31`) : lire
+  `TESSERA_JOIN_TOKEN` (getenv) et le placer dans le champ `Join.token` de l'envelope FlatBuffers.
+- **Absence de la variable** (serveur privé, ou pas de session) : le jeu envoie `Join.token` vide —
+  accepté sur un serveur privé (`identity.public = false`), rejeté (`Kicked{"compte requis sur ce
+  serveur"}`) sur un serveur public.
+- **Audience** : le token est l'`id_token` du client OIDC `launcher`, donc son claim `aud` vaut le
+  **client_id ZITADEL du launcher**. Le serveur le vérifie contre `TESSERA_ZITADEL_LAUNCHER_CLIENT_ID`
+  (config Gateway) — les deux doivent désigner le même client_id, sinon rejet `Kicked{"session
+  invalide, reconnectez-vous"}`.
+
+> Le schéma `Join` réel porte aujourd'hui `Join { display_name:string; token:string;
+> protocol_version:uint; }` (`protocol/schema/protocol.fbs`) — le bloc FlatBuffers ci-dessous est la
+> tranche 0-D historique, conservé pour le flux spawn/snapshot, pas pour la liste des champs de `Join`.
+
 ## Format de fil (FlatBuffers)
 
 Schéma : `protocol/schema/protocol.fbs`, namespace `cyberpunk_rp.protocol`.
