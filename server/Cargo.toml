@@ -23,12 +23,12 @@ jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 sqlx = { version = "0.7", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
 rsa = { version = "0.9", features = ["pem"] }
 rand = "0.8"
-base64 = "0.22"
 
 [lib]
 path = "src/lib.rs"

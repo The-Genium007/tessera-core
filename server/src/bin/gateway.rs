@@ -188,12 +188,12 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
-    // Attestation officielle (optionnel) — voir docs/superpowers/specs/
-    // 2026-07-15-official-server-zitadel-attestation-design.md. C'est le VRAI binaire de prod
-    // (tessera-gateway, cf. docker-compose.yml) : sans ce câblage, `directory publish` appelle
-    // l'endpoint d'attestation interne, tombe sur connection-refused (rien n'écoute) et cape
-    // chaque serveur à "community" pour toujours — la feature entière est inerte en prod. Absente
-    // = ce serveur ne peut jamais être republié "official", quelle que soit `identity.kind`.
+    // Attestation « serveur officiel » (spec 2026-07-16) : le JWT signé par le CMS, collé en env.
+    // C'est le VRAI binaire de prod (tessera-gateway, cf. docker-compose.yml) : sans ce câblage,
+    // `directory publish` appelle l'endpoint d'attestation interne, tombe sur connection-refused
+    // (rien n'écoute) et cape chaque serveur à "community" pour toujours — la feature entière est
+    // inerte en prod. Absente = ce serveur ne sera jamais republié "official". Jamais un
+    // prérequis dur.
     //
     // Contrairement à main.rs (fn main() non-async, d'où sa gymnastique thread+Runtime dédiés),
     // ce main() est déjà `#[tokio::main]` : on `tokio::spawn` directement sur le runtime existant,
@@ -201,27 +201,25 @@ async fn main() -> std::io::Result<()> {
     // continue vers gateway_main : l'attestation N'EST PAS un prérequis dur (à l'inverse de
     // Postgres/Redis qui `std::process::exit(1)`), elle doit se dégrader sans jamais bloquer le
     // démarrage du serveur de jeu ni paniquer.
-    if let Ok(key_json) = std::env::var("ZITADEL_SERVICE_ACCOUNT_KEY_JSON") {
-        let issuer = std::env::var("ZITADEL_ISSUER")
-            .unwrap_or_else(|_| "https://auth.tesserasynth.net".to_string());
-        match server::attestation::AttestationCache::new(&issuer, &key_json) {
-            Ok(cache) => {
-                let cache = std::sync::Arc::new(cache);
-                let listen_addr = std::env::var("TESSERA_INTERNAL_ATTESTATION_LISTEN_ADDR")
-                    .unwrap_or_else(|_| "127.0.0.1:27099".to_string());
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        server::internal_attestation_http::serve(&listen_addr, cache).await
-                    {
-                        tracing::error!(error = %e, "serveur d'attestation interne arrêté");
-                    }
-                });
-                tracing::info!("attestation ZITADEL activée");
+    if let Ok(attestation) = std::env::var("TESSERA_OFFICIAL_ATTESTATION") {
+        let listen_addr = std::env::var("TESSERA_INTERNAL_ATTESTATION_LISTEN")
+            .unwrap_or_else(|_| "0.0.0.0:9090".to_string());
+        match server::attestation_display::describe(&attestation) {
+            Some((sub, exp)) => {
+                tracing::info!(slug = %sub, exp_epoch = exp, "attestation officielle active")
             }
-            Err(e) => {
-                tracing::error!(error = ?e, "clé d'attestation ZITADEL invalide — attestation désactivée, ce serveur ne sera jamais republié \"official\"");
-            }
+            None => tracing::warn!(
+                "TESSERA_OFFICIAL_ATTESTATION présente mais illisible (payload non décodable)"
+            ),
         }
+        let token = attestation.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                server::internal_attestation_http::serve(&listen_addr, Some(token)).await
+            {
+                tracing::error!(error = %e, "serveur d'attestation interne arrêté");
+            }
+        });
     }
 
     server::gateway::gateway_main(
