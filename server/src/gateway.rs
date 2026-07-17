@@ -673,6 +673,69 @@ pub fn reject_position_if_implausible(
     }
 }
 
+/// Nombre d'anomalies (zone orange) dans `ANOMALY_WINDOW` au-delà duquel le client est kické —
+/// tolère le jitter/faux positif isolé, sanctionne le speedhack soutenu. Ajustable au playtest.
+pub const ANOMALY_KICK_THRESHOLD: u32 = 20;
+/// Fenêtre glissante d'accumulation des anomalies (voir `AnomalyTracker`).
+pub const ANOMALY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Compteur glissant d'anomalies pour UN client. Réinitialisé dès que la dernière anomalie
+/// enregistrée sort de `ANOMALY_WINDOW` (fenêtre glissante simple, pas un ring buffer : suffisant
+/// pour une escalade, pas une métrique de précision).
+#[derive(Debug, Clone)]
+pub struct AnomalyTracker {
+    count: u32,
+    window_start: Option<std::time::Instant>,
+}
+
+impl AnomalyTracker {
+    pub fn new() -> Self {
+        Self {
+            count: 0,
+            window_start: None,
+        }
+    }
+}
+
+impl Default for AnomalyTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Enregistre une anomalie à `now`. Renvoie `true` si le seuil de kick est atteint.
+pub fn record_anomaly(tracker: &mut AnomalyTracker, now: std::time::Instant) -> bool {
+    match tracker.window_start {
+        Some(start) if now.duration_since(start) <= ANOMALY_WINDOW => {
+            tracker.count += 1;
+        }
+        _ => {
+            tracker.window_start = Some(now);
+            tracker.count = 1;
+        }
+    }
+    tracker.count >= ANOMALY_KICK_THRESHOLD
+}
+
+/// Verdict d'un déplacement pour un client de rang `rank`. Un `GameMaster` est toujours vert
+/// (bypass playtest voulu, staff/MJ — Moderator et Player n'en bénéficient jamais). Sinon,
+/// `classify_move` tranche (une 1re position, `last` = `None`, est verte). Remplace
+/// `resolve_move_plausibility` (retirée au recâblage de la boucle).
+pub fn resolve_move_verdict(
+    rank: crate::handoff::Rank,
+    last: Option<([f32; 3], std::time::Duration)>,
+    current: [f32; 3],
+) -> crate::anticheat::MoveVerdict {
+    use crate::anticheat::MoveVerdict;
+    if rank == crate::handoff::Rank::GameMaster {
+        return MoveVerdict::Green;
+    }
+    match last {
+        Some((prev, elapsed)) => crate::anticheat::classify_move(prev, current, elapsed),
+        None => MoveVerdict::Green,
+    }
+}
+
 /// Point d'entrée du Gateway (M4, handoff) : ouvre l'écoute GNS publique et, pour chaque client,
 /// calcule à chaque position — via la `ShardTopology` locale + le rayon selon le rang — l'ensemble
 /// de shards où le charger (autoritaire + zones tampon). Il diffuse les événements du client à tous
@@ -2924,6 +2987,69 @@ mod tests {
             !plausible_mod,
             "un modérateur ne doit pas bénéficier du bypass (réservé au GameMaster)"
         );
+    }
+
+    #[test]
+    fn gamemaster_always_green_even_on_teleport() {
+        use crate::anticheat::MoveVerdict;
+        use crate::handoff::Rank;
+        let far = [10_000.0, 0.0, 0.0];
+        assert_eq!(
+            resolve_move_verdict(
+                Rank::GameMaster,
+                Some(([0.0, 0.0, 0.0], std::time::Duration::from_millis(50))),
+                far
+            ),
+            MoveVerdict::Green
+        );
+    }
+
+    #[test]
+    fn player_teleport_is_red() {
+        use crate::anticheat::MoveVerdict;
+        use crate::handoff::Rank;
+        let far = [10_000.0, 0.0, 0.0];
+        assert_eq!(
+            resolve_move_verdict(
+                Rank::Player,
+                Some(([0.0, 0.0, 0.0], std::time::Duration::from_millis(50))),
+                far
+            ),
+            MoveVerdict::Red
+        );
+    }
+
+    #[test]
+    fn anomalies_below_threshold_do_not_kick() {
+        let mut t = AnomalyTracker::new();
+        let now = std::time::Instant::now();
+        for _ in 0..(ANOMALY_KICK_THRESHOLD - 1) {
+            assert!(!record_anomaly(&mut t, now));
+        }
+    }
+
+    #[test]
+    fn anomaly_at_threshold_triggers_kick() {
+        let mut t = AnomalyTracker::new();
+        let now = std::time::Instant::now();
+        let mut kicked = false;
+        for _ in 0..ANOMALY_KICK_THRESHOLD {
+            kicked = record_anomaly(&mut t, now);
+        }
+        assert!(
+            kicked,
+            "la N-ième anomalie dans la fenêtre doit déclencher le kick"
+        );
+    }
+
+    #[test]
+    fn anomalies_outside_window_do_not_accumulate() {
+        let mut t = AnomalyTracker::new();
+        let t0 = std::time::Instant::now();
+        record_anomaly(&mut t, t0);
+        let later = t0 + ANOMALY_WINDOW + std::time::Duration::from_secs(1);
+        // Après expiration de la fenêtre, on repart de compteur bas : pas de kick sur une 2e isolée.
+        assert!(!record_anomaly(&mut t, later));
     }
 
     #[test]
