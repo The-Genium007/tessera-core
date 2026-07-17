@@ -10,7 +10,18 @@
 # il doit être ouvert directement sur le pare-feu du serveur (voir server/README.md).
 #
 # directory/ reste un outil CLI ponctuel (publish/verify/topology) — pas de service ici ;
-# invoqué à la demande : `docker run --rm --entrypoint tessera-directory <image> ...`.
+# invoqué à la demande, dans le MÊME réseau Docker que ce compose (sinon `gateway` n'est pas
+# résoluble par nom) : `docker compose run --rm --entrypoint tessera-directory gateway
+# publish --manifest /etc/tessera/server.toml` (ou `docker run --network <projet>_default ...`
+# depuis un autre hôte du même déploiement). Voir TESSERA_INTERNAL_ATTESTATION_LISTEN sur le
+# service `gateway` ci-dessous : l'attestation "serveur officiel" (2026-07-16) suit exactement
+# le même pattern que les métriques (9100) — bindée sur toutes les interfaces DU CONTENEUR mais
+# jamais publiée sur l'hôte (`ports:`), donc jointe par `directory` via `http://gateway:9090/...`
+# (nom de service, pas loopback : `directory` tourne dans un conteneur séparé, dont le loopback
+# n'est PAS celui de `gateway`). Piège vécu (2026-07-17) : le défaut Rust de
+# TESSERA_INTERNAL_ATTESTATION_LISTEN est volontairement `127.0.0.1` (sûr hors Docker) — sans
+# cette surcharge ici, `directory` ne joint jamais l'endpoint et AUCUN serveur n'est jamais
+# republié "official", en silence (repli "community", jamais un crash).
 #
 # logging + mem_limit/cpus (chantier 4.5, audit 2026-07-03) : un Gateway verbeux ne doit pas
 # remplir le disque du VPS, et un shard qui fuit la mémoire ne doit pas affamer les autres
@@ -34,7 +45,7 @@ x-logging: &default-logging
 
 services:
   gateway:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     # Si ce service utilise l'image GHCR pré-construite (plutôt que `build:` ci-dessus) : sans
     # ça, un redeploy réutilise l'image locale en cache et ne re-tire pas un `:latest` plus
     # récent (même symptôme vécu sur platform-api le 2026-07-05 : redeploys sans effet).
@@ -49,6 +60,9 @@ services:
       # Port 9100 (métriques Prometheus texte) volontairement NON publié : le pare-feu ufw du VPS
       # de production est inactif (tout serait exposé publiquement sans authentification). Reste
       # accessible depuis l'intérieur du réseau Docker (ex. un futur Prometheus interne).
+      # Port 9090 (attestation "serveur officiel" interne) : même traitement, volontairement NON
+      # publié — voir TESSERA_INTERNAL_ATTESTATION_LISTEN ci-dessous et le commentaire directory/
+      # en tête de fichier.
     volumes:
       - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
       # `authority_artifact = "authority.json"` du manifeste est un chemin relatif résolu contre
@@ -62,6 +76,17 @@ services:
       TESSERA_GATEWAY_METRICS_ADDR: "0.0.0.0:9100"
       TESSERA_SESSION_LOG_PATH: "/data/session.jsonl"
       TESSERA_GATEWAY_SESSIONLOG_ADDR: "0.0.0.0:9102"
+      # Défaut Rust = 127.0.0.1 (sûr hors Docker) ; ici surchargé en 0.0.0.0 comme les métriques
+      # ci-dessus — jamais publié via `ports:`, donc reste interne au réseau Docker. Sans cette
+      # ligne, `directory` (conteneur séparé) ne peut jamais joindre `/internal/attestation` et
+      # aucun serveur n'est jamais republié "official" (silencieux : repli "community").
+      TESSERA_INTERNAL_ATTESTATION_LISTEN: "0.0.0.0:9090"
+      # Vide par défaut (aucune attestation = ce serveur reste "community", jamais bloquant).
+      # Positionner via l'environnement du déploiement (.env Dokploy / export), jamais en dur ici
+      # (c'est un bearer — voir server/.env.example). Piège vécu (2026-07-17, trouvé en vérifiant
+      # RÉELLEMENT ce compose plutôt qu'en le relisant) : documentée dans .env.example mais absente
+      # d'ici, la variable n'atteignait JAMAIS le process, quelle que soit sa valeur côté Dokploy.
+      TESSERA_OFFICIAL_ATTESTATION: ${TESSERA_OFFICIAL_ATTESTATION:-}
       # Vide par défaut (comportement inchangé) — comptes (display_name, séparés par virgule)
       # amorcés comme admins racine (toutes permissions, y compris le bypass anti-triche
       # vitesse/téléportation). Positionner via l'environnement du déploiement (.env / export),
@@ -127,7 +152,7 @@ services:
   # qu'un seul VPS est en jeu). `--group-id <n>` = index dans `assignment_patterns["10"]`,
   # traçabilité/logging uniquement (le routage reste au Gateway, `ShardTopology::locate`).
   shard-a:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--group-id", "0", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -140,7 +165,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-b:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--group-id", "1", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -153,7 +178,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-c:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27032", "--manifest", "/etc/tessera/server.toml", "--group-id", "2", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -166,7 +191,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-d:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27033", "--manifest", "/etc/tessera/server.toml", "--group-id", "3", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -179,7 +204,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-e:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27034", "--manifest", "/etc/tessera/server.toml", "--group-id", "4", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -192,7 +217,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-f:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27035", "--manifest", "/etc/tessera/server.toml", "--group-id", "5", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -205,7 +230,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-g:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27036", "--manifest", "/etc/tessera/server.toml", "--group-id", "6", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -218,7 +243,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-h:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27037", "--manifest", "/etc/tessera/server.toml", "--group-id", "7", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -231,7 +256,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-i:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27038", "--manifest", "/etc/tessera/server.toml", "--group-id", "8", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -244,7 +269,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-j:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27039", "--manifest", "/etc/tessera/server.toml", "--group-id", "9", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -257,7 +282,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   heartbeat:
-    image: ghcr.io/the-genium007/tessera-server:0.1.5
+    image: ghcr.io/the-genium007/tessera-server:0.1.6
     pull_policy: always
     entrypoint: ["tessera-directory"]
     command: ["heartbeat",
