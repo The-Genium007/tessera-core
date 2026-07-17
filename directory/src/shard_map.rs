@@ -22,6 +22,12 @@ pub fn shard_map_json(m: &Manifest, zones: &[ShardZone]) -> serde_json::Value {
             // de correspondance addr→id ni de garde anti-désynchronisation : `z.addr` est
             // directement exposable.
             "id": z.addr,
+            // Libellé humain affiché par le HUD (« Shard: <name> ») au lieu de l'id logique brut
+            // (« group-0 »), exigence playtest 2026-07-17. Repli sur l'id tant qu'aucune table de
+            // noms de quartiers réels n'est câblée : garantit un affichage non vide dès maintenant
+            // (enrichissement district ultérieur, hors périmètre de ce lot). Le HUD Lua lit `name`
+            // en priorité, avec repli sur `id`, donc un vieux shard-map.json sans `name` fonctionne.
+            "name": z.addr,
             "boundaryRings": z.cells.iter()
                 .flat_map(|(cell, _radius)| cell.boundary_rings.iter())
                 .collect::<Vec<_>>(),
@@ -74,6 +80,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn shard_map_emits_name_field_falling_back_to_id() {
+        use server::handoff::CellZone;
+
+        let manifest =
+            server::manifest::load(std::path::Path::new("../server/server.example.toml"))
+                .expect("server.example.toml doit être chargeable");
+        let ring = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]];
+        let zones = vec![ShardZone {
+            addr: "group-0".to_string(),
+            cells: vec![(
+                CellZone {
+                    boundary_rings: vec![ring],
+                },
+                25.0,
+            )],
+        }];
+
+        let v = shard_map_json(&manifest, &zones);
+        let shards = v["shards"].as_array().unwrap();
+        let name = shards[0]["name"]
+            .as_str()
+            .expect("chaque shard doit exposer un champ name (string)");
+        assert_eq!(name, "group-0", "name doit reprendre l'id en repli");
+        assert!(!name.is_empty(), "name ne doit jamais être vide");
     }
 
     #[test]
