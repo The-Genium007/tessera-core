@@ -51,8 +51,16 @@ table PermissionSync { nodes:[string]; }
 // publié, ça romprait la compatibilité binaire des clients existants.
 table Leave {}
 
+// Correction d'autorité serveur→client. Le serveur IMPOSE une position : rubber-band anti-triche
+// (zone rouge, reason=1) OU placement autoritaire au Join (reason=0). `reason` documente l'intention
+// (log/telemetry, feedback discret) sans changer l'application : le client SE PLACE à `position`.
+// reason : 0=Spawn, 1=AntiCheat, 2=Resync. Défaut FlatBuffers 0 (=Spawn) → TOUJOURS le poser
+// explicitement à l'encodage (même piège que protocol_version du Join). `PositionCorrection` reste
+// en FIN d'union ServerMsg — ne jamais réordonner les membres d'un union déjà publié.
+table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
+
 union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }

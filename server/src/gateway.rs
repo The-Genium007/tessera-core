@@ -7,7 +7,8 @@ use crate::internal_net::{decode_server_send, event_to_client_event_frame};
 use crate::transport::{Transport, TransportEvent};
 use protocol::{
     CommandResult, CommandResultArgs, Kicked, KickedArgs, PermissionSync, PermissionSyncArgs,
-    ServerEnvelope, ServerEnvelopeArgs, ServerMsg, WorldState, WorldStateArgs,
+    PositionCorrection, PositionCorrectionArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
+    Vec3, WorldState, WorldStateArgs,
 };
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -262,6 +263,31 @@ pub fn encode_permission_sync(nodes: &[String]) -> Vec<u8> {
         &ServerEnvelopeArgs {
             msg_type: ServerMsg::PermissionSync,
             msg: Some(sync.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Encode un `ServerEnvelope{PositionCorrection}`. `reason` : 0=Spawn, 1=AntiCheat, 2=Resync —
+/// TOUJOURS explicite (le défaut FlatBuffers 0 mentirait silencieusement). Le client SE PLACE à
+/// `position`/`yaw` à la réception (téléportation), quel que soit `reason`.
+pub fn encode_position_correction(pos: [f32; 3], yaw: f32, reason: u8) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let v = Vec3::new(pos[0], pos[1], pos[2]);
+    let pc = PositionCorrection::create(
+        &mut b,
+        &PositionCorrectionArgs {
+            position: Some(&v),
+            yaw,
+            reason,
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::PositionCorrection,
+            msg: Some(pc.as_union_value()),
         },
     );
     b.finish(env, None);
@@ -1497,6 +1523,19 @@ mod tests {
         assert_eq!(env.msg_type(), ServerMsg::Kicked);
         let kicked = env.msg_as_kicked().unwrap();
         assert_eq!(kicked.reason(), Some("serveur plein"));
+    }
+
+    #[test]
+    fn position_correction_roundtrips_position_yaw_reason() {
+        let bytes = encode_position_correction([1.0, 2.0, 3.0], 90.0, 1);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::PositionCorrection);
+        let pc = env.msg_as_position_correction().unwrap();
+        assert_eq!(pc.position().unwrap().x(), 1.0);
+        assert_eq!(pc.position().unwrap().y(), 2.0);
+        assert_eq!(pc.position().unwrap().z(), 3.0);
+        assert_eq!(pc.yaw(), 90.0);
+        assert_eq!(pc.reason(), 1);
     }
 
     #[test]
