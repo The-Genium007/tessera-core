@@ -198,8 +198,7 @@ fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
         }
     };
 
-    let sub = match attestation_verify::verify_attestation(&token, &public_key_pem, "tessera-cms")
-    {
+    let sub = match attestation_verify::verify_attestation(&token, &public_key_pem, "tessera-cms") {
         Some(s) => s,
         None => {
             eprintln!("token d'attestation invalide (signature/issuer/expiration) — kind rétrogradé à community");

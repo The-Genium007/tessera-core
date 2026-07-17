@@ -92,7 +92,10 @@ mod tests {
         let sk = SigningKey::generate(&mut rand::rngs::OsRng);
         Pair {
             private_pem: sk.to_pkcs8_pem(LineEnding::LF).unwrap().to_string(),
-            public_pem: sk.verifying_key().to_public_key_pem(LineEnding::LF).unwrap(),
+            public_pem: sk
+                .verifying_key()
+                .to_public_key_pem(LineEnding::LF)
+                .unwrap(),
         }
     }
 
