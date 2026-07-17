@@ -7,10 +7,48 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+/// Audience d'un JWT (`aud`, RFC 7519 §4.1.3) : **soit une chaîne unique, soit un tableau de
+/// chaînes** — la RFC autorise les deux, et ZITADEL émet un tableau dès que plusieurs audiences
+/// sont autorisées sur le projet (id_token launcher réel du 2026-07-17 : trois entrées).
+///
+/// Root cause du kick « session invalide, reconnectez-vous » à chaque Join (2026-07-17) : ce champ
+/// était typé `String`. `jsonwebtoken::decode::<Claims>` désérialise le payload dans `Claims`
+/// AVANT de valider l'audience — serde échouait donc sur le tableau, et l'erreur (`ErrorKind::Json`)
+/// tombait dans le bras `_ =>` de `verify`, qui la traduisait en `InvalidSignature` : une signature
+/// parfaitement valide accusée à tort, puis présentée au joueur comme une session expirée.
+///
+/// L'angle mort qui l'a laissé passer : les tests encodaient `Claims` (donc `aud` toujours
+/// sérialisé en chaîne) puis le redécodaient — round-trip Rust→Rust vert des deux côtés pendant
+/// que le fil réel était cassé (cf. CLAUDE.md, « Tester le FIL, pas chaque côté »).
+/// `verify_accepts_token_whose_aud_is_an_array` encode désormais le payload en JSON brut, comme
+/// le vrai IdP.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum Audience {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl From<&str> for Audience {
+    fn from(value: &str) -> Self {
+        Audience::Single(value.to_string())
+    }
+}
+
+impl From<String> for Audience {
+    fn from(value: String) -> Self {
+        Audience::Single(value)
+    }
+}
+
+/// Claims extraites d'un id_token vérifié. Seul `sub` est réellement consommé (clé de persistance,
+/// cf. `gateway::resolve_join_key`) ; `aud`/`exp` sont validés par `jsonwebtoken` lui-même via
+/// `Validation` (sa propre struct interne, indépendante de celle-ci) et sont ici surtout pour que
+/// les tests puissent encoder des tokens réalistes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
-    pub aud: String,
+    pub aud: Audience,
     pub exp: u64,
 }
 
@@ -119,9 +157,19 @@ impl JwksCache {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&[expected_aud]);
 
+        // `ErrorKind::Json` = le payload ne rentre pas dans `Claims` (forme inattendue), PAS une
+        // signature forgée. Le distinguer n'est pas cosmétique : c'est ce bras `_ =>` fourre-tout
+        // qui a fait passer l'incident du 2026-07-17 (aud en tableau) pour une attaque sur la
+        // signature, et envoyé enquêter sur ZITADEL pendant une nuit. Un défaut de forme doit se
+        // dire `Malformed` et se voir dans les logs, jamais se déguiser en `InvalidSignature`.
         let token_data = decode::<Claims>(token, key, &validation).map_err(|e| match e.kind() {
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => JwtError::Expired,
             jsonwebtoken::errors::ErrorKind::InvalidAudience => JwtError::WrongAudience,
+            jsonwebtoken::errors::ErrorKind::Json(cause) => {
+                // Jamais le token ni le payload (secret) — seulement la raison structurelle.
+                tracing::warn!(%cause, "JWT rejeté : payload illisible (forme des claims)");
+                JwtError::Malformed
+            }
             _ => JwtError::InvalidSignature,
         })?;
         Ok(token_data.claims)
@@ -237,6 +285,76 @@ mod tests {
         let token = encode_test_token(&claims, &encoding_key);
 
         assert!(jwks_cache.verify(&token, "launcher").is_err());
+    }
+
+    /// Vérité terrain (incident 2026-07-17, kick « session invalide » à chaque Join) : ZITADEL
+    /// émet `aud` comme un **tableau** dès que plusieurs audiences sont autorisées sur le projet.
+    /// L'id_token réel du launcher en portait trois, dont le client_id attendu.
+    ///
+    /// Tous les autres tests de ce module encodent une struct `Claims` (`aud: String`) puis la
+    /// redécodent : round-trip Rust→Rust où `aud` est TOUJOURS sérialisé en chaîne — le tableau
+    /// n'y apparaît jamais, le fil réel n'est jamais exercé (cf. CLAUDE.md, « Tester le FIL, pas
+    /// chaque côté »). Ce test encode donc le payload en JSON brut, comme le fait le vrai IdP.
+    #[test]
+    fn verify_accepts_token_whose_aud_is_an_array() {
+        let (encoding_key, jwks_cache) = test_key_pair_and_cache();
+        // Payload calqué sur la FORME EXACTE d'un id_token ZITADEL réel capturé le 2026-07-17
+        // (identifiants remplacés par des valeurs factices — on ne fige jamais un vrai token dans
+        // le source : il porte un `sub` réel et une signature valide) :
+        //   - `aud` est un TABLEAU et l'audience attendue n'est PAS la première entrée ;
+        //   - le payload porte 8 claims que `Claims` ne déclare pas (`iss`, `iat`, `auth_time`,
+        //     `amr`, `azp`, `client_id`, `at_hash`, `sid`). Elles doivent être ignorées : ce test
+        //     échouerait si quelqu'un ajoutait un jour `#[serde(deny_unknown_fields)]` à `Claims`.
+        let payload = serde_json::json!({
+            "iss": "https://auth.tesserasynth.net",
+            "sub": "381635808245383541",
+            "aud": ["000000000000000001", "launcher", "000000000000000002"],
+            "exp": far_future_timestamp(),
+            "iat": 1_784_271_777,
+            "auth_time": 1_784_138_569,
+            "amr": ["pwd"],
+            "azp": "launcher",
+            "client_id": "launcher",
+            "at_hash": "AzDTQ0bmPjQH0PqeqF6gOg",
+            "sid": "381920845678772631",
+        });
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = encode(&header, &payload, &encoding_key).expect("encodage du token de test");
+
+        let claims = jwks_cache
+            .verify(&token, "launcher")
+            .expect("un aud en tableau contenant l'audience attendue doit être accepté");
+        assert_eq!(claims.sub, "381635808245383541");
+    }
+
+    /// Corollaire du test ci-dessus : un `aud` en tableau qui NE contient PAS l'audience attendue
+    /// doit toujours être rejeté. Sans ce test, on pourrait « réparer » le tableau en désactivant
+    /// la validation d'audience — ce qui ferait accepter le token d'un autre client ZITADEL.
+    ///
+    /// Assertion sur la VARIANTE (`WrongAudience`), pas un simple `is_err()` : avant le correctif
+    /// « aud en tableau », ce test passait déjà — mais parce que la désérialisation échouait
+    /// (`Malformed`), pas parce que l'audience était refusée. Un `is_err()` serait donc resté vert
+    /// même si le correctif avait accidentellement désactivé la validation d'audience.
+    #[test]
+    fn verify_rejects_array_aud_without_expected_audience() {
+        let (encoding_key, jwks_cache) = test_key_pair_and_cache();
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "aud": ["381641683642679674", "381641646514635130"],
+            "exp": far_future_timestamp(),
+        });
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = encode(&header, &payload, &encoding_key).expect("encodage du token de test");
+
+        assert!(
+            matches!(
+                jwks_cache.verify(&token, "launcher"),
+                Err(JwtError::WrongAudience)
+            ),
+            "doit être refusé pour AUDIENCE, pas pour une erreur de forme des claims"
+        );
     }
 
     #[test]
