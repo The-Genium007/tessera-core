@@ -12,9 +12,18 @@
 -- Bloc shard (spec playtest-shards §#2, registre ③ "HUD debug CET") : lit shard-map.json, généré
 -- côté serveur par `tessera-directory topology export --manifest <toml> --out shard-map.json`
 -- (tessera-core/directory/src/shard_map.rs) à partir du manifeste de topologie — source unique de
--- vérité, pas de sync réseau (décision A de la spec). À régénérer/recopier ici si la topologie du
--- serveur change (triviale, topologie figée pour le playtest). X/Y serveur = X/Y monde du jeu
+-- vérité, pas de sync réseau (décision A de la spec). X/Y serveur = X/Y monde du jeu
 -- (GetWorldPosition brut), donc aucune transformation de repère nécessaire.
+--
+-- RÉGÉNÉRATION (ne JAMAIS éditer ce JSON à la main — piège "artefact assemblé à la main =
+-- artefact qui dérive", CLAUDE.md) : depuis la racine du dépôt, contre le manifeste DÉPLOYÉ,
+--   cargo run -p directory --bin tessera-directory -- topology export \
+--     --manifest tessera-core/server/server.docker.toml \
+--     --out tessera-core/client-mod/.../TesseraHUD/shard-map.json
+-- server.docker.toml porte server_count=10 → 10 cellules Voronoï (boundaryRings + name). L'ancien
+-- format BSP (minX/maxX/splits, 2 shards) avait dérivé et plantait ComputeShardInfo sur ipairs(nil)
+-- (playtest 2026-07-17 : le HUD n'affichait que X/Y/Z, jamais le shard). Régénérer après tout
+-- changement de topologie serveur.
 
 TesseraHUD = TesseraHUD or {}
 TesseraHUD.trafficOn = TesseraHUD.trafficOn or false
@@ -136,13 +145,21 @@ function TesseraHUD:ComputeShardInfo(x, y)
   end
 
   if currentShard == nil then
-    return { shardId = "?", borderDist = nil, inBuffer = false }
+    return { shardId = "?", shardName = "?", borderDist = nil, inBuffer = false }
   end
 
   local borderDist = nearestEdgeDist(x, y, currentShard)
   local inBuffer = borderDist ~= nil and borderDist <= (map.radius.base or 0)
 
-  return { shardId = currentShard.id, borderDist = borderDist, inBuffer = inBuffer }
+  -- `name` est le libellé humain émis par le générateur (repli sur l'id côté serveur si aucun
+  -- quartier nommé). Repli Lua supplémentaire sur `id` pour rester robuste à un ancien shard-map
+  -- sans champ `name` (compat ascendante — jamais de nil affiché).
+  return {
+    shardId = currentShard.id,
+    shardName = currentShard.name or currentShard.id,
+    borderDist = borderDist,
+    inBuffer = inBuffer,
+  }
 end
 
 -- Radar 2D top-down (aligné sur les axes monde, ne tourne PAS avec le regard du joueur — plus
@@ -237,7 +254,7 @@ function TesseraHUD:Render()
   if shardInfo == nil then
     ImGui.TextDisabled("(shard-map.json introuvable)")
   else
-    ImGui.Text("Shard: " .. shardInfo.shardId)
+    ImGui.Text("Shard: " .. (shardInfo.shardName or shardInfo.shardId))
     if shardInfo.borderDist ~= nil then
       ImGui.Text(string.format("Distance frontière: %.1f", shardInfo.borderDist))
     end
