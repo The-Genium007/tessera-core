@@ -19,6 +19,24 @@ pub fn cap_elapsed(elapsed: Duration, max_window: Duration) -> Duration {
     elapsed.min(max_window)
 }
 
+/// Fenêtre minimale sous laquelle on refuse de JUGER la vitesse. Deux `PositionUpdate` traités
+/// dans le même tick Gateway (drain par lots, `gateway.rs`) ont un `elapsed` de l'ordre de la
+/// microseconde, sans rapport avec le temps de jeu réel : les juger produit une vitesse absurde
+/// (bug playtest 2026-07-17, deux rejets à 48 µs d'écart). En deçà de ce plancher, on ne peut pas
+/// conclure — le mouvement est réputé plausible, exactement comme `elapsed == ZERO`. Le vrai
+/// téléport reste attrapé par le seuil de DISTANCE absolue (zone rouge, gateway.rs), insensible au
+/// dénominateur.
+pub const MIN_ELAPSED_WINDOW: Duration = Duration::from_millis(250);
+
+/// `Some(elapsed)` si la fenêtre est assez large pour juger la vitesse, `None` sinon.
+pub fn floor_elapsed(elapsed: Duration, min_window: Duration) -> Option<Duration> {
+    if elapsed < min_window {
+        None
+    } else {
+        Some(elapsed)
+    }
+}
+
 /// Vrai si le déplacement de `prev` à `next` en `elapsed` est plausible à `max_speed_mps` près.
 /// `elapsed == Duration::ZERO` est toujours plausible : pas assez d'information pour juger
 /// (couvre la 1re position reçue après un `Join`, qui n'a pas de référence temporelle).
@@ -140,5 +158,31 @@ mod tests {
             capped_elapsed,
             MAX_PLAYER_SPEED_MPS
         ));
+    }
+
+    #[test]
+    fn floor_elapsed_rejects_a_sub_threshold_window() {
+        // Deux PositionUpdate drainés dans le même tick Gateway : elapsed de l'ordre de la µs.
+        assert_eq!(
+            floor_elapsed(Duration::from_micros(48), MIN_ELAPSED_WINDOW),
+            None
+        );
+    }
+
+    #[test]
+    fn floor_elapsed_passes_a_normal_window() {
+        assert_eq!(
+            floor_elapsed(Duration::from_millis(300), MIN_ELAPSED_WINDOW),
+            Some(Duration::from_millis(300))
+        );
+    }
+
+    #[test]
+    fn floor_elapsed_boundary_is_inclusive_at_the_window() {
+        // Exactement à la limite : jugé (Some), cohérent avec la limite inclusive de is_plausible_move.
+        assert_eq!(
+            floor_elapsed(MIN_ELAPSED_WINDOW, MIN_ELAPSED_WINDOW),
+            Some(MIN_ELAPSED_WINDOW)
+        );
     }
 }
