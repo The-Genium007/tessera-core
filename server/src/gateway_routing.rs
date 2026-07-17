@@ -35,6 +35,18 @@ pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
     Some((p.x(), p.y(), p.z()))
 }
 
+/// Comme `extract_position` mais renvoie le `yaw` du `PositionUpdate` — nécessaire pour renvoyer
+/// une `PositionCorrection` (rubber-band zone rouge) fidèle à l'orientation du joueur. `None` si
+/// l'enveloppe n'est pas un `PositionUpdate` décodable.
+pub fn extract_position_yaw(client_payload: &[u8]) -> Option<f32> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::PositionUpdate {
+        return None;
+    }
+    let pu = env.msg_as_position_update()?;
+    Some(pu.yaw())
+}
+
 /// Construit le payload client d'un `PositionUpdate` — utilisé pour re-semer, sur un shard qui
 /// vient de perdre son état, la dernière position connue d'un client par le Gateway (le client
 /// réel n'a pas renvoyé cette position, elle est reconstruite depuis `last_pos`). Yaw à 0 : une
@@ -312,6 +324,32 @@ mod tests {
         );
         assert_eq!(extract_position(&client_join()), None);
         assert_eq!(extract_position(&[0, 1, 2]), None); // garbage → None
+    }
+
+    #[test]
+    fn extract_position_yaw_reads_yaw_and_ignores_join() {
+        let mut b = FlatBufferBuilder::new();
+        let pos = Vec3::new(1.0, 2.0, 3.0);
+        let pu = PositionUpdate::create(
+            &mut b,
+            &PositionUpdateArgs {
+                position: Some(&pos),
+                yaw: 1.25,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::PositionUpdate,
+                msg: Some(pu.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let payload = b.finished_data().to_vec();
+
+        assert_eq!(extract_position_yaw(&payload), Some(1.25));
+        assert_eq!(extract_position_yaw(&client_join()), None);
+        assert_eq!(extract_position_yaw(&[0, 1, 2]), None); // garbage → None
     }
 
     #[test]

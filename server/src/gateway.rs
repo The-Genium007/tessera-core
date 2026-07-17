@@ -500,6 +500,7 @@ pub fn cleanup_client_state(
     last_pos: &mut HashMap<u64, [f32; 3]>,
     last_pos_at: &mut HashMap<u64, std::time::Instant>,
     bypass_warned_at: &mut HashMap<u64, std::time::Instant>,
+    anomaly_trackers: &mut HashMap<u64, AnomalyTracker>,
     ranks: &mut HashMap<u64, crate::handoff::Rank>,
     permissions: &mut HashMap<u64, Vec<String>>,
     residence: &mut HashMap<u64, Option<[f32; 3]>>,
@@ -523,6 +524,7 @@ pub fn cleanup_client_state(
     last_pos.remove(&cid);
     last_pos_at.remove(&cid);
     bypass_warned_at.remove(&cid);
+    anomaly_trackers.remove(&cid);
     ranks.remove(&cid);
     permissions.remove(&cid);
     residence.remove(&cid);
@@ -651,54 +653,6 @@ pub fn reject_join_if_server_full<T: Transport>(
     }
 }
 
-/// Décide si une `PositionUpdate` doit être rejetée pour cause de vitesse implausible.
-/// `plausible` est déjà calculé par `is_plausible_move`/`cap_elapsed` (anticheat.rs, seuils
-/// inchangés, bypass GameMaster déjà tranché avant l'appel) — cette fonction ne fait que réagir à
-/// un rejet : logge et incrémente `metrics.rejected_messages_total` (métrique F3). Pas de kick ici
-/// (contrairement au rate-limit/serveur plein) : le message est juste ignoré, la position n'est
-/// pas mise à jour par l'appelant. Renvoie `true` si le message doit être considéré comme consommé
-/// (l'appelant doit `continue` sans mettre à jour `last_pos`/`last_pos_at`/placement).
-/// Décide si un mouvement doit être considéré comme plausible : un `Rank::GameMaster` contourne
-/// systématiquement la vérification anti-triche (bypass playtest voulu, staff/MJ — Moderator et
-/// Player n'en bénéficient jamais) ; sinon, `is_plausible_move`/`cap_elapsed` tranchent (une
-/// première position après Join, `last` = `None`, est toujours acceptée). Extrait de la boucle de
-/// `gateway_main` pour être testable sans `--features gns` (même pattern que
-/// `reject_position_if_implausible`/`apply_rate_limit_decision`).
-pub fn resolve_move_plausibility(
-    rank: crate::handoff::Rank,
-    last: Option<([f32; 3], std::time::Duration)>,
-    current: [f32; 3],
-) -> bool {
-    if rank == crate::handoff::Rank::GameMaster {
-        return true;
-    }
-    match last {
-        Some((prev, elapsed)) => crate::anticheat::is_plausible_move(
-            prev,
-            current,
-            crate::anticheat::cap_elapsed(elapsed, crate::anticheat::MAX_ELAPSED_WINDOW),
-            crate::anticheat::MAX_PLAYER_SPEED_MPS,
-        ),
-        None => true,
-    }
-}
-
-pub fn reject_position_if_implausible(
-    plausible: bool,
-    cid: u64,
-    metrics: &crate::metrics::Metrics,
-) -> bool {
-    if !plausible {
-        tracing::warn!(client = cid, "PositionUpdate rejeté (vitesse implausible)");
-        metrics
-            .rejected_messages_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        true
-    } else {
-        false
-    }
-}
-
 /// Nombre d'anomalies (zone orange) dans `ANOMALY_WINDOW` au-delà duquel le client est kické —
 /// tolère le jitter/faux positif isolé, sanctionne le speedhack soutenu. Ajustable au playtest.
 pub const ANOMALY_KICK_THRESHOLD: u32 = 20;
@@ -786,7 +740,7 @@ pub async fn gateway_main(
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
         extract_admin_command, extract_join_fields, extract_leave, extract_position,
-        extract_time_report,
+        extract_position_yaw, extract_time_report,
     };
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
@@ -843,6 +797,9 @@ pub async fn gateway_main(
     // veut justement pouvoir suivre. Une ligne au plus toutes les BYPASS_LOG_INTERVAL suffit à
     // documenter que le contournement est actif sans inonder la sortie.
     let mut bypass_warned_at: HashMap<u64, std::time::Instant> = HashMap::new();
+    // Anomalies de mouvement (zone orange) par client : escalade vers un kick au-delà de
+    // ANOMALY_KICK_THRESHOLD dans ANOMALY_WINDOW (cf. AnomalyTracker/record_anomaly).
+    let mut anomaly_trackers: HashMap<u64, AnomalyTracker> = HashMap::new();
     const BYPASS_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
     let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
     // Fenêtre de rate-limit par client (audit prod 2026-07-03 §5.4).
@@ -1019,6 +976,7 @@ pub async fn gateway_main(
                         &mut last_pos,
                         &mut last_pos_at,
                         &mut bypass_warned_at,
+                        &mut anomaly_trackers,
                         &mut ranks,
                         &mut permissions,
                         &mut residence,
@@ -1180,12 +1138,55 @@ pub async fn gateway_main(
                         (Some(prev), Some(at)) => Some((prev, now.duration_since(at))),
                         _ => None,
                     };
-                    let plausible = resolve_move_plausibility(rank, last, [x, y, z]);
-                    if reject_position_if_implausible(plausible, cid, &metrics) {
-                        continue;
+                    match resolve_move_verdict(rank, last, [x, y, z]) {
+                        crate::anticheat::MoveVerdict::Green => {
+                            last_pos.insert(cid, [x, y, z]);
+                            last_pos_at.insert(cid, now);
+                        }
+                        crate::anticheat::MoveVerdict::Orange => {
+                            // On SUIT le client (RP-safe : jamais de rubber-band sur un faux
+                            // positif), on avance last_pos (le joueur bouge aux yeux des autres,
+                            // la sauvegarde reste fraîche — corrige P3), et on compte l'anomalie.
+                            last_pos.insert(cid, [x, y, z]);
+                            last_pos_at.insert(cid, now);
+                            metrics
+                                .rejected_messages_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let tracker = anomaly_trackers.entry(cid).or_default();
+                            if record_anomaly(tracker, now) {
+                                tracing::warn!(
+                                    client = cid,
+                                    "kick : anomalies de mouvement répétées (speedhack probable)"
+                                );
+                                client.send(cid, &encode_kicked("mouvement incohérent répété"));
+                                client.disconnect(cid);
+                                anomaly_trackers.remove(&cid);
+                                continue;
+                            }
+                            tracing::warn!(
+                                client = cid,
+                                "PositionUpdate anomalie modérée (acceptée, comptée)"
+                            );
+                        }
+                        crate::anticheat::MoveVerdict::Red => {
+                            // Téléport franc : on NE met PAS à jour last_pos (la dernière position
+                            // valide est celle qu'on réimpose) et on renvoie une correction au client.
+                            metrics
+                                .rejected_messages_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let anchor = last_pos.get(&cid).copied().unwrap_or([x, y, z]);
+                            let yaw = extract_position_yaw(data).unwrap_or(0.0);
+                            client.send(
+                                cid,
+                                &encode_position_correction(anchor, yaw, 1 /* AntiCheat */),
+                            );
+                            tracing::warn!(
+                                client = cid,
+                                "PositionUpdate rejeté (téléport) → correction envoyée"
+                            );
+                            continue;
+                        }
                     }
-                    last_pos.insert(cid, [x, y, z]);
-                    last_pos_at.insert(cid, now);
                     // Écriture hot-state (Décision 3, design stockage 2026-07-09) : à chaque
                     // PositionUpdate ACCEPTÉ, taguée par la clé effective (jamais display_name).
                     // Un client sans clé effective connue (ne devrait pas arriver après un Join
@@ -1388,6 +1389,7 @@ pub async fn gateway_main(
                         &mut last_pos,
                         &mut last_pos_at,
                         &mut bypass_warned_at,
+                        &mut anomaly_trackers,
                         &mut ranks,
                         &mut permissions,
                         &mut residence,
@@ -1782,36 +1784,6 @@ mod tests {
             0
         );
         assert!(client.take_disconnected().is_empty());
-    }
-
-    #[test]
-    fn reject_position_if_implausible_counts_metric_when_rejected() {
-        let metrics = crate::metrics::Metrics::new();
-
-        let rejected = reject_position_if_implausible(false, 42, &metrics);
-
-        assert!(rejected);
-        assert_eq!(
-            metrics
-                .rejected_messages_total
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
-    }
-
-    #[test]
-    fn reject_position_if_implausible_accepts_plausible_move_without_metric() {
-        let metrics = crate::metrics::Metrics::new();
-
-        let rejected = reject_position_if_implausible(true, 42, &metrics);
-
-        assert!(!rejected);
-        assert_eq!(
-            metrics
-                .rejected_messages_total
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
     }
 
     fn join_payload() -> Vec<u8> {
@@ -2659,6 +2631,8 @@ mod tests {
         last_pos_at.insert(cid, std::time::Instant::now());
         let mut bypass_warned_at = HashMap::new();
         bypass_warned_at.insert(cid, std::time::Instant::now());
+        let mut anomaly_trackers = HashMap::new();
+        anomaly_trackers.insert(cid, AnomalyTracker::new());
         let mut ranks = HashMap::new();
         ranks.insert(cid, Rank::Player);
         let mut permissions = HashMap::new();
@@ -2688,6 +2662,7 @@ mod tests {
             &mut last_pos,
             &mut last_pos_at,
             &mut bypass_warned_at,
+            &mut anomaly_trackers,
             &mut ranks,
             &mut permissions,
             &mut residence,
@@ -2994,67 +2969,30 @@ mod tests {
     }
 
     #[test]
-    fn gamemaster_rank_bypasses_anticheat_even_on_an_implausible_teleport() {
+    fn resolve_move_verdict_bypasses_gamemaster_but_not_moderator_or_player() {
+        use crate::anticheat::MoveVerdict;
         use crate::handoff::Rank;
-        // Exerce le VRAI code de décision (resolve_move_plausibility), pas une comparaison de
-        // motif isolée : un GameMaster qui téléporte à une vitesse totalement implausible
-        // (10 km en 1 tick) doit quand même être accepté — c'est le bypass voulu (rôle
-        // staff/MJ), documenté ici pour qu'il ne soit jamais "corrigé" par accident.
+        // Exerce le VRAI code de décision (resolve_move_verdict) : un GameMaster qui téléporte
+        // (10 km en 1 tick, distance > RED_TELEPORT_M) doit rester Green — bypass voulu (staff/MJ),
+        // jamais "corrigé" par accident. Les autres rangs tombent en Red (téléport franc).
         let prev = [0.0, 0.0, 0.0];
         let teleport = [10_000.0, 0.0, 0.0];
         let elapsed = std::time::Duration::from_millis(50); // un seul tick à 20 Hz
 
-        let plausible_gm =
-            resolve_move_plausibility(Rank::GameMaster, Some((prev, elapsed)), teleport);
-        assert!(
-            plausible_gm,
-            "GameMaster doit être accepté même sur un mouvement implausible"
+        assert_eq!(
+            resolve_move_verdict(Rank::GameMaster, Some((prev, elapsed)), teleport),
+            MoveVerdict::Green,
+            "GameMaster doit rester Green même sur un téléport implausible"
         );
-
-        // Le même mouvement, pour un rang normal, doit être rejeté — preuve que le test
-        // exercerait bien une régression si le bypass disparaissait par erreur.
-        let plausible_player =
-            resolve_move_plausibility(Rank::Player, Some((prev, elapsed)), teleport);
-        assert!(
-            !plausible_player,
+        assert_eq!(
+            resolve_move_verdict(Rank::Player, Some((prev, elapsed)), teleport),
+            MoveVerdict::Red,
             "un joueur normal ne doit pas bénéficier du bypass"
         );
-
-        let plausible_mod =
-            resolve_move_plausibility(Rank::Moderator, Some((prev, elapsed)), teleport);
-        assert!(
-            !plausible_mod,
+        assert_eq!(
+            resolve_move_verdict(Rank::Moderator, Some((prev, elapsed)), teleport),
+            MoveVerdict::Red,
             "un modérateur ne doit pas bénéficier du bypass (réservé au GameMaster)"
-        );
-    }
-
-    #[test]
-    fn gamemaster_always_green_even_on_teleport() {
-        use crate::anticheat::MoveVerdict;
-        use crate::handoff::Rank;
-        let far = [10_000.0, 0.0, 0.0];
-        assert_eq!(
-            resolve_move_verdict(
-                Rank::GameMaster,
-                Some(([0.0, 0.0, 0.0], std::time::Duration::from_millis(50))),
-                far
-            ),
-            MoveVerdict::Green
-        );
-    }
-
-    #[test]
-    fn player_teleport_is_red() {
-        use crate::anticheat::MoveVerdict;
-        use crate::handoff::Rank;
-        let far = [10_000.0, 0.0, 0.0];
-        assert_eq!(
-            resolve_move_verdict(
-                Rank::Player,
-                Some(([0.0, 0.0, 0.0], std::time::Duration::from_millis(50))),
-                far
-            ),
-            MoveVerdict::Red
         );
     }
 
