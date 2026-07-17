@@ -94,6 +94,14 @@ services:
       # on veut tester l'anti-triche aussi, pas seulement l'auth. À ne réactiver que si
       # besoin d'un bypass de développement ultérieurement (ne jamais pour prod).
       TESSERA_PLAYTEST_ALL_ADMIN: "false"
+      # Override OPTIONNEL de l'audience OIDC attendue au Join (serveur public). Le code épingle
+      # déjà EN DUR le client_id du launcher officiel (DEFAULT_LAUNCHER_CLIENT_ID dans gateway.rs,
+      # même statut que ZITADEL_JWKS_URL) — donc RIEN à poser pour le déploiement officiel
+      # TesseraSynth, l'auth marche sans cette variable. Ne renseigner que pour un opérateur tiers
+      # ayant sa propre app ZITADEL : la valeur doit alors être le client_id de SON app launcher
+      # (= le claim `aud` de l'id_token qu'elle émet). Vide/absente = défaut hardcodé utilisé.
+      # Voir docs/architecture/0010-launcher-oidc-audience-pinned.md.
+      TESSERA_ZITADEL_LAUNCHER_CLIENT_ID: ${TESSERA_ZITADEL_LAUNCHER_CLIENT_ID:-}
       # TESSERA_REDIS_URL/TESSERA_POSTGRES_URL (surcharge directe, prioritaire) restent vides par
       # défaut ; sans ces variables ET sans runtime.postgres_url dans le manifeste, le Gateway
       # assemble lui-même l'URL Postgres depuis les composants TESSERA_PG_* ci-dessous (voir
