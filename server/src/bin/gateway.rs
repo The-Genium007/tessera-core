@@ -74,6 +74,12 @@ async fn main() -> std::io::Result<()> {
     };
     let store_path = manifest.runtime.store_path.clone();
     let spawn = manifest.runtime.spawn;
+    if server::manifest::spawn_is_unconfigured(spawn) {
+        tracing::warn!(
+            "spawn non configuré ([0,0,0]) : les nouveaux joueurs naîtront à l'origine du monde — \
+             régler `[runtime] spawn = [x, y, z]` dans le manifeste"
+        );
+    }
     let listen = manifest.runtime.gateway.listen_addr.clone();
 
     // Bascule FileStore/PostgresStore selon identity.public (câblage runtime, design stockage

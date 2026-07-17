@@ -24,6 +24,13 @@ voice_required = false
 whitelist = false
 store_path = "players.json"
 
+# Point de spawn par défaut pour un joueur neuf (sans position/résidence connue). X/Y/Z = repère
+# monde du jeu (GetWorldPosition brut, aucune transformation). Coordonnée Night City réelle et
+# testée (zone de sauvegarde observée au playtest 2026-07-17). NE PAS laisser à [0,0,0] : ce serait
+# l'origine du monde, et un joueur neuf y naîtrait (WARN au boot du Gateway). Remplace l'ancien
+# default_entry du schéma BSP (disparu avec le Groupe G, câblage runtime Voronoï).
+spawn = [-1431.17, 1302.27, 27.06]
+
 [runtime.gateway]
 listen_addr = "0.0.0.0:27020"
 advertise_addr = "51.38.189.234:27020"
