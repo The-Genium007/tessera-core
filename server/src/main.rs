@@ -13,7 +13,7 @@ fn main() {
     // Absente = ce serveur ne sera jamais republié "official" (community). Jamais un prérequis dur.
     if let Ok(attestation) = std::env::var("TESSERA_OFFICIAL_ATTESTATION") {
         let listen_addr = std::env::var("TESSERA_INTERNAL_ATTESTATION_LISTEN")
-            .unwrap_or_else(|_| "0.0.0.0:9090".to_string());
+            .unwrap_or_else(|_| "127.0.0.1:9090".to_string());
         match server::attestation_display::describe(&attestation) {
             Some((sub, exp)) => {
                 tracing::info!(slug = %sub, exp_epoch = exp, "attestation officielle active")
