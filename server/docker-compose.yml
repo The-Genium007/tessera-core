@@ -84,6 +84,12 @@ services:
       # ligne, `directory` (conteneur séparé) ne peut jamais joindre `/internal/attestation` et
       # aucun serveur n'est jamais republié "official" (silencieux : repli "community").
       TESSERA_INTERNAL_ATTESTATION_LISTEN: "0.0.0.0:9090"
+      # Vide par défaut (aucune attestation = ce serveur reste "community", jamais bloquant).
+      # Positionner via l'environnement du déploiement (.env Dokploy / export), jamais en dur ici
+      # (c'est un bearer — voir server/.env.example). Piège vécu (2026-07-17, trouvé en vérifiant
+      # RÉELLEMENT ce compose plutôt qu'en le relisant) : documentée dans .env.example mais absente
+      # d'ici, la variable n'atteignait JAMAIS le process, quelle que soit sa valeur côté Dokploy.
+      TESSERA_OFFICIAL_ATTESTATION: ${TESSERA_OFFICIAL_ATTESTATION:-}
       # Vide par défaut (comportement inchangé) — comptes (display_name, séparés par virgule)
       # amorcés comme admins racine (toutes permissions, y compris le bypass anti-triche
       # vitesse/téléportation). Positionner via l'environnement du déploiement (.env / export),
