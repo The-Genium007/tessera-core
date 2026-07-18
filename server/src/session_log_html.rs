@@ -110,9 +110,11 @@ const HTML_PAGE: &str = r#"<!doctype html>
 /// Sert la page HTML (`GET /`) et le flux SSE (`GET /events`) du journal de session. Route
 /// unique déterminée par la première ligne de la requête — pas de framework HTTP, même style
 /// minimaliste que `session_log::serve_file`.
-pub async fn serve_live(addr: &str, path: std::path::PathBuf) -> std::io::Result<()> {
+pub async fn serve_live(
+    listener: tokio::net::TcpListener,
+    path: std::path::PathBuf,
+) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     loop {
         let (mut sock, _) = listener.accept().await?;
         let path = path.clone();
@@ -285,15 +287,12 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "").unwrap();
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        drop(listener); // libère le port pour serve_live, qui le rebind lui-même
-
         let addr_str = addr.to_string();
-        let server_addr = addr_str.clone();
         let server_path = path.clone();
         tokio::spawn(async move {
-            let _ = serve_live(&server_addr, server_path).await;
+            let _ = serve_live(listener, server_path).await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -322,15 +321,13 @@ mod tests {
         )
         .unwrap();
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        drop(listener);
         let addr_str = addr.to_string();
 
-        let server_addr = addr_str.clone();
         let server_path = path.clone();
         tokio::spawn(async move {
-            let _ = serve_live(&server_addr, server_path).await;
+            let _ = serve_live(listener, server_path).await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

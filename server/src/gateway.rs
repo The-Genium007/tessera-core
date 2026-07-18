@@ -917,12 +917,19 @@ pub async fn gateway_main(
         let addr = std::env::var("TESSERA_GATEWAY_SESSIONLOG_HTML_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:9103".to_string());
         let path = std::path::PathBuf::from(session_log_path.clone());
-        tracing::info!("logs de session en direct disponibles sur http://{addr}/");
-        tokio::spawn(async move {
-            if let Err(e) = crate::session_log_html::serve_live(&addr, path).await {
-                tracing::warn!("page de logs en direct indisponible ({addr}): {e}");
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                tracing::info!("logs de session en direct disponibles sur http://{addr}/");
+                tokio::spawn(async move {
+                    if let Err(e) = crate::session_log_html::serve_live(listener, path).await {
+                        tracing::warn!("page de logs en direct indisponible ({addr}): {e}");
+                    }
+                });
             }
-        });
+            Err(e) => {
+                tracing::warn!("page de logs en direct indisponible (bind {addr} échoué): {e}");
+            }
+        }
     }
     // Dernier placement connu par client — pour détecter handoffs et zones tampons.
     let mut prev_placements: HashMap<u64, crate::handoff::Placement> = HashMap::new();
