@@ -314,11 +314,16 @@ function TesseraHUD:Render()
       ImGui.TextColored(1.0, 0.7, 0.0, 1.0, "DANS ZONE TAMPON")
     end
 
-    -- Cohérence local vs serveur (spec HUD moniteur, §2). `Tessera_GetServerShard()` renvoie le
-    -- placement AUTORITAIRE poussé par le serveur (ServerMsg::ShardAssignment, décodé par le netcode
-    -- C++ du fork). Chaîne vide = aucun ShardAssignment reçu (hors serveur / pas encore arrivé) :
-    -- on n'affiche alors que le calcul local ci-dessus, pas de ligne « Serveur ».
-    local serverShard = player:Tessera_GetServerShard()
+    -- Cohérence local vs serveur (spec HUD moniteur, §2). Accès netcode DIRECT en Lua (runtime) via
+    -- Game.GetNetworkGameSystem() — on NE passe PLUS par les wrappers redscript (DesossageShardMonitor,
+    -- stubés). Raison : le type natif NetworkGameSystem n'est pas visible par le compilateur redscript
+    -- (scc) au boot (bug de timing de registration RedLib du fork) → scc échouait → modset entier
+    -- refusé au lancement launcher. MAIS le type EST dans le RTTI au runtime (vérifié en jeu :
+    -- Game.GetNetworkGameSystem() ok, Reflection.GetClass("NetworkGameSystem") non-nil). Lua résout
+    -- au runtime, pas de scc → on contourne le bug sans toucher au fork. net = nil hors serveur
+    -- (pas de ShardAssignment) → repli local-only, comme avant.
+    local net = Game.GetNetworkGameSystem()
+    local serverShard = net and net:Tessera_GetServerShard() or ""
     if serverShard ~= nil and serverShard ~= "" then
       local localId = shardInfo.shardId
       if serverShard ~= localId then
@@ -344,13 +349,13 @@ function TesseraHUD:Render()
         ImGui.Text("Serveur: " .. serverShard)
       end
 
-      local overlapsCsv = player:Tessera_GetServerOverlaps()
+      local overlapsCsv = net and net:Tessera_GetServerOverlaps() or ""
       if overlapsCsv ~= nil and overlapsCsv ~= "" then
         ImGui.Text("Zone tampon serveur: " .. overlapsCsv)
       end
     end
 
-    local visibleCount = player:Tessera_GetVisiblePlayerCount()
+    local visibleCount = net and net:Tessera_GetVisiblePlayerCount() or 0
     ImGui.Text("Joueurs visibles: " .. tostring(visibleCount))
   end
   TesseraHUD:RenderRadar(pos)
