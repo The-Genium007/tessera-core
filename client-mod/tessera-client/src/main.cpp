@@ -159,9 +159,16 @@ RED4EXT_C_EXPORT bool RED4EXT_CALL Main(RED4ext::v1::PluginHandle aHandle, RED4e
         TesseraDesossageNative::g_sdk = aSdk;
         TesseraDesossageNative::g_handle = aHandle;
         {
-            auto target = RED4ext::UniversalRelocFunc<TesseraDesossageNative::ExecuteNode_t>(
+            RED4ext::UniversalRelocFunc<TesseraDesossageNative::ExecuteNode_t> target(
                 TesseraDesossageNative::kExecuteNodeHash);
-            bool attached = aSdk->hooking->Attach(aHandle, reinterpret_cast<void*>(target),
+            // UniversalRelocFunc n'expose que `operator T()` (SDK 1.0.0, Relocation.hpp:126) — pas
+            // de GetAddr() (réservé à UniversalRelocPtr, ligne 153). reinterpret_cast<void*>(objet)
+            // n'invoque PAS l'opérateur de conversion défini par l'utilisateur → C2440. Il faut donc
+            // d'abord matérialiser le pointeur de fonction résolu via static_cast (qui, lui, appelle
+            // operator T()), puis le caster en void* pour Attach (Hooking.hpp:47 :
+            // Attach(PluginHandle, void* aTarget, void* aDetour, void** aOriginal)).
+            auto targetFn = static_cast<TesseraDesossageNative::ExecuteNode_t>(target);
+            bool attached = aSdk->hooking->Attach(aHandle, reinterpret_cast<void*>(targetFn),
                 reinterpret_cast<void*>(&TesseraDesossageNative::Detour),
                 reinterpret_cast<void**>(&TesseraDesossageNative::g_original));
             if (attached)
