@@ -88,6 +88,17 @@ RED4ext::v1::PluginHandle g_handle = nullptr;
 // via le SDK). Conservé pour marquer les nœuds spawn dans le log élargi ci-dessous.
 constexpr const char* kSpawnNodeClassName = "questSpawnManagerNodeDefinition";
 
+// PALIER 2 (test 2026-07-18) — blocage sélectif d'UNE seule classe de nœud (spec D5 : valider 1
+// type avant d'étendre). Cible : l'appel Takemura, identifié au Gate — la classe
+// `questPhoneManagerNodeDefinition` fire pile dans la fenêtre SORTIE→TAKEMURA à la sortie d'appart.
+// Pour CE nœud uniquement, le Detour n'appelle PAS g_original → le nœud ne s'exécute pas → l'appel
+// ne part pas. ⚠️ Sémantique du retour uint8_t / des sockets de sortie NON comprise : on retourne 1
+// (hypothèse « nœud traité ») et on OBSERVE en jeu : (a) Takemura se tait-il ? (b) le jeu reste-t-il
+// stable, sans freeze de graphe de quête ? Si ça fige → tester un retour 0, ou renoncer à bloquer ce
+// type au niveau ExecuteNode. C'est GÉNÉRIQUE (tous les appels du jeu passent par cette classe) —
+// acceptable pour un monde vide, à affiner par ID de nœud plus tard si on veut du chirurgical.
+constexpr const char* kBlockNodeClassName = "questPhoneManagerNodeDefinition";
+
 constexpr std::uint64_t kDetailedLogLimit = 3;
 constexpr std::uint64_t kSummaryEveryNCalls = 500;
 
@@ -104,9 +115,9 @@ std::uint64_t NowMillis()
 std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInputSocket,
     void* aOutputSockets)
 {
-    // Garde-fou : tout doute (pointeur nul, classe introuvable) → on ne fait QUE journaliser,
-    // jamais bloquer. Phase 1 = observation, aucune logique de blocage tant que la sémantique du
-    // retour/des sockets de sortie n'est pas comprise en jeu.
+    // PALIER 2 (test) : UNE seule classe est bloquée (kBlockNodeClassName), tout le reste est
+    // strictement log-only (g_original appelé inconditionnellement en fin de fonction). Garde-fou :
+    // tout doute (pointeur nul, classe introuvable) → on ne fait QUE journaliser, jamais bloquer.
     ++g_totalCalls;
     if (aInputNode != nullptr && g_sdk != nullptr)
     {
@@ -116,6 +127,18 @@ std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInput
         auto* nodeClass = node->GetType();
         const char* className = (nodeClass != nullptr) ? nodeClass->name.ToString() : nullptr;
         std::string key(className != nullptr ? className : "<sans nom>");
+
+        // PALIER 2 — blocage sélectif (voir kBlockNodeClassName ci-dessus). Ce nœud n'est PAS
+        // exécuté : on log le blocage et on retourne SANS appeler g_original.
+        if (key == kBlockNodeClassName)
+        {
+            g_sdk->logger->InfoF(g_handle,
+                "[Tessera/Gate/BLOCK] t=%llu seq=%llu classe=%s — BLOQUE (g_original NON appele, retour=1)",
+                static_cast<unsigned long long>(NowMillis()),
+                static_cast<unsigned long long>(g_totalCalls), key.c_str());
+            return 1;
+        }
+
         std::uint64_t& count = g_classSeenCount[key];
         ++count;
 
