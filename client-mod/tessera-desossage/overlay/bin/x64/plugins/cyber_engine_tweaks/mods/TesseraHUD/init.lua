@@ -31,6 +31,14 @@ TesseraHUD.trafficDensity = TesseraHUD.trafficDensity or 1.0
 -- Masqué par défaut : ce HUD ne s'affiche qu'après activation via le hotkey CET ci-dessous
 -- (Paramètres > Input > Bindings > "Tessera HUD : afficher/masquer"), pas au démarrage du jeu.
 TesseraHUD.visible = false
+-- Détection de franchissement de shard : dernier shard résolu (frame précédente) + bannière
+-- transitoire armée au changement. Un simple label "Shard: X" qui change est facile à rater en
+-- jeu ; la bannière rend le franchissement explicite quelques secondes (playtest 2026-07-17 :
+-- "le franchissement ne s'indiquait pas"). Compté en frames (pas d'horloge : robuste au sandbox CET).
+TesseraHUD.lastShardId = TesseraHUD.lastShardId or nil
+TesseraHUD.lastShardName = TesseraHUD.lastShardName or nil
+TesseraHUD.crossingText = TesseraHUD.crossingText or nil
+TesseraHUD.crossingFrames = TesseraHUD.crossingFrames or 0
 
 -- Log explicite à chaque étape clé (2026-07-07, demandé) : jusqu'ici, en cas de souci, la seule
 -- trace était "le mod a une erreur de chargement" dans la console CET, sans dire QUOI — impossible
@@ -254,6 +262,30 @@ function TesseraHUD:Render()
   if shardInfo == nil then
     ImGui.TextDisabled("(shard-map.json introuvable)")
   else
+    -- Franchissement : le shard résolu a changé depuis la frame précédente (deux shards RÉELS,
+    -- pas le sentinelle "?"). On arme la bannière + on logue (trace diagnostique côté client, en
+    -- plus du session_log serveur). Le garde `lastShardId ~= nil` évite un faux franchissement à
+    -- la toute 1re résolution.
+    local curId = shardInfo.shardId
+    if curId ~= "?" then
+      if TesseraHUD.lastShardId ~= nil and TesseraHUD.lastShardId ~= "?"
+          and curId ~= TesseraHUD.lastShardId then
+        local fromName = TesseraHUD.lastShardName or TesseraHUD.lastShardId
+        local toName = shardInfo.shardName or curId
+        TesseraHUD.crossingText = "Franchissement : " .. fromName .. "  ->  " .. toName
+        TesseraHUD.crossingFrames = 240 -- ~4 s à 60 fps
+        print("[TesseraHUD] " .. TesseraHUD.crossingText)
+      end
+      TesseraHUD.lastShardId = curId
+      TesseraHUD.lastShardName = shardInfo.shardName
+    end
+
+    -- Bannière de franchissement, bien visible (vert vif), quelques secondes après le changement.
+    if TesseraHUD.crossingFrames > 0 and TesseraHUD.crossingText ~= nil then
+      ImGui.TextColored(0.2, 1.0, 0.4, 1.0, ">>> " .. TesseraHUD.crossingText .. " <<<")
+      TesseraHUD.crossingFrames = TesseraHUD.crossingFrames - 1
+    end
+
     ImGui.Text("Shard: " .. (shardInfo.shardName or shardInfo.shardId))
     if shardInfo.borderDist ~= nil then
       ImGui.Text(string.format("Distance frontière: %.1f", shardInfo.borderDist))
