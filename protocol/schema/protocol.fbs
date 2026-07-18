@@ -59,8 +59,15 @@ table Leave {}
 // en FIN d'union ServerMsg — ne jamais réordonner les membres d'un union déjà publié.
 table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
 
+// Placement autoritaire du client tel que décidé par le serveur (topology.locate). Poussé à
+// chaque changement de placement (même déclencheur que le journal de session, diff_placement) —
+// permet au HUD de comparer à son calcul local et de détecter un décalage. `authoritative` = shard
+// qui fait autorité ; `overlaps` = shards tampon où le client est aussi chargé (visibilité
+// inter-joueurs au franchissement). Reste en FIN d'union, après PositionCorrection.
+table ShardAssignment { authoritative:string; overlaps:[string]; }
+
 union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }

@@ -8,7 +8,7 @@ use crate::transport::{Transport, TransportEvent};
 use protocol::{
     CommandResult, CommandResultArgs, Kicked, KickedArgs, PermissionSync, PermissionSyncArgs,
     PositionCorrection, PositionCorrectionArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
-    Vec3, WorldState, WorldStateArgs,
+    ShardAssignment, ShardAssignmentArgs, Vec3, WorldState, WorldStateArgs,
 };
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -288,6 +288,32 @@ pub fn encode_position_correction(pos: [f32; 3], yaw: f32, reason: u8) -> Vec<u8
         &ServerEnvelopeArgs {
             msg_type: ServerMsg::PositionCorrection,
             msg: Some(pc.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Encode un `ServerEnvelope{ShardAssignment}` — le placement autoritaire décidé par le serveur
+/// pour CE client (topology.locate), poussé au HUD pour qu'il compare à son calcul local et
+/// détecte un décalage (spec HUD moniteur de cohérence, 2026-07-18).
+pub fn encode_shard_assignment(authoritative: &str, overlaps: &[String]) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let authoritative_str = b.create_string(authoritative);
+    let overlap_strs: Vec<_> = overlaps.iter().map(|s| b.create_string(s)).collect();
+    let overlaps_vec = b.create_vector(&overlap_strs);
+    let sa = ShardAssignment::create(
+        &mut b,
+        &ShardAssignmentArgs {
+            authoritative: Some(authoritative_str),
+            overlaps: Some(overlaps_vec),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::ShardAssignment,
+            msg: Some(sa.as_union_value()),
         },
     );
     b.finish(env, None);
@@ -1538,6 +1564,27 @@ mod tests {
         assert_eq!(pc.position().unwrap().z(), 3.0);
         assert_eq!(pc.yaw(), 90.0);
         assert_eq!(pc.reason(), 1);
+    }
+
+    #[test]
+    fn shard_assignment_roundtrips_authoritative_and_overlaps() {
+        let bytes =
+            encode_shard_assignment("group-1", &["group-0".to_string(), "group-2".to_string()]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::ShardAssignment);
+        let sa = env.msg_as_shard_assignment().unwrap();
+        assert_eq!(sa.authoritative(), Some("group-1"));
+        let overlaps: Vec<&str> = sa.overlaps().unwrap().iter().collect();
+        assert_eq!(overlaps, vec!["group-0", "group-2"]);
+    }
+
+    #[test]
+    fn shard_assignment_roundtrips_empty_overlaps() {
+        let bytes = encode_shard_assignment("group-0", &[]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        let sa = env.msg_as_shard_assignment().unwrap();
+        assert_eq!(sa.authoritative(), Some("group-0"));
+        assert_eq!(sa.overlaps().unwrap().len(), 0);
     }
 
     #[test]
