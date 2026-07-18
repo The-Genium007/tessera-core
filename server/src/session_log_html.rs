@@ -96,9 +96,26 @@ const HTML_PAGE: &str = r#"<!doctype html>
 <script>
   const log = document.getElementById('log');
   const es = new EventSource('/events');
+
+  // Dérive la classe CSS de catégorie depuis le mot suivant "— " (avant " · " ou fin de
+  // chaîne). Les événements composés (TickStall, TimeDrift, AdminAction) n'ont pas de
+  // séparateur dans leur nom rendu : cas spéciaux détectés par préfixe. Un événement sans
+  // classe connue (BufferEnter/BufferExit/Disconnect/SessionStart) ne reçoit que 'line'.
+  function categoryClass(data) {
+    const m = data.match(/— (\w+)/);
+    if (!m) return null;
+    const word = m[1].toLowerCase();
+    if (word.startsWith('tickstall')) return 'tick_stall';
+    if (word.startsWith('timedrift')) return 'time_drift';
+    if (word.startsWith('adminaction')) return 'admin_action';
+    if (word === 'handoff' || word === 'join' || word === 'connect') return word;
+    return null;
+  }
+
   es.onmessage = (e) => {
     const div = document.createElement('div');
-    div.className = 'line';
+    const cat = categoryClass(e.data);
+    div.className = cat ? `line ${cat}` : 'line';
     div.textContent = e.data;
     log.appendChild(div);
     window.scrollTo(0, document.body.scrollHeight);
@@ -168,6 +185,12 @@ async fn serve_events_stream(sock: &mut tokio::net::TcpStream, path: &std::path:
             Ok(lines) => lines,
             Err(_) => continue,
         };
+        // Garde défensive : si le fichier a été tronqué/tourné (taille en baisse), `last_count`
+        // resterait bloqué sur son ancien maximum et le flux se figerait silencieusement pour
+        // toujours (plus jamais `all.len() > last_count`). Non attendu en usage actuel
+        // (append-only, pas de rotation configurée) mais un clamp borne le dégât à une reprise
+        // propre depuis la nouvelle fin de fichier au prochain poll de croissance.
+        last_count = last_count.min(all.len());
         if all.len() > last_count {
             for raw in &all[last_count..] {
                 if let Some(rendered) = render_jsonl_line(raw) {
