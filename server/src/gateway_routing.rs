@@ -423,6 +423,19 @@ mod tests {
         assert!(crate::gateway::resolve_protocol_version(version).is_ok());
     }
 
+    // BLOQUÉ PHASE C (Windows) : octets à remplacer par un ShardAssignment produit par le VRAI
+    // encodeur C++ du fork une fois protocol_generated.h régénéré (flatc --cpp 25.12.19). Ce test
+    // reste `#[ignore]` tant que ces octets ne sont pas ceux du fork — un test qui encode ET décode
+    // en Rust ne prouverait rien sur le fil (même angle mort que l'incident Join du 2026-07-15,
+    // documenté juste au-dessus : CPP_CLIENT_JOIN_V1).
+    #[test]
+    #[ignore = "octets à fournir depuis le fork C++ régénéré, Phase C Windows"]
+    fn shard_assignment_wire_bytes_from_real_cpp_encoder() {
+        // let bytes: &[u8] = &[ /* octets du fork ici */ ];
+        // let env = flatbuffers::root::<protocol::ServerEnvelope>(bytes).unwrap();
+        // assert_eq!(env.msg_type(), protocol::ServerMsg::ShardAssignment);
+    }
+
     #[test]
     fn extract_leave_reads_leave_and_ignores_other_messages() {
         assert_eq!(extract_leave(&client_leave()), Some(()));
