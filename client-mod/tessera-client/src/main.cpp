@@ -193,6 +193,149 @@ std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInput
 }
 } // namespace TesseraDesossageNative
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Désossage natif — VOLET POPULATION STATIQUE (PNJ community + voitures NCPD garées).
+//
+// Problème : contrairement aux quêtes (dispatchées par ExecuteNode, cf. plus haut), la « vie
+// figée » d'un secteur — piétons community immobiles, flics NCPD dans leurs véhicules à l'arrêt —
+// est placée EN DUR dans chaque `.streamingsector` sous forme de nœuds `worldPopulationSpawnerNode`.
+// Aucun levier runtime scriptable (pas de méthode RTTI, pas d'ini). Le seul point d'accroche natif
+// est le chargement du secteur lui-même.
+//
+// Point d'accroche : `StreamingSector::PostLoad(StreamingSector* aSector, uint64_t)`.
+// Hash AddressLib `3972601611`, confirmé par Codeware/ArchiveXL (psiberx/cp2077-archive-xl,
+// src/Red/Addresses/Library.hpp : `StreamingSector_PostLoad = 3972601611`) — ArchiveXL HOOKE
+// exactement cette fonction en production pour muter le buffer de nœuds d'un secteur, ce qui valide
+// signature ET technique à grande échelle.
+//
+// Layout du buffer (confirmé par les RED4EXT_ASSERT_OFFSET d'ArchiveXL, StreamingSector.hpp) :
+//   StreamingSector + 0x40  → StreamingSectorNodeBuffer (struct en place)
+//   StreamingSectorNodeBuffer + 0x28 → DynArray<Handle<worldNode>> nodes
+//   → donc les nœuds sont à (sector + 0x40 + 0x28). Le DynArray fait 0x10 (entries+size+capacity),
+//     layout identique à RED4ext::DynArray du SDK. Chaque entrée est un Handle<worldNode> ; le
+//     worldNode dérive d'ISerializable → GetType() donne sa classe RTTI.
+//
+// Neutralisation : sur chaque nœud de classe `worldPopulationSpawnerNode`, poser `spawnOnStart =
+// false` via réflexion RTTI (GetProperty + GetValuePtr<bool>). On mute la DÉFINITION, avant que le
+// système de streaming n'instancie la population (les instances naissent plus tard, pas dans
+// PostLoad). C'est exactement ce que fait un override d'archive .streamingsector, mais au RUNTIME,
+// sans redistribuer d'asset CDPR ni éditer 33 000 secteurs à la main.
+//
+// SÛRETÉ : si le nom de classe RTTI n'est pas exactement `worldPopulationSpawnerNode`, ou si la
+// propriété `spawnOnStart` n'existe pas, le hook est un NO-OP silencieux (aucun nœud touché) — pas
+// un crash. Pour lever le doute IN-GAME, on logue les noms de classes distincts rencontrés sur les
+// premiers secteurs : le vrai nom apparaîtra dans red4ext.log, ajustable sans risque.
+namespace TesseraPopulationNative
+{
+// Réutilise le SDK/handle déjà mémorisés par le volet ExecuteNode (posés dans Main/Load).
+using TesseraDesossageNative::g_handle;
+using TesseraDesossageNative::g_sdk;
+
+// Signature réelle : void PostLoad(StreamingSector* aSector, uint64_t). On ne touche qu'au 1er
+// paramètre (le secteur) ; le 2e est repassé tel quel. Retour void.
+using PostLoad_t = void (*)(void* aSector, std::uint64_t a2);
+
+constexpr std::uint32_t kPostLoadHash = 3972601611u;
+
+// Classe RTTI du nœud de population statique. Best-guess confirmé par RTTI (session 2026-07-18) —
+// le log ci-dessous confirmera in-game. Un nom faux = no-op (sûr).
+constexpr const char* kPopSpawnerClass = "worldPopulationSpawnerNode";
+constexpr const char* kSpawnOnStartProp = "spawnOnStart";
+
+// Offsets (cf. commentaire ci-dessus, asserts ArchiveXL).
+constexpr std::uintptr_t kNodeBufferOffset = 0x40;
+constexpr std::uintptr_t kNodesArrayOffset = 0x28;
+
+PostLoad_t g_original_postload = nullptr;
+
+std::uint64_t g_sectorsSeen = 0;
+std::uint64_t g_nodesNeutralized = 0;
+constexpr std::uint64_t kLogClassesForFirstNSectors = 8;
+constexpr std::uint64_t kSectorSummaryEvery = 500;
+
+void Detour(void* aSector, std::uint64_t a2)
+{
+    // 1) Laisser le jeu finir de charger/finaliser le secteur (buffer garanti peuplé ensuite).
+    g_original_postload(aSector, a2);
+
+    if (aSector == nullptr)
+    {
+        return;
+    }
+
+    ++g_sectorsSeen;
+
+    // 2) Atteindre le DynArray<Handle<worldNode>> à (sector + 0x40 + 0x28).
+    auto* base = reinterpret_cast<std::uint8_t*>(aSector);
+    auto* nodes = reinterpret_cast<RED4ext::DynArray<RED4ext::Handle<RED4ext::ISerializable>>*>(
+        base + kNodeBufferOffset + kNodesArrayOffset);
+
+    const bool logClasses = g_sectorsSeen <= kLogClassesForFirstNSectors && g_sdk != nullptr;
+    std::uint32_t neutralizedThisSector = 0;
+
+    for (std::uint32_t i = 0; i < nodes->size; ++i)
+    {
+        RED4ext::ISerializable* node = (*nodes)[i].GetPtr();
+        if (node == nullptr)
+        {
+            continue;
+        }
+        auto* cls = node->GetType();
+        if (cls == nullptr)
+        {
+            continue;
+        }
+
+        if (logClasses)
+        {
+            // Log dédupliqué léger : on réutilise la map de la phase 1 pour ne montrer chaque nom
+            // de classe qu'un nombre limité de fois (évite de noyer red4ext.log sur 33k secteurs).
+            std::string cname = cls->name.ToString() != nullptr ? cls->name.ToString() : "<null>";
+            std::uint64_t& seen = TesseraDesossageNative::g_classSeenCount[std::string("pop:") + cname];
+            if (seen < TesseraDesossageNative::kDetailedLogLimit)
+            {
+                g_sdk->logger->InfoF(g_handle,
+                    "[Tessera/Pop/Node] secteur=%llu classe=%s — decouverte (log seul)",
+                    static_cast<unsigned long long>(g_sectorsSeen), cname.c_str());
+            }
+            ++seen;
+        }
+
+        if (cls->name == RED4ext::CName(kPopSpawnerClass))
+        {
+            auto* prop = cls->GetProperty(RED4ext::CName(kSpawnOnStartProp));
+            if (prop != nullptr)
+            {
+                *prop->GetValuePtr<bool>(node) = false;
+                ++neutralizedThisSector;
+                ++g_nodesNeutralized;
+            }
+            else if (logClasses && g_sdk != nullptr)
+            {
+                g_sdk->logger->InfoF(g_handle,
+                    "[Tessera/Pop/Node] %s TROUVE mais propriete '%s' absente — no-op, verifier le nom",
+                    kPopSpawnerClass, kSpawnOnStartProp);
+            }
+        }
+    }
+
+    if (g_sdk != nullptr &&
+        (neutralizedThisSector > 0 && g_sectorsSeen <= kLogClassesForFirstNSectors))
+    {
+        g_sdk->logger->InfoF(g_handle,
+            "[Tessera/Pop] secteur=%llu — %u nœud(s) population neutralise(s) (spawnOnStart=false)",
+            static_cast<unsigned long long>(g_sectorsSeen), neutralizedThisSector);
+    }
+    if (g_sdk != nullptr && g_sectorsSeen % kSectorSummaryEvery == 0)
+    {
+        g_sdk->logger->InfoF(g_handle,
+            "[Tessera/Pop/Summary] secteurs=%llu total_neutralises=%llu",
+            static_cast<unsigned long long>(g_sectorsSeen),
+            static_cast<unsigned long long>(g_nodesNeutralized));
+    }
+}
+} // namespace TesseraPopulationNative
+
 // Query — le loader lit notre identité avant de nous charger.
 RED4EXT_C_EXPORT void RED4EXT_CALL Query(RED4ext::v1::PluginInfo* aInfo)
 {
@@ -244,6 +387,27 @@ RED4EXT_C_EXPORT bool RED4EXT_CALL Main(RED4ext::v1::PluginHandle aHandle, RED4e
             {
                 aSdk->logger->Info(aHandle,
                     "[Tessera/DesossageNative] ERREUR : échec d'attache du hook ExecuteNode.");
+            }
+        }
+
+        // Volet population statique (PNJ community + voitures NCPD garées) — hook
+        // StreamingSector::PostLoad, cf. commentaire complet sur namespace TesseraPopulationNative.
+        {
+            RED4ext::UniversalRelocFunc<TesseraPopulationNative::PostLoad_t> target(
+                TesseraPopulationNative::kPostLoadHash);
+            auto targetFn = static_cast<TesseraPopulationNative::PostLoad_t>(target);
+            bool attached = aSdk->hooking->Attach(aHandle, reinterpret_cast<void*>(targetFn),
+                reinterpret_cast<void*>(&TesseraPopulationNative::Detour),
+                reinterpret_cast<void**>(&TesseraPopulationNative::g_original_postload));
+            if (attached)
+            {
+                aSdk->logger->Info(aHandle,
+                    "[Tessera/Pop] hook StreamingSector::PostLoad attaché (neutralisation population).");
+            }
+            else
+            {
+                aSdk->logger->Info(aHandle,
+                    "[Tessera/Pop] ERREUR : échec d'attache du hook StreamingSector::PostLoad.");
             }
         }
         break;
