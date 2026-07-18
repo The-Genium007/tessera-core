@@ -3,11 +3,11 @@
 //! Écrit une ligne JSON par événement ; servi tel quel en HTTP (pattern metrics::serve).
 
 use crate::handoff::Placement;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum SessionEvent {
     SessionStart,

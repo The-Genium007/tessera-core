@@ -56,6 +56,25 @@ pub fn format_event(ts_ms: u64, ev: &SessionEvent) -> String {
     format!("{time} — {body}")
 }
 
+/// Ligne désérialisée localement — miroir de `session_log::Line`, dupliqué ici plutôt
+/// qu'exposé en `pub` depuis `session_log.rs` (pas de raison de rendre ce détail interne public
+/// pour ce seul usage de présentation).
+#[derive(serde::Deserialize)]
+struct RawLine {
+    ts_ms: u64,
+    #[serde(flatten)]
+    ev: SessionEvent,
+}
+
+/// Parse une ligne JSONL brute de `session.jsonl` et la formate via `format_event`. Renvoie
+/// `None` sur une ligne non-JSON ou dont le format ne correspond à aucune variante connue —
+/// ignorée plutôt que de faire planter le flux SSE (une ligne corrompue ne doit jamais arrêter
+/// l'affichage des suivantes).
+pub fn render_jsonl_line(raw: &str) -> Option<String> {
+    let parsed: RawLine = serde_json::from_str(raw).ok()?;
+    Some(format_event(parsed.ts_ms, &parsed.ev))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +142,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.jsonl");
         assert!(tail_lines(&path, 10).is_err());
+    }
+
+    #[test]
+    fn render_jsonl_line_parses_a_real_handoff_line() {
+        let raw = r#"{"ts_ms":52327000,"event":"handoff","client":42,"from":"shard-c","to":"shard-d","x":120.4,"y":88.1,"z":3.0}"#;
+        let rendered = render_jsonl_line(raw).unwrap();
+        assert_eq!(
+            rendered,
+            "14:32:07 — Handoff · client 42 : shard-c → shard-d (x=120.4, y=88.1, z=3.0)"
+        );
+    }
+
+    #[test]
+    fn render_jsonl_line_returns_none_on_garbage() {
+        assert_eq!(render_jsonl_line("not json at all"), None);
+    }
+
+    #[test]
+    fn render_jsonl_line_parses_session_start() {
+        let raw = r#"{"ts_ms":0,"event":"session_start"}"#;
+        assert_eq!(render_jsonl_line(raw).unwrap(), "00:00:00 — SessionStart");
     }
 }
