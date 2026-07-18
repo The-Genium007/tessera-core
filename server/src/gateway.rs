@@ -919,7 +919,23 @@ pub async fn gateway_main(
         let path = std::path::PathBuf::from(session_log_path.clone());
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
-                tracing::info!("logs de session en direct disponibles sur http://{addr}/");
+                // `addr` est l'adresse de BIND (souvent 0.0.0.0 en Docker — toutes les interfaces
+                // du conteneur), pas l'adresse à laquelle un navigateur peut se connecter. Le
+                // message de boot doit afficher un lien réellement joignable : si
+                // TESSERA_GATEWAY_SESSIONLOG_HTML_PUBLIC_HOST est fournie, on l'utilise avec le
+                // même port que `addr` ; sinon on retombe sur `addr` tel quel (utile en dev local
+                // hors Docker, où le défaut 127.0.0.1 est déjà correct). Piège vécu (2026-07-18) :
+                // sans ça, le boot annonçait "http://0.0.0.0:9103/", techniquement exact comme
+                // adresse de bind mais inutilisable tel quel dans un navigateur.
+                let display_addr = match std::env::var("TESSERA_GATEWAY_SESSIONLOG_HTML_PUBLIC_HOST")
+                {
+                    Ok(host) if !host.trim().is_empty() => {
+                        let port = addr.rsplit(':').next().unwrap_or("9103");
+                        format!("{host}:{port}")
+                    }
+                    _ => addr.clone(),
+                };
+                tracing::info!("logs de session en direct disponibles sur http://{display_addr}/");
                 tokio::spawn(async move {
                     if let Err(e) = crate::session_log_html::serve_live(listener, path).await {
                         tracing::warn!("page de logs en direct indisponible ({addr}): {e}");

@@ -87,6 +87,15 @@ services:
       TESSERA_SESSION_LOG_PATH: "/data/session.jsonl"
       TESSERA_GATEWAY_SESSIONLOG_ADDR: "0.0.0.0:9102"
       TESSERA_GATEWAY_SESSIONLOG_HTML_ADDR: "0.0.0.0:9103"
+      # IP publique fixe du VPS dev/playtest — utilisée UNIQUEMENT pour construire le lien affiché
+      # au boot ("logs de session en direct disponibles sur http://..."), jamais pour le bind
+      # lui-même (qui reste 0.0.0.0 ci-dessus, sinon le conteneur n'écoute que sur cette IP et pas
+      # sur le loopback/les autres interfaces internes). Sans cette variable, le message de boot
+      # affichait littéralement "http://0.0.0.0:9103/" — techniquement correct comme adresse de
+      # bind mais inutilisable tel quel dans un navigateur (trouvé en playtest, 2026-07-18). Codée
+      # en dur temporairement (phase playtest, VPS unique à IP fixe) — à revoir en variable
+      # d'environnement propre si un jour plusieurs VPS/DNS entrent en jeu.
+      TESSERA_GATEWAY_SESSIONLOG_HTML_PUBLIC_HOST: "51.38.189.234"
       # Défaut Rust = 127.0.0.1 (sûr hors Docker) ; ici surchargé en 0.0.0.0 comme les métriques
       # ci-dessus — jamais publié via `ports:`, donc reste interne au réseau Docker. Sans cette
       # ligne, `directory` (conteneur séparé) ne peut jamais joindre `/internal/attestation` et
