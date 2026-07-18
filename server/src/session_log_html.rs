@@ -5,6 +5,16 @@
 
 use crate::session_log::SessionEvent;
 
+/// Lit les `n` dernières lignes non vides de `path`, dans l'ordre chronologique. Lecture
+/// intégrale du fichier (taille attendue modeste en usage playtest — pas de lecture en flux
+/// inversé optimisée, cf. spec session-log-live-view §Route /events).
+pub fn tail_lines(path: &std::path::Path, n: usize) -> std::io::Result<Vec<String>> {
+    let content = std::fs::read_to_string(path)?;
+    let all: Vec<String> = content.lines().map(str::to_string).collect();
+    let start = all.len().saturating_sub(n);
+    Ok(all[start..].to_vec())
+}
+
 /// Formate un événement en une ligne lisible, préfixée par l'heure HH:MM:SS (UTC, dérivée de
 /// `ts_ms`). Pur et testable sans réseau ni fichier.
 pub fn format_event(ts_ms: u64, ev: &SessionEvent) -> String {
@@ -88,5 +98,30 @@ mod tests {
         };
         assert!(format_event(0, &enter).contains("BufferEnter · client 7 → shard-a"));
         assert!(format_event(0, &exit).contains("BufferExit · client 7 ← shard-a"));
+    }
+
+    #[test]
+    fn tail_lines_returns_last_n_in_chronological_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+        let lines = tail_lines(&path, 3).unwrap();
+        assert_eq!(lines, vec!["line3", "line4", "line5"]);
+    }
+
+    #[test]
+    fn tail_lines_returns_all_when_fewer_than_n() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "only-one\n").unwrap();
+        let lines = tail_lines(&path, 200).unwrap();
+        assert_eq!(lines, vec!["only-one"]);
+    }
+
+    #[test]
+    fn tail_lines_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.jsonl");
+        assert!(tail_lines(&path, 10).is_err());
     }
 }
