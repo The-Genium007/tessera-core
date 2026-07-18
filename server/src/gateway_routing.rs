@@ -423,17 +423,77 @@ mod tests {
         assert!(crate::gateway::resolve_protocol_version(version).is_ok());
     }
 
-    // BLOQUÉ PHASE C (Windows) : octets à remplacer par un ShardAssignment produit par le VRAI
-    // encodeur C++ du fork une fois protocol_generated.h régénéré (flatc --cpp 25.12.19). Ce test
-    // reste `#[ignore]` tant que ces octets ne sont pas ceux du fork — un test qui encode ET décode
-    // en Rust ne prouverait rien sur le fil (même angle mort que l'incident Join du 2026-07-15,
-    // documenté juste au-dessus : CPP_CLIENT_JOIN_V1).
+    // ── Fil figé ShardAssignment / PositionCorrection (server → client) ──────────────────────
+    //
+    // NUANCE DE DIRECTION vs le `Join` ci-dessus. `Join` va client→C++ → serveur→Rust : on fige
+    // les octets du VRAI encodeur C++ et on prouve que le décodeur Rust les lit — le fil traverse
+    // bien deux langages dans le test. `ShardAssignment` et `PositionCorrection` vont dans l'AUTRE
+    // sens : serveur→Rust (encode) → client→C++ (décode). Refiger ici des octets et les redécoder
+    // en Rust serait exactement la tautologie « encode+décode dans le même langage » que le test
+    // Join dénonce — ça ne prouverait rien sur le fil réel.
+    //
+    // Ce que ce test PEUT garder depuis macOS, sans PC : (1) l'encodeur serveur reste stable
+    // octet-pour-octet — tout changement de layout devient un choix conscient qui met à jour ces
+    // vecteurs ; (2) auto-cohérence de décodage Rust. Ce qu'il NE peut PAS prouver seul : que le
+    // décodeur C++ régénéré (`protocol_generated.h`, flatc 25.12.19) lit bien ces mêmes octets —
+    // ça, c'est le sens serveur→client, validé de bout en bout EN JEU (Étape 3 du round-trip :
+    // le client applique réellement la téléportation et le HUD affiche le shard serveur). Un test
+    // unitaire C++ figeant ces mêmes octets serait le garde idéal, mais le fork n'a pas encore de
+    // cible de test C++ (CMake ne build que le plugin) — suivi documenté, pas bloquant.
+    // Régénérer ces vecteurs : petit test `dump` appelant les deux encodeurs (cf. historique).
+    const SHARD_ASSIGNMENT_G1_OVL02: &[u8] = &[
+        0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x04, 0x00,
+        0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02,
+        0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
+        0x67, 0x72, 0x6f, 0x75, 0x70, 0x2d, 0x32, 0x00, 0x07, 0x00, 0x00, 0x00, 0x67, 0x72, 0x6f,
+        0x75, 0x70, 0x2d, 0x30, 0x00, 0x07, 0x00, 0x00, 0x00, 0x67, 0x72, 0x6f, 0x75, 0x70, 0x2d,
+        0x31, 0x00,
+    ];
+
+    // PositionCorrection{ position=(100.5, -20.25, 3.0), yaw=90.0, reason=0 }.
+    const POSITION_CORRECTION_SPAWN: &[u8] = &[
+        0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x06, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x14, 0x00, 0x04, 0x00,
+        0x10, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc9, 0x42, 0x00, 0x00, 0xa2, 0xc1, 0x00,
+        0x00, 0x40, 0x40, 0x00, 0x00, 0xb4, 0x42,
+    ];
+
     #[test]
-    #[ignore = "octets à fournir depuis le fork C++ régénéré, Phase C Windows"]
-    fn shard_assignment_wire_bytes_from_real_cpp_encoder() {
-        // let bytes: &[u8] = &[ /* octets du fork ici */ ];
-        // let env = flatbuffers::root::<protocol::ServerEnvelope>(bytes).unwrap();
-        // assert_eq!(env.msg_type(), protocol::ServerMsg::ShardAssignment);
+    fn shard_assignment_wire_is_stable_and_matches_the_shared_vector() {
+        // (1) L'encodeur serveur produit EXACTEMENT le vecteur partagé (tripwire de dérive de
+        // layout — le test C++ du fork fige les mêmes octets).
+        assert_eq!(
+            crate::gateway::encode_shard_assignment(
+                "group-1",
+                &["group-0".to_string(), "group-2".to_string()]
+            ),
+            SHARD_ASSIGNMENT_G1_OVL02,
+            "layout ShardAssignment modifié : régénérer ce vecteur (test dump) et revalider le décodage en jeu"
+        );
+        // (2) Auto-cohérence : les octets se décodent aux bons champs.
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(SHARD_ASSIGNMENT_G1_OVL02).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::ShardAssignment);
+        let sa = env.msg_as_shard_assignment().unwrap();
+        assert_eq!(sa.authoritative(), Some("group-1"));
+        let overlaps: Vec<&str> = sa.overlaps().unwrap().iter().collect();
+        assert_eq!(overlaps, vec!["group-0", "group-2"]);
+    }
+
+    #[test]
+    fn position_correction_wire_is_stable_and_matches_the_shared_vector() {
+        assert_eq!(
+            crate::gateway::encode_position_correction([100.5, -20.25, 3.0], 90.0, 0),
+            POSITION_CORRECTION_SPAWN,
+            "layout PositionCorrection modifié : régénérer ce vecteur (test dump) et revalider le décodage en jeu"
+        );
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(POSITION_CORRECTION_SPAWN).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::PositionCorrection);
+        let pc = env.msg_as_position_correction().unwrap();
+        let pos = pc.position().unwrap();
+        assert_eq!((pos.x(), pos.y(), pos.z()), (100.5, -20.25, 3.0));
+        assert_eq!(pc.yaw(), 90.0);
+        assert_eq!(pc.reason(), 0);
     }
 
     #[test]
