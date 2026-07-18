@@ -63,8 +63,19 @@
 // anticipé, aucun changement de comportement.
 namespace TesseraDesossageNative
 {
-using ExecuteNode_t = std::uint8_t (*)(void* aPhase, RED4ext::CClass* aNodeClass, void* aNode,
-    void* aContext, void* aInputSocket, void* aOutputSockets);
+// Signature RÉELLE, confirmée en jeu (crash 2026-07-18) puis calée sur Codeware
+// (Red/QuestsSystem.hpp:286, RawFunc @ hash 3227858325) :
+//   uint8_t ExecuteNode(questPhaseInstance* aPhase, questNodeDefinition* aInputNode,
+//                       QuestContext& aContext, const QuestNodeSocket& aInputSocket,
+//                       DynArray<QuestNodeSocket>& aOutputSockets)
+// → 5 paramètres. La version précédente en déclarait 6 (avec un faux `CClass*` en 2e position et
+// un `aNode` en trop) : convention d'appel corrompue → CRASH au 1er nœud exécuté (le hook
+// s'attachait sans erreur mais mourait dès qu'un ExecuteNode firait ; invisible tant que redscript
+// échouait avant, révélé une fois la compilation réparée). Sur x64 les 3 références (aContext /
+// sockets) passent comme des pointeurs : `void*` pour chacune matche l'ABI, on ne les touche pas,
+// on les repasse telles quelles à g_original. Seul aInputNode est inspecté (sa classe RTTI).
+using ExecuteNode_t = std::uint8_t (*)(void* aPhase, void* aInputNode, void* aContext,
+    void* aInputSocket, void* aOutputSockets);
 
 constexpr std::uint32_t kExecuteNodeHash = 3227858325u;
 
@@ -90,16 +101,20 @@ std::uint64_t NowMillis()
         duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
 }
 
-std::uint8_t Detour(void* aPhase, RED4ext::CClass* aNodeClass, void* aNode, void* aContext,
-    void* aInputSocket, void* aOutputSockets)
+std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInputSocket,
+    void* aOutputSockets)
 {
     // Garde-fou : tout doute (pointeur nul, classe introuvable) → on ne fait QUE journaliser,
     // jamais bloquer. Phase 1 = observation, aucune logique de blocage tant que la sémantique du
     // retour/des sockets de sortie n'est pas comprise en jeu.
     ++g_totalCalls;
-    if (aNodeClass != nullptr && g_sdk != nullptr)
+    if (aInputNode != nullptr && g_sdk != nullptr)
     {
-        const char* className = aNodeClass->name.ToString();
+        // aInputNode est un questNodeDefinition* (ISerializable) : sa classe RTTI vient de GetType(),
+        // PAS d'un CClass* passé en argument (l'erreur d'origine qui lisait de la mémoire au hasard).
+        auto* node = reinterpret_cast<RED4ext::ISerializable*>(aInputNode);
+        auto* nodeClass = node->GetType();
+        const char* className = (nodeClass != nullptr) ? nodeClass->name.ToString() : nullptr;
         std::string key(className != nullptr ? className : "<sans nom>");
         std::uint64_t& count = g_classSeenCount[key];
         ++count;
@@ -108,11 +123,11 @@ std::uint8_t Detour(void* aPhase, RED4ext::CClass* aNodeClass, void* aNode, void
         {
             auto* rtti = RED4ext::CRTTISystem::Get();
             auto* spawnCls = rtti != nullptr ? rtti->GetClass(kSpawnNodeClassName) : nullptr;
-            bool isSpawnNode = spawnCls != nullptr && aNodeClass->IsA(spawnCls);
+            bool isSpawnNode = spawnCls != nullptr && nodeClass != nullptr && nodeClass->IsA(spawnCls);
             g_sdk->logger->InfoF(g_handle,
                 "[Tessera/Gate/Node] t=%llu seq=%llu classe=%s occurrence=%llu spawnNode=%d — log seul, phase 1",
                 static_cast<unsigned long long>(NowMillis()),
-                static_cast<unsigned long long>(g_totalCalls), className,
+                static_cast<unsigned long long>(g_totalCalls), key.c_str(),
                 static_cast<unsigned long long>(count), isSpawnNode ? 1 : 0);
         }
 
@@ -125,7 +140,7 @@ std::uint8_t Detour(void* aPhase, RED4ext::CClass* aNodeClass, void* aNode, void
                 static_cast<size_t>(g_classSeenCount.size()));
         }
     }
-    return g_original(aPhase, aNodeClass, aNode, aContext, aInputSocket, aOutputSockets);
+    return g_original(aPhase, aInputNode, aContext, aInputSocket, aOutputSockets);
 }
 } // namespace TesseraDesossageNative
 
