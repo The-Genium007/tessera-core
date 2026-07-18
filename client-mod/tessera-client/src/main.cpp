@@ -20,6 +20,10 @@
 #include <string>
 #include <unordered_map>
 
+// Blocklist des hashes de path .questphase à neutraliser — GÉNÉRÉE par
+// tools/mod-research/build-blocklist.py. Contenu courant : la CAMPAGNE (main_quests, 728 phases).
+#include "blocked_phases_generated.h"
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Désossage natif — PHASE 1 : hook LOG-ONLY, aucun blocage.
 //
@@ -100,10 +104,10 @@ constexpr const char* kSpawnNodeClassName = "questSpawnManagerNodeDefinition";
 constexpr const char* kPhaseNodeClassName = "questPhaseNodeDefinition";
 constexpr const char* kPhaseResourceProp = "phaseResource";
 
-// Hashes de path .questphase à bloquer. VIDE (que la sentinelle 0) = étape 1 : observation seule,
-// AUCUN blocage. On les remplit à l'étape 3, après avoir lu les hashes dans le log
-// [Tessera/Gate/Phase] et mappé hash→quête en jeu (+ WolvenKit / paths connus des mods).
-constexpr std::uint64_t kBlockedPhaseHashes[] = { 0u };
+// Les hashes à bloquer vivent dans blocked_phases_generated.h
+// (TesseraGenerated::kBlockedPhaseHashesGen), généré par build-blocklist.py depuis la liste
+// WolvenKit. Contenu courant : la CAMPAGNE (main_quests). Pour changer les types bloqués, régénérer
+// le header (--type gigs,street_stories,…) et rebuild — aucune édition de ce fichier nécessaire.
 
 constexpr std::uint64_t kDetailedLogLimit = 3;
 constexpr std::uint64_t kSummaryEveryNCalls = 500;
@@ -148,7 +152,7 @@ std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInput
                 if (pathPtr != nullptr) { phaseHash = pathPtr->hash; }
             }
             bool blocked = false;
-            for (std::uint64_t h : kBlockedPhaseHashes)
+            for (std::uint64_t h : TesseraGenerated::kBlockedPhaseHashesGen)
             {
                 if (h != 0u && h == phaseHash) { blocked = true; break; }
             }
