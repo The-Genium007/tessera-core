@@ -88,16 +88,22 @@ RED4ext::v1::PluginHandle g_handle = nullptr;
 // via le SDK). Conservé pour marquer les nœuds spawn dans le log élargi ci-dessous.
 constexpr const char* kSpawnNodeClassName = "questSpawnManagerNodeDefinition";
 
-// PALIER 2 (test 2026-07-18) — blocage sélectif d'UNE seule classe de nœud (spec D5 : valider 1
-// type avant d'étendre). Cible : l'appel Takemura, identifié au Gate — la classe
-// `questPhoneManagerNodeDefinition` fire pile dans la fenêtre SORTIE→TAKEMURA à la sortie d'appart.
-// Pour CE nœud uniquement, le Detour n'appelle PAS g_original → le nœud ne s'exécute pas → l'appel
-// ne part pas. ⚠️ Sémantique du retour uint8_t / des sockets de sortie NON comprise : on retourne 1
-// (hypothèse « nœud traité ») et on OBSERVE en jeu : (a) Takemura se tait-il ? (b) le jeu reste-t-il
-// stable, sans freeze de graphe de quête ? Si ça fige → tester un retour 0, ou renoncer à bloquer ce
-// type au niveau ExecuteNode. C'est GÉNÉRIQUE (tous les appels du jeu passent par cette classe) —
-// acceptable pour un monde vide, à affiner par ID de nœud plus tard si on veut du chirurgical.
-constexpr const char* kBlockNodeClassName = "questPhoneManagerNodeDefinition";
+// PALIER 2 (2026-07-18) — blocage par PHASE de quête (path du .questphase), PAS par classe.
+// Le test « bloquer questPhoneManagerNodeDefinition » a échoué (le blocage firait, jeu stable, mais
+// Takemura appelait quand même : l'appel est une SCÈNE, pas le phone manager). Bonne nouvelle
+// dérivée : le mécanisme de blocage marche sans casser le graphe. La bonne granularité, c'est la
+// PHASE : un nœud `questPhaseNodeDefinition` porte `.phaseResource` = le path du .questphase de la
+// sous-quête qu'il ENTRE. Bloquer ce nœud = TOUTE la sous-quête (quête/gig/hustle/appel) ne
+// s'exécute jamais — même effet que les mods archive (override de .questphase) mais au RUNTIME,
+// sans redistribuer d'asset CDPR. Le path est un hash uint64 (ResourcePath). Chaque hash = une
+// quête précise ; un dossier (gigs/, minor_activities/…) = un TYPE ou un DONNEUR entier.
+constexpr const char* kPhaseNodeClassName = "questPhaseNodeDefinition";
+constexpr const char* kPhaseResourceProp = "phaseResource";
+
+// Hashes de path .questphase à bloquer. VIDE (que la sentinelle 0) = étape 1 : observation seule,
+// AUCUN blocage. On les remplit à l'étape 3, après avoir lu les hashes dans le log
+// [Tessera/Gate/Phase] et mappé hash→quête en jeu (+ WolvenKit / paths connus des mods).
+constexpr std::uint64_t kBlockedPhaseHashes[] = { 0u };
 
 constexpr std::uint64_t kDetailedLogLimit = 3;
 constexpr std::uint64_t kSummaryEveryNCalls = 500;
@@ -115,9 +121,9 @@ std::uint64_t NowMillis()
 std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInputSocket,
     void* aOutputSockets)
 {
-    // PALIER 2 (test) : UNE seule classe est bloquée (kBlockNodeClassName), tout le reste est
-    // strictement log-only (g_original appelé inconditionnellement en fin de fonction). Garde-fou :
-    // tout doute (pointeur nul, classe introuvable) → on ne fait QUE journaliser, jamais bloquer.
+    // PALIER 2 : les nœuds de PHASE (kPhaseNodeClassName) sont inspectés (log de leur hash de
+    // .questphase) et bloqués SI leur hash est dans kBlockedPhaseHashes — vide pour l'instant, donc
+    // étape 1 = observation pure. Tout le reste est log-only (g_original appelé en fin de fonction).
     ++g_totalCalls;
     if (aInputNode != nullptr && g_sdk != nullptr)
     {
@@ -128,15 +134,31 @@ std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInput
         const char* className = (nodeClass != nullptr) ? nodeClass->name.ToString() : nullptr;
         std::string key(className != nullptr ? className : "<sans nom>");
 
-        // PALIER 2 — blocage sélectif (voir kBlockNodeClassName ci-dessus). Ce nœud n'est PAS
-        // exécuté : on log le blocage et on retourne SANS appeler g_original.
-        if (key == kBlockNodeClassName)
+        // PALIER 2 — identité de PHASE : un questPhaseNodeDefinition porte le path (.questphase) de
+        // la sous-quête qu'il entre. On lit ce hash via la propriété RTTI phaseResource (raRef →
+        // ResourcePath.hash à l'offset 0), on le LOGUE (étape 1 : observation), et on BLOQUE la phase
+        // si son hash est dans kBlockedPhaseHashes (étape 3). Bloquer ce nœud = sous-quête neutralisée.
+        if (key == kPhaseNodeClassName && nodeClass != nullptr)
         {
+            std::uint64_t phaseHash = 0u;
+            auto* prop = nodeClass->GetProperty(RED4ext::CName(kPhaseResourceProp));
+            if (prop != nullptr)
+            {
+                auto* pathPtr = prop->GetValuePtr<RED4ext::ResourcePath>(node);
+                if (pathPtr != nullptr) { phaseHash = pathPtr->hash; }
+            }
+            bool blocked = false;
+            for (std::uint64_t h : kBlockedPhaseHashes)
+            {
+                if (h != 0u && h == phaseHash) { blocked = true; break; }
+            }
             g_sdk->logger->InfoF(g_handle,
-                "[Tessera/Gate/BLOCK] t=%llu seq=%llu classe=%s — BLOQUE (g_original NON appele, retour=1)",
+                "[Tessera/Gate/Phase] t=%llu seq=%llu phaseHash=0x%016llX%s",
                 static_cast<unsigned long long>(NowMillis()),
-                static_cast<unsigned long long>(g_totalCalls), key.c_str());
-            return 1;
+                static_cast<unsigned long long>(g_totalCalls),
+                static_cast<unsigned long long>(phaseHash),
+                blocked ? " — BLOQUE (sous-quete neutralisee, g_original NON appele)" : "");
+            if (blocked) { return 1; }
         }
 
         std::uint64_t& count = g_classSeenCount[key];
