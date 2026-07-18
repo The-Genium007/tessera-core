@@ -907,6 +907,23 @@ pub async fn gateway_main(
             }
         });
     }
+    // Page de logs en direct (HTML + SSE) — spec session-log-live-view, 2026-07-18. Port
+    // SÉPARÉ de TESSERA_GATEWAY_SESSIONLOG_ADDR ci-dessus (JSONL brut, non publié) : celui-ci
+    // est fait pour être PUBLIÉ (voir docker-compose.yml) et consulté depuis un navigateur
+    // pendant un playtest, sans SSH. ⚠️ Aucune authentification (décision explicite, spec
+    // §Sécurité) : ne jamais élargir son usage au-delà d'un playtest restreint et connu sans
+    // revisiter ce choix.
+    {
+        let addr = std::env::var("TESSERA_GATEWAY_SESSIONLOG_HTML_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:9103".to_string());
+        let path = std::path::PathBuf::from(session_log_path.clone());
+        tracing::info!("logs de session en direct disponibles sur http://{addr}/");
+        tokio::spawn(async move {
+            if let Err(e) = crate::session_log_html::serve_live(&addr, path).await {
+                tracing::warn!("page de logs en direct indisponible ({addr}): {e}");
+            }
+        });
+    }
     // Dernier placement connu par client — pour détecter handoffs et zones tampons.
     let mut prev_placements: HashMap<u64, crate::handoff::Placement> = HashMap::new();
 
