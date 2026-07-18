@@ -19,6 +19,24 @@ pub fn cap_elapsed(elapsed: Duration, max_window: Duration) -> Duration {
     elapsed.min(max_window)
 }
 
+/// Fenêtre minimale sous laquelle on refuse de JUGER la vitesse. Deux `PositionUpdate` traités
+/// dans le même tick Gateway (drain par lots, `gateway.rs`) ont un `elapsed` de l'ordre de la
+/// microseconde, sans rapport avec le temps de jeu réel : les juger produit une vitesse absurde
+/// (bug playtest 2026-07-17, deux rejets à 48 µs d'écart). En deçà de ce plancher, on ne peut pas
+/// conclure — le mouvement est réputé plausible, exactement comme `elapsed == ZERO`. Le vrai
+/// téléport reste attrapé par le seuil de DISTANCE absolue (zone rouge, gateway.rs), insensible au
+/// dénominateur.
+pub const MIN_ELAPSED_WINDOW: Duration = Duration::from_millis(250);
+
+/// `Some(elapsed)` si la fenêtre est assez large pour juger la vitesse, `None` sinon.
+pub fn floor_elapsed(elapsed: Duration, min_window: Duration) -> Option<Duration> {
+    if elapsed < min_window {
+        None
+    } else {
+        Some(elapsed)
+    }
+}
+
 /// Vrai si le déplacement de `prev` à `next` en `elapsed` est plausible à `max_speed_mps` près.
 /// `elapsed == Duration::ZERO` est toujours plausible : pas assez d'information pour juger
 /// (couvre la 1re position reçue après un `Join`, qui n'a pas de référence temporelle).
@@ -39,9 +57,105 @@ pub fn is_plausible_move(
     speed <= max_speed_mps
 }
 
+/// Distance absolue (mètres) au-delà de laquelle un déplacement est un téléport franc,
+/// physiquement impossible quel que soit le temps écoulé — jugé sur la DISTANCE, jamais la vitesse,
+/// donc insensible au dénominateur (`elapsed`) qui peut être faussé par le drain de tick.
+/// 200 m couvre largement tout déplacement légitime entre deux updates 20 Hz (même à 60 m/s,
+/// 3 m entre deux updates) tout en attrapant tout warp/noclip. Ajustable au playtest.
+pub const RED_TELEPORT_M: f32 = 200.0;
+
+/// Verdict d'un déplacement. `Green` = accepté silencieusement. `Orange` = accepté mais compté
+/// comme anomalie (escalade kick côté gateway). `Red` = téléport franc → correction forcée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveVerdict {
+    Green,
+    Orange,
+    Red,
+}
+
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let dz = b[2] - a[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Classe un déplacement `prev -> next` en `elapsed`. Ordre : la DISTANCE absolue prime (un
+/// téléport franc est rouge quelle que soit la fenêtre) ; sinon, sous le plancher temporel on ne
+/// juge pas (vert) ; sinon la vitesse plafonnée tranche vert/orange.
+pub fn classify_move(prev: [f32; 3], next: [f32; 3], elapsed: Duration) -> MoveVerdict {
+    if distance(prev, next) > RED_TELEPORT_M {
+        return MoveVerdict::Red;
+    }
+    match floor_elapsed(cap_elapsed(elapsed, MAX_ELAPSED_WINDOW), MIN_ELAPSED_WINDOW) {
+        None => MoveVerdict::Green, // fenêtre trop courte ou nulle : pas assez d'info pour juger
+        Some(capped) => {
+            if is_plausible_move(prev, next, capped, MAX_PLAYER_SPEED_MPS) {
+                MoveVerdict::Green
+            } else {
+                MoveVerdict::Orange
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_green_for_a_normal_walk() {
+        // 1 m en 300 ms = 3.3 m/s.
+        assert_eq!(
+            classify_move([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], Duration::from_millis(300)),
+            MoveVerdict::Green
+        );
+    }
+
+    #[test]
+    fn classify_green_when_window_below_floor_even_if_distance_looks_fast() {
+        // Cas 48 µs du playtest : sous le plancher → on ne juge pas → Green (mais distance modérée,
+        // pas un téléport : donc PAS Red).
+        assert_eq!(
+            classify_move([0.0, 0.0, 0.0], [0.5, 0.0, 0.0], Duration::from_micros(48)),
+            MoveVerdict::Green
+        );
+    }
+
+    #[test]
+    fn classify_orange_for_moderate_overspeed() {
+        // 40 m en 300 ms = 133 m/s : au-dessus de 60 (seuil vitesse) mais 40 m < RED_TELEPORT_M.
+        assert_eq!(
+            classify_move(
+                [0.0, 0.0, 0.0],
+                [40.0, 0.0, 0.0],
+                Duration::from_millis(300)
+            ),
+            MoveVerdict::Orange
+        );
+    }
+
+    #[test]
+    fn classify_red_for_a_blatant_teleport_even_below_the_floor() {
+        // Distance absolue > RED_TELEPORT_M : rouge quelle que soit la fenêtre (insensible au dénominateur).
+        assert_eq!(
+            classify_move(
+                [0.0, 0.0, 0.0],
+                [10_000.0, 0.0, 0.0],
+                Duration::from_micros(48)
+            ),
+            MoveVerdict::Red
+        );
+    }
+
+    #[test]
+    fn classify_green_on_first_position_without_reference() {
+        // elapsed ZERO (1re position après Join) et distance modérée → Green.
+        assert_eq!(
+            classify_move([0.0, 0.0, 0.0], [5.0, 0.0, 0.0], Duration::ZERO),
+            MoveVerdict::Green
+        );
+    }
 
     #[test]
     fn a_plausible_walk_is_accepted() {
@@ -140,5 +254,31 @@ mod tests {
             capped_elapsed,
             MAX_PLAYER_SPEED_MPS
         ));
+    }
+
+    #[test]
+    fn floor_elapsed_rejects_a_sub_threshold_window() {
+        // Deux PositionUpdate drainés dans le même tick Gateway : elapsed de l'ordre de la µs.
+        assert_eq!(
+            floor_elapsed(Duration::from_micros(48), MIN_ELAPSED_WINDOW),
+            None
+        );
+    }
+
+    #[test]
+    fn floor_elapsed_passes_a_normal_window() {
+        assert_eq!(
+            floor_elapsed(Duration::from_millis(300), MIN_ELAPSED_WINDOW),
+            Some(Duration::from_millis(300))
+        );
+    }
+
+    #[test]
+    fn floor_elapsed_boundary_is_inclusive_at_the_window() {
+        // Exactement à la limite : jugé (Some), cohérent avec la limite inclusive de is_plausible_move.
+        assert_eq!(
+            floor_elapsed(MIN_ELAPSED_WINDOW, MIN_ELAPSED_WINDOW),
+            Some(MIN_ELAPSED_WINDOW)
+        );
     }
 }

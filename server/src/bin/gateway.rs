@@ -74,6 +74,12 @@ async fn main() -> std::io::Result<()> {
     };
     let store_path = manifest.runtime.store_path.clone();
     let spawn = manifest.runtime.spawn;
+    if server::manifest::spawn_is_unconfigured(spawn) {
+        tracing::warn!(
+            "spawn non configuré ([0,0,0]) : les nouveaux joueurs naîtront à l'origine du monde — \
+             régler `[runtime] spawn = [x, y, z]` dans le manifeste"
+        );
+    }
     let listen = manifest.runtime.gateway.listen_addr.clone();
 
     // Bascule FileStore/PostgresStore selon identity.public (câblage runtime, design stockage
@@ -205,11 +211,12 @@ async fn main() -> std::io::Result<()> {
         let listen_addr = std::env::var("TESSERA_INTERNAL_ATTESTATION_LISTEN")
             .unwrap_or_else(|_| "127.0.0.1:9090".to_string());
         match server::attestation_display::describe(&attestation) {
-            Some((sub, exp)) => {
+            Ok((sub, exp)) => {
                 tracing::info!(slug = %sub, exp_epoch = exp, "attestation officielle active")
             }
-            None => tracing::warn!(
-                "TESSERA_OFFICIAL_ATTESTATION présente mais illisible (payload non décodable)"
+            Err(e) => tracing::warn!(
+                "TESSERA_OFFICIAL_ATTESTATION illisible : {e:?} \
+                 (attendu : JWT 3 segments, payload base64url no-pad avec sub+exp)"
             ),
         }
         let token = attestation.clone();

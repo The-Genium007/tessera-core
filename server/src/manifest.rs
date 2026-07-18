@@ -453,6 +453,13 @@ pub fn assemble_postgres_url_from_components(components: PostgresComponents<'_>)
     Some(url)
 }
 
+/// Vrai si `spawn` vaut exactement l'origine du monde `[0,0,0]` — presque toujours un spawn NON
+/// configuré (défaut serde), pas un choix : un nouveau joueur y naîtrait au centre du monde. Sert
+/// à logger un WARN de boot (playtest 2026-07-17 : `placement décidé [0,0,0]`).
+pub fn spawn_is_unconfigured(spawn: [f32; 3]) -> bool {
+    spawn == [0.0, 0.0, 0.0]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +510,12 @@ mod tests {
         assert_eq!(m.identity.id, "tessera-dev-01");
         assert_eq!(m.runtime.gateway.advertise_addr, "51.38.189.234:27020");
         assert_eq!(m.runtime.radius.base, 25.0);
+    }
+
+    #[test]
+    fn spawn_unconfigured_detects_exact_origin() {
+        assert!(spawn_is_unconfigured([0.0, 0.0, 0.0]));
+        assert!(!spawn_is_unconfigured([-1431.17, 1302.27, 27.06]));
     }
 
     #[test]

@@ -7,7 +7,8 @@ use crate::internal_net::{decode_server_send, event_to_client_event_frame};
 use crate::transport::{Transport, TransportEvent};
 use protocol::{
     CommandResult, CommandResultArgs, Kicked, KickedArgs, PermissionSync, PermissionSyncArgs,
-    ServerEnvelope, ServerEnvelopeArgs, ServerMsg, WorldState, WorldStateArgs,
+    PositionCorrection, PositionCorrectionArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
+    ShardAssignment, ShardAssignmentArgs, Vec3, WorldState, WorldStateArgs,
 };
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -268,6 +269,57 @@ pub fn encode_permission_sync(nodes: &[String]) -> Vec<u8> {
     b.finished_data().to_vec()
 }
 
+/// Encode un `ServerEnvelope{PositionCorrection}`. `reason` : 0=Spawn, 1=AntiCheat, 2=Resync —
+/// TOUJOURS explicite (le défaut FlatBuffers 0 mentirait silencieusement). Le client SE PLACE à
+/// `position`/`yaw` à la réception (téléportation), quel que soit `reason`.
+pub fn encode_position_correction(pos: [f32; 3], yaw: f32, reason: u8) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let v = Vec3::new(pos[0], pos[1], pos[2]);
+    let pc = PositionCorrection::create(
+        &mut b,
+        &PositionCorrectionArgs {
+            position: Some(&v),
+            yaw,
+            reason,
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::PositionCorrection,
+            msg: Some(pc.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Encode un `ServerEnvelope{ShardAssignment}` — le placement autoritaire décidé par le serveur
+/// pour CE client (topology.locate), poussé au HUD pour qu'il compare à son calcul local et
+/// détecte un décalage (spec HUD moniteur de cohérence, 2026-07-18).
+pub fn encode_shard_assignment(authoritative: &str, overlaps: &[String]) -> Vec<u8> {
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let authoritative_str = b.create_string(authoritative);
+    let overlap_strs: Vec<_> = overlaps.iter().map(|s| b.create_string(s)).collect();
+    let overlaps_vec = b.create_vector(&overlap_strs);
+    let sa = ShardAssignment::create(
+        &mut b,
+        &ShardAssignmentArgs {
+            authoritative: Some(authoritative_str),
+            overlaps: Some(overlaps_vec),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::ShardAssignment,
+            msg: Some(sa.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
 /// Comptes à re-synchroniser (nouveau `PermissionSync`) après une commande admin réussie — soit
 /// le compte directement visé (`/promote`, `/grant`...), soit tous les comptes du groupe édité
 /// (`/groupgrant`, `/grouprevoke` — leur ensemble effectif de permissions change sans qu'aucun
@@ -474,6 +526,7 @@ pub fn cleanup_client_state(
     last_pos: &mut HashMap<u64, [f32; 3]>,
     last_pos_at: &mut HashMap<u64, std::time::Instant>,
     bypass_warned_at: &mut HashMap<u64, std::time::Instant>,
+    anomaly_trackers: &mut HashMap<u64, AnomalyTracker>,
     ranks: &mut HashMap<u64, crate::handoff::Rank>,
     permissions: &mut HashMap<u64, Vec<String>>,
     residence: &mut HashMap<u64, Option<[f32; 3]>>,
@@ -497,6 +550,7 @@ pub fn cleanup_client_state(
     last_pos.remove(&cid);
     last_pos_at.remove(&cid);
     bypass_warned_at.remove(&cid);
+    anomaly_trackers.remove(&cid);
     ranks.remove(&cid);
     permissions.remove(&cid);
     residence.remove(&cid);
@@ -625,51 +679,66 @@ pub fn reject_join_if_server_full<T: Transport>(
     }
 }
 
-/// Décide si une `PositionUpdate` doit être rejetée pour cause de vitesse implausible.
-/// `plausible` est déjà calculé par `is_plausible_move`/`cap_elapsed` (anticheat.rs, seuils
-/// inchangés, bypass GameMaster déjà tranché avant l'appel) — cette fonction ne fait que réagir à
-/// un rejet : logge et incrémente `metrics.rejected_messages_total` (métrique F3). Pas de kick ici
-/// (contrairement au rate-limit/serveur plein) : le message est juste ignoré, la position n'est
-/// pas mise à jour par l'appelant. Renvoie `true` si le message doit être considéré comme consommé
-/// (l'appelant doit `continue` sans mettre à jour `last_pos`/`last_pos_at`/placement).
-/// Décide si un mouvement doit être considéré comme plausible : un `Rank::GameMaster` contourne
-/// systématiquement la vérification anti-triche (bypass playtest voulu, staff/MJ — Moderator et
-/// Player n'en bénéficient jamais) ; sinon, `is_plausible_move`/`cap_elapsed` tranchent (une
-/// première position après Join, `last` = `None`, est toujours acceptée). Extrait de la boucle de
-/// `gateway_main` pour être testable sans `--features gns` (même pattern que
-/// `reject_position_if_implausible`/`apply_rate_limit_decision`).
-pub fn resolve_move_plausibility(
-    rank: crate::handoff::Rank,
-    last: Option<([f32; 3], std::time::Duration)>,
-    current: [f32; 3],
-) -> bool {
-    if rank == crate::handoff::Rank::GameMaster {
-        return true;
-    }
-    match last {
-        Some((prev, elapsed)) => crate::anticheat::is_plausible_move(
-            prev,
-            current,
-            crate::anticheat::cap_elapsed(elapsed, crate::anticheat::MAX_ELAPSED_WINDOW),
-            crate::anticheat::MAX_PLAYER_SPEED_MPS,
-        ),
-        None => true,
+/// Nombre d'anomalies (zone orange) dans `ANOMALY_WINDOW` au-delà duquel le client est kické —
+/// tolère le jitter/faux positif isolé, sanctionne le speedhack soutenu. Ajustable au playtest.
+pub const ANOMALY_KICK_THRESHOLD: u32 = 20;
+/// Fenêtre glissante d'accumulation des anomalies (voir `AnomalyTracker`).
+pub const ANOMALY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Compteur glissant d'anomalies pour UN client. Réinitialisé dès que la dernière anomalie
+/// enregistrée sort de `ANOMALY_WINDOW` (fenêtre glissante simple, pas un ring buffer : suffisant
+/// pour une escalade, pas une métrique de précision).
+#[derive(Debug, Clone)]
+pub struct AnomalyTracker {
+    count: u32,
+    window_start: Option<std::time::Instant>,
+}
+
+impl AnomalyTracker {
+    pub fn new() -> Self {
+        Self {
+            count: 0,
+            window_start: None,
+        }
     }
 }
 
-pub fn reject_position_if_implausible(
-    plausible: bool,
-    cid: u64,
-    metrics: &crate::metrics::Metrics,
-) -> bool {
-    if !plausible {
-        tracing::warn!(client = cid, "PositionUpdate rejeté (vitesse implausible)");
-        metrics
-            .rejected_messages_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        true
-    } else {
-        false
+impl Default for AnomalyTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Enregistre une anomalie à `now`. Renvoie `true` si le seuil de kick est atteint.
+pub fn record_anomaly(tracker: &mut AnomalyTracker, now: std::time::Instant) -> bool {
+    match tracker.window_start {
+        Some(start) if now.duration_since(start) <= ANOMALY_WINDOW => {
+            tracker.count += 1;
+        }
+        _ => {
+            tracker.window_start = Some(now);
+            tracker.count = 1;
+        }
+    }
+    tracker.count >= ANOMALY_KICK_THRESHOLD
+}
+
+/// Verdict d'un déplacement pour un client de rang `rank`. Un `GameMaster` est toujours vert
+/// (bypass playtest voulu, staff/MJ — Moderator et Player n'en bénéficient jamais). Sinon,
+/// `classify_move` tranche (une 1re position, `last` = `None`, est verte). Remplace
+/// `resolve_move_plausibility` (retirée au recâblage de la boucle).
+pub fn resolve_move_verdict(
+    rank: crate::handoff::Rank,
+    last: Option<([f32; 3], std::time::Duration)>,
+    current: [f32; 3],
+) -> crate::anticheat::MoveVerdict {
+    use crate::anticheat::MoveVerdict;
+    if rank == crate::handoff::Rank::GameMaster {
+        return MoveVerdict::Green;
+    }
+    match last {
+        Some((prev, elapsed)) => crate::anticheat::classify_move(prev, current, elapsed),
+        None => MoveVerdict::Green,
     }
 }
 
@@ -697,7 +766,7 @@ pub async fn gateway_main(
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
         extract_admin_command, extract_join_fields, extract_leave, extract_position,
-        extract_time_report,
+        extract_position_yaw, extract_time_report,
     };
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
@@ -754,6 +823,9 @@ pub async fn gateway_main(
     // veut justement pouvoir suivre. Une ligne au plus toutes les BYPASS_LOG_INTERVAL suffit à
     // documenter que le contournement est actif sans inonder la sortie.
     let mut bypass_warned_at: HashMap<u64, std::time::Instant> = HashMap::new();
+    // Anomalies de mouvement (zone orange) par client : escalade vers un kick au-delà de
+    // ANOMALY_KICK_THRESHOLD dans ANOMALY_WINDOW (cf. AnomalyTracker/record_anomaly).
+    let mut anomaly_trackers: HashMap<u64, AnomalyTracker> = HashMap::new();
     const BYPASS_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
     let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
     // Fenêtre de rate-limit par client (audit prod 2026-07-03 §5.4).
@@ -930,6 +1002,7 @@ pub async fn gateway_main(
                         &mut last_pos,
                         &mut last_pos_at,
                         &mut bypass_warned_at,
+                        &mut anomaly_trackers,
                         &mut ranks,
                         &mut permissions,
                         &mut residence,
@@ -1091,12 +1164,55 @@ pub async fn gateway_main(
                         (Some(prev), Some(at)) => Some((prev, now.duration_since(at))),
                         _ => None,
                     };
-                    let plausible = resolve_move_plausibility(rank, last, [x, y, z]);
-                    if reject_position_if_implausible(plausible, cid, &metrics) {
-                        continue;
+                    match resolve_move_verdict(rank, last, [x, y, z]) {
+                        crate::anticheat::MoveVerdict::Green => {
+                            last_pos.insert(cid, [x, y, z]);
+                            last_pos_at.insert(cid, now);
+                        }
+                        crate::anticheat::MoveVerdict::Orange => {
+                            // On SUIT le client (RP-safe : jamais de rubber-band sur un faux
+                            // positif), on avance last_pos (le joueur bouge aux yeux des autres,
+                            // la sauvegarde reste fraîche — corrige P3), et on compte l'anomalie.
+                            last_pos.insert(cid, [x, y, z]);
+                            last_pos_at.insert(cid, now);
+                            metrics
+                                .rejected_messages_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let tracker = anomaly_trackers.entry(cid).or_default();
+                            if record_anomaly(tracker, now) {
+                                tracing::warn!(
+                                    client = cid,
+                                    "kick : anomalies de mouvement répétées (speedhack probable)"
+                                );
+                                client.send(cid, &encode_kicked("mouvement incohérent répété"));
+                                client.disconnect(cid);
+                                anomaly_trackers.remove(&cid);
+                                continue;
+                            }
+                            tracing::warn!(
+                                client = cid,
+                                "PositionUpdate anomalie modérée (acceptée, comptée)"
+                            );
+                        }
+                        crate::anticheat::MoveVerdict::Red => {
+                            // Téléport franc : on NE met PAS à jour last_pos (la dernière position
+                            // valide est celle qu'on réimpose) et on renvoie une correction au client.
+                            metrics
+                                .rejected_messages_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let anchor = last_pos.get(&cid).copied().unwrap_or([x, y, z]);
+                            let yaw = extract_position_yaw(data).unwrap_or(0.0);
+                            client.send(
+                                cid,
+                                &encode_position_correction(anchor, yaw, 1 /* AntiCheat */),
+                            );
+                            tracing::warn!(
+                                client = cid,
+                                "PositionUpdate rejeté (téléport) → correction envoyée"
+                            );
+                            continue;
+                        }
                     }
-                    last_pos.insert(cid, [x, y, z]);
-                    last_pos_at.insert(cid, now);
                     // Écriture hot-state (Décision 3, design stockage 2026-07-09) : à chaque
                     // PositionUpdate ACCEPTÉ, taguée par la clé effective (jamais display_name).
                     // Un client sans clé effective connue (ne devrait pas arriver après un Join
@@ -1111,49 +1227,71 @@ pub async fn gateway_main(
                     }
                     let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
                     placement = Some(topology.locate(x, y, r));
-                    if let (Some(sl), Some(next)) = (slog.as_mut(), placement.as_ref()) {
-                        for c in crate::session_log::diff_placement(prev_placements.get(&cid), next)
-                        {
-                            use crate::session_log::{PlacementChange, SessionEvent};
-                            let ev = match c {
-                                PlacementChange::Handoff { from, to } => SessionEvent::Handoff {
-                                    client: cid,
-                                    from,
-                                    to,
-                                    x,
-                                    y,
-                                    z,
-                                },
-                                PlacementChange::BufferEnter { shard } => {
-                                    SessionEvent::BufferEnter { client: cid, shard }
+                    if let Some(next) = placement.as_ref() {
+                        let changes =
+                            crate::session_log::diff_placement(prev_placements.get(&cid), next);
+                        // Poussé au client dès qu'un changement de placement est détecté (y compris
+                        // le tout premier après Join, où prev_placements.get(&cid) == None) : le HUD
+                        // compare ce placement autoritaire à son calcul local et signale un décalage
+                        // persistant (spec HUD moniteur de cohérence, 2026-07-18).
+                        if !changes.is_empty() {
+                            client.send(
+                                cid,
+                                &encode_shard_assignment(&next.authoritative, &next.overlaps),
+                            );
+                        }
+                        if let Some(sl) = slog.as_mut() {
+                            for c in changes {
+                                use crate::session_log::{PlacementChange, SessionEvent};
+                                let ev = match c {
+                                    PlacementChange::Handoff { from, to } => {
+                                        SessionEvent::Handoff {
+                                            client: cid,
+                                            from,
+                                            to,
+                                            x,
+                                            y,
+                                            z,
+                                        }
+                                    }
+                                    PlacementChange::BufferEnter { shard } => {
+                                        SessionEvent::BufferEnter { client: cid, shard }
+                                    }
+                                    PlacementChange::BufferExit { shard } => {
+                                        SessionEvent::BufferExit { client: cid, shard }
+                                    }
+                                };
+                                // En plus du journal JSONL (fichier, pas exploitable sans accès au
+                                // volume monté), une ligne tracing pour ce même événement : visible
+                                // dans les logs stdout du conteneur, donc récupérable à distance via
+                                // l'API Dokploy (compose.readLogs) sans SSH — utile pour suivre les
+                                // franchissements de shard en direct pendant un playtest.
+                                let name =
+                                    display_names.get(&cid).map(String::as_str).unwrap_or("?");
+                                match &ev {
+                                    crate::session_log::SessionEvent::Handoff {
+                                        from, to, ..
+                                    } => {
+                                        tracing::info!(
+                                            client = cid,
+                                            %name,
+                                            "Handoff : {name} passe de {from} à {to} ({x:.1}, {y:.1}, {z:.1})"
+                                        );
+                                    }
+                                    crate::session_log::SessionEvent::BufferEnter {
+                                        shard, ..
+                                    } => {
+                                        tracing::info!(client = cid, %name, "{name} entre en zone tampon de {shard}");
+                                    }
+                                    crate::session_log::SessionEvent::BufferExit {
+                                        shard, ..
+                                    } => {
+                                        tracing::info!(client = cid, %name, "{name} sort de la zone tampon de {shard}");
+                                    }
+                                    _ => {}
                                 }
-                                PlacementChange::BufferExit { shard } => {
-                                    SessionEvent::BufferExit { client: cid, shard }
-                                }
-                            };
-                            // En plus du journal JSONL (fichier, pas exploitable sans accès au
-                            // volume monté), une ligne tracing pour ce même événement : visible
-                            // dans les logs stdout du conteneur, donc récupérable à distance via
-                            // l'API Dokploy (compose.readLogs) sans SSH — utile pour suivre les
-                            // franchissements de shard en direct pendant un playtest.
-                            let name = display_names.get(&cid).map(String::as_str).unwrap_or("?");
-                            match &ev {
-                                crate::session_log::SessionEvent::Handoff { from, to, .. } => {
-                                    tracing::info!(
-                                        client = cid,
-                                        %name,
-                                        "Handoff : {name} passe de {from} à {to} ({x:.1}, {y:.1}, {z:.1})"
-                                    );
-                                }
-                                crate::session_log::SessionEvent::BufferEnter { shard, .. } => {
-                                    tracing::info!(client = cid, %name, "{name} entre en zone tampon de {shard}");
-                                }
-                                crate::session_log::SessionEvent::BufferExit { shard, .. } => {
-                                    tracing::info!(client = cid, %name, "{name} sort de la zone tampon de {shard}");
-                                }
-                                _ => {}
+                                sl.write(&ev);
                             }
-                            sl.write(&ev);
                         }
                         prev_placements.insert(cid, next.clone());
                     }
@@ -1299,6 +1437,7 @@ pub async fn gateway_main(
                         &mut last_pos,
                         &mut last_pos_at,
                         &mut bypass_warned_at,
+                        &mut anomaly_trackers,
                         &mut ranks,
                         &mut permissions,
                         &mut residence,
@@ -1434,6 +1573,40 @@ mod tests {
         assert_eq!(env.msg_type(), ServerMsg::Kicked);
         let kicked = env.msg_as_kicked().unwrap();
         assert_eq!(kicked.reason(), Some("serveur plein"));
+    }
+
+    #[test]
+    fn position_correction_roundtrips_position_yaw_reason() {
+        let bytes = encode_position_correction([1.0, 2.0, 3.0], 90.0, 1);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::PositionCorrection);
+        let pc = env.msg_as_position_correction().unwrap();
+        assert_eq!(pc.position().unwrap().x(), 1.0);
+        assert_eq!(pc.position().unwrap().y(), 2.0);
+        assert_eq!(pc.position().unwrap().z(), 3.0);
+        assert_eq!(pc.yaw(), 90.0);
+        assert_eq!(pc.reason(), 1);
+    }
+
+    #[test]
+    fn shard_assignment_roundtrips_authoritative_and_overlaps() {
+        let bytes =
+            encode_shard_assignment("group-1", &["group-0".to_string(), "group-2".to_string()]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), ServerMsg::ShardAssignment);
+        let sa = env.msg_as_shard_assignment().unwrap();
+        assert_eq!(sa.authoritative(), Some("group-1"));
+        let overlaps: Vec<&str> = sa.overlaps().unwrap().iter().collect();
+        assert_eq!(overlaps, vec!["group-0", "group-2"]);
+    }
+
+    #[test]
+    fn shard_assignment_roundtrips_empty_overlaps() {
+        let bytes = encode_shard_assignment("group-0", &[]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        let sa = env.msg_as_shard_assignment().unwrap();
+        assert_eq!(sa.authoritative(), Some("group-0"));
+        assert_eq!(sa.overlaps().unwrap().len(), 0);
     }
 
     #[test]
@@ -1680,36 +1853,6 @@ mod tests {
             0
         );
         assert!(client.take_disconnected().is_empty());
-    }
-
-    #[test]
-    fn reject_position_if_implausible_counts_metric_when_rejected() {
-        let metrics = crate::metrics::Metrics::new();
-
-        let rejected = reject_position_if_implausible(false, 42, &metrics);
-
-        assert!(rejected);
-        assert_eq!(
-            metrics
-                .rejected_messages_total
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
-    }
-
-    #[test]
-    fn reject_position_if_implausible_accepts_plausible_move_without_metric() {
-        let metrics = crate::metrics::Metrics::new();
-
-        let rejected = reject_position_if_implausible(true, 42, &metrics);
-
-        assert!(!rejected);
-        assert_eq!(
-            metrics
-                .rejected_messages_total
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
     }
 
     fn join_payload() -> Vec<u8> {
@@ -2557,6 +2700,8 @@ mod tests {
         last_pos_at.insert(cid, std::time::Instant::now());
         let mut bypass_warned_at = HashMap::new();
         bypass_warned_at.insert(cid, std::time::Instant::now());
+        let mut anomaly_trackers = HashMap::new();
+        anomaly_trackers.insert(cid, AnomalyTracker::new());
         let mut ranks = HashMap::new();
         ranks.insert(cid, Rank::Player);
         let mut permissions = HashMap::new();
@@ -2586,6 +2731,7 @@ mod tests {
             &mut last_pos,
             &mut last_pos_at,
             &mut bypass_warned_at,
+            &mut anomaly_trackers,
             &mut ranks,
             &mut permissions,
             &mut residence,
@@ -2892,38 +3038,64 @@ mod tests {
     }
 
     #[test]
-    fn gamemaster_rank_bypasses_anticheat_even_on_an_implausible_teleport() {
+    fn resolve_move_verdict_bypasses_gamemaster_but_not_moderator_or_player() {
+        use crate::anticheat::MoveVerdict;
         use crate::handoff::Rank;
-        // Exerce le VRAI code de décision (resolve_move_plausibility), pas une comparaison de
-        // motif isolée : un GameMaster qui téléporte à une vitesse totalement implausible
-        // (10 km en 1 tick) doit quand même être accepté — c'est le bypass voulu (rôle
-        // staff/MJ), documenté ici pour qu'il ne soit jamais "corrigé" par accident.
+        // Exerce le VRAI code de décision (resolve_move_verdict) : un GameMaster qui téléporte
+        // (10 km en 1 tick, distance > RED_TELEPORT_M) doit rester Green — bypass voulu (staff/MJ),
+        // jamais "corrigé" par accident. Les autres rangs tombent en Red (téléport franc).
         let prev = [0.0, 0.0, 0.0];
         let teleport = [10_000.0, 0.0, 0.0];
         let elapsed = std::time::Duration::from_millis(50); // un seul tick à 20 Hz
 
-        let plausible_gm =
-            resolve_move_plausibility(Rank::GameMaster, Some((prev, elapsed)), teleport);
-        assert!(
-            plausible_gm,
-            "GameMaster doit être accepté même sur un mouvement implausible"
+        assert_eq!(
+            resolve_move_verdict(Rank::GameMaster, Some((prev, elapsed)), teleport),
+            MoveVerdict::Green,
+            "GameMaster doit rester Green même sur un téléport implausible"
         );
-
-        // Le même mouvement, pour un rang normal, doit être rejeté — preuve que le test
-        // exercerait bien une régression si le bypass disparaissait par erreur.
-        let plausible_player =
-            resolve_move_plausibility(Rank::Player, Some((prev, elapsed)), teleport);
-        assert!(
-            !plausible_player,
+        assert_eq!(
+            resolve_move_verdict(Rank::Player, Some((prev, elapsed)), teleport),
+            MoveVerdict::Red,
             "un joueur normal ne doit pas bénéficier du bypass"
         );
-
-        let plausible_mod =
-            resolve_move_plausibility(Rank::Moderator, Some((prev, elapsed)), teleport);
-        assert!(
-            !plausible_mod,
+        assert_eq!(
+            resolve_move_verdict(Rank::Moderator, Some((prev, elapsed)), teleport),
+            MoveVerdict::Red,
             "un modérateur ne doit pas bénéficier du bypass (réservé au GameMaster)"
         );
+    }
+
+    #[test]
+    fn anomalies_below_threshold_do_not_kick() {
+        let mut t = AnomalyTracker::new();
+        let now = std::time::Instant::now();
+        for _ in 0..(ANOMALY_KICK_THRESHOLD - 1) {
+            assert!(!record_anomaly(&mut t, now));
+        }
+    }
+
+    #[test]
+    fn anomaly_at_threshold_triggers_kick() {
+        let mut t = AnomalyTracker::new();
+        let now = std::time::Instant::now();
+        let mut kicked = false;
+        for _ in 0..ANOMALY_KICK_THRESHOLD {
+            kicked = record_anomaly(&mut t, now);
+        }
+        assert!(
+            kicked,
+            "la N-ième anomalie dans la fenêtre doit déclencher le kick"
+        );
+    }
+
+    #[test]
+    fn anomalies_outside_window_do_not_accumulate() {
+        let mut t = AnomalyTracker::new();
+        let t0 = std::time::Instant::now();
+        record_anomaly(&mut t, t0);
+        let later = t0 + ANOMALY_WINDOW + std::time::Duration::from_secs(1);
+        // Après expiration de la fenêtre, on repart de compteur bas : pas de kick sur une 2e isolée.
+        assert!(!record_anomaly(&mut t, later));
     }
 
     #[test]

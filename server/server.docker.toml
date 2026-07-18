@@ -20,6 +20,13 @@ public = true
 whitelist = false
 store_path = "/data/players.json"
 
+# Point de spawn par défaut pour un joueur neuf (sans position/résidence connue). X/Y/Z = repère
+# monde du jeu (GetWorldPosition brut). Coordonnée Night City réelle et testée (zone de sauvegarde
+# observée au playtest 2026-07-17). CRITIQUE : sans cette ligne, le défaut est [0,0,0] = l'origine
+# du monde, où naissaient les joueurs neufs (bug P5, `placement décidé [0,0,0]` dans les logs live).
+# Le Gateway logue désormais un WARN de boot si le spawn vaut [0,0,0].
+spawn = [-1431.17, 1302.27, 27.06]
+
 [runtime.gateway]
 listen_addr = "0.0.0.0:27020"
 advertise_addr = "51.38.189.234:27020"

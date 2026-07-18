@@ -15,11 +15,12 @@ fn main() {
         let listen_addr = std::env::var("TESSERA_INTERNAL_ATTESTATION_LISTEN")
             .unwrap_or_else(|_| "127.0.0.1:9090".to_string());
         match server::attestation_display::describe(&attestation) {
-            Some((sub, exp)) => {
+            Ok((sub, exp)) => {
                 tracing::info!(slug = %sub, exp_epoch = exp, "attestation officielle active")
             }
-            None => tracing::warn!(
-                "TESSERA_OFFICIAL_ATTESTATION présente mais illisible (payload non décodable)"
+            Err(e) => tracing::warn!(
+                "TESSERA_OFFICIAL_ATTESTATION illisible : {e:?} \
+                 (attendu : JWT 3 segments, payload base64url no-pad avec sub+exp)"
             ),
         }
         let token = attestation.clone();

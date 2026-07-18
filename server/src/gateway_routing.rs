@@ -35,6 +35,18 @@ pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
     Some((p.x(), p.y(), p.z()))
 }
 
+/// Comme `extract_position` mais renvoie le `yaw` du `PositionUpdate` — nécessaire pour renvoyer
+/// une `PositionCorrection` (rubber-band zone rouge) fidèle à l'orientation du joueur. `None` si
+/// l'enveloppe n'est pas un `PositionUpdate` décodable.
+pub fn extract_position_yaw(client_payload: &[u8]) -> Option<f32> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::PositionUpdate {
+        return None;
+    }
+    let pu = env.msg_as_position_update()?;
+    Some(pu.yaw())
+}
+
 /// Construit le payload client d'un `PositionUpdate` — utilisé pour re-semer, sur un shard qui
 /// vient de perdre son état, la dernière position connue d'un client par le Gateway (le client
 /// réel n'a pas renvoyé cette position, elle est reconstruite depuis `last_pos`). Yaw à 0 : une
@@ -315,6 +327,32 @@ mod tests {
     }
 
     #[test]
+    fn extract_position_yaw_reads_yaw_and_ignores_join() {
+        let mut b = FlatBufferBuilder::new();
+        let pos = Vec3::new(1.0, 2.0, 3.0);
+        let pu = PositionUpdate::create(
+            &mut b,
+            &PositionUpdateArgs {
+                position: Some(&pos),
+                yaw: 1.25,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::PositionUpdate,
+                msg: Some(pu.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let payload = b.finished_data().to_vec();
+
+        assert_eq!(extract_position_yaw(&payload), Some(1.25));
+        assert_eq!(extract_position_yaw(&client_join()), None);
+        assert_eq!(extract_position_yaw(&[0, 1, 2]), None); // garbage → None
+    }
+
+    #[test]
     fn extract_join_fields_reads_display_name_and_token() {
         assert_eq!(
             extract_join_fields(&client_join()),
@@ -383,6 +421,79 @@ mod tests {
              (« kick : version protocole incompatible ») et le jeu est injouable"
         );
         assert!(crate::gateway::resolve_protocol_version(version).is_ok());
+    }
+
+    // ── Fil figé ShardAssignment / PositionCorrection (server → client) ──────────────────────
+    //
+    // NUANCE DE DIRECTION vs le `Join` ci-dessus. `Join` va client→C++ → serveur→Rust : on fige
+    // les octets du VRAI encodeur C++ et on prouve que le décodeur Rust les lit — le fil traverse
+    // bien deux langages dans le test. `ShardAssignment` et `PositionCorrection` vont dans l'AUTRE
+    // sens : serveur→Rust (encode) → client→C++ (décode). Refiger ici des octets et les redécoder
+    // en Rust serait exactement la tautologie « encode+décode dans le même langage » que le test
+    // Join dénonce — ça ne prouverait rien sur le fil réel.
+    //
+    // Ce que ce test PEUT garder depuis macOS, sans PC : (1) l'encodeur serveur reste stable
+    // octet-pour-octet — tout changement de layout devient un choix conscient qui met à jour ces
+    // vecteurs ; (2) auto-cohérence de décodage Rust. Ce qu'il NE peut PAS prouver seul : que le
+    // décodeur C++ régénéré (`protocol_generated.h`, flatc 25.12.19) lit bien ces mêmes octets —
+    // ça, c'est le sens serveur→client, validé de bout en bout EN JEU (Étape 3 du round-trip :
+    // le client applique réellement la téléportation et le HUD affiche le shard serveur). Un test
+    // unitaire C++ figeant ces mêmes octets serait le garde idéal, mais le fork n'a pas encore de
+    // cible de test C++ (CMake ne build que le plugin) — suivi documenté, pas bloquant.
+    // Régénérer ces vecteurs : petit test `dump` appelant les deux encodeurs (cf. historique).
+    const SHARD_ASSIGNMENT_G1_OVL02: &[u8] = &[
+        0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x04, 0x00,
+        0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02,
+        0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
+        0x67, 0x72, 0x6f, 0x75, 0x70, 0x2d, 0x32, 0x00, 0x07, 0x00, 0x00, 0x00, 0x67, 0x72, 0x6f,
+        0x75, 0x70, 0x2d, 0x30, 0x00, 0x07, 0x00, 0x00, 0x00, 0x67, 0x72, 0x6f, 0x75, 0x70, 0x2d,
+        0x31, 0x00,
+    ];
+
+    // PositionCorrection{ position=(100.5, -20.25, 3.0), yaw=90.0, reason=0 }.
+    const POSITION_CORRECTION_SPAWN: &[u8] = &[
+        0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x06, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x14, 0x00, 0x04, 0x00,
+        0x10, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc9, 0x42, 0x00, 0x00, 0xa2, 0xc1, 0x00,
+        0x00, 0x40, 0x40, 0x00, 0x00, 0xb4, 0x42,
+    ];
+
+    #[test]
+    fn shard_assignment_wire_is_stable_and_matches_the_shared_vector() {
+        // (1) L'encodeur serveur produit EXACTEMENT le vecteur partagé (tripwire de dérive de
+        // layout — le test C++ du fork fige les mêmes octets).
+        assert_eq!(
+            crate::gateway::encode_shard_assignment(
+                "group-1",
+                &["group-0".to_string(), "group-2".to_string()]
+            ),
+            SHARD_ASSIGNMENT_G1_OVL02,
+            "layout ShardAssignment modifié : régénérer ce vecteur (test dump) et revalider le décodage en jeu"
+        );
+        // (2) Auto-cohérence : les octets se décodent aux bons champs.
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(SHARD_ASSIGNMENT_G1_OVL02).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::ShardAssignment);
+        let sa = env.msg_as_shard_assignment().unwrap();
+        assert_eq!(sa.authoritative(), Some("group-1"));
+        let overlaps: Vec<&str> = sa.overlaps().unwrap().iter().collect();
+        assert_eq!(overlaps, vec!["group-0", "group-2"]);
+    }
+
+    #[test]
+    fn position_correction_wire_is_stable_and_matches_the_shared_vector() {
+        assert_eq!(
+            crate::gateway::encode_position_correction([100.5, -20.25, 3.0], 90.0, 0),
+            POSITION_CORRECTION_SPAWN,
+            "layout PositionCorrection modifié : régénérer ce vecteur (test dump) et revalider le décodage en jeu"
+        );
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(POSITION_CORRECTION_SPAWN).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::PositionCorrection);
+        let pc = env.msg_as_position_correction().unwrap();
+        let pos = pc.position().unwrap();
+        assert_eq!((pos.x(), pos.y(), pos.z()), (100.5, -20.25, 3.0));
+        assert_eq!(pc.yaw(), 90.0);
+        assert_eq!(pc.reason(), 0);
     }
 
     #[test]

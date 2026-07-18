@@ -12,9 +12,18 @@
 -- Bloc shard (spec playtest-shards §#2, registre ③ "HUD debug CET") : lit shard-map.json, généré
 -- côté serveur par `tessera-directory topology export --manifest <toml> --out shard-map.json`
 -- (tessera-core/directory/src/shard_map.rs) à partir du manifeste de topologie — source unique de
--- vérité, pas de sync réseau (décision A de la spec). À régénérer/recopier ici si la topologie du
--- serveur change (triviale, topologie figée pour le playtest). X/Y serveur = X/Y monde du jeu
+-- vérité, pas de sync réseau (décision A de la spec). X/Y serveur = X/Y monde du jeu
 -- (GetWorldPosition brut), donc aucune transformation de repère nécessaire.
+--
+-- RÉGÉNÉRATION (ne JAMAIS éditer ce JSON à la main — piège "artefact assemblé à la main =
+-- artefact qui dérive", CLAUDE.md) : depuis la racine du dépôt, contre le manifeste DÉPLOYÉ,
+--   cargo run -p directory --bin tessera-directory -- topology export \
+--     --manifest tessera-core/server/server.docker.toml \
+--     --out tessera-core/client-mod/.../TesseraHUD/shard-map.json
+-- server.docker.toml porte server_count=10 → 10 cellules Voronoï (boundaryRings + name). L'ancien
+-- format BSP (minX/maxX/splits, 2 shards) avait dérivé et plantait ComputeShardInfo sur ipairs(nil)
+-- (playtest 2026-07-17 : le HUD n'affichait que X/Y/Z, jamais le shard). Régénérer après tout
+-- changement de topologie serveur.
 
 TesseraHUD = TesseraHUD or {}
 TesseraHUD.trafficOn = TesseraHUD.trafficOn or false
@@ -22,6 +31,25 @@ TesseraHUD.trafficDensity = TesseraHUD.trafficDensity or 1.0
 -- Masqué par défaut : ce HUD ne s'affiche qu'après activation via le hotkey CET ci-dessous
 -- (Paramètres > Input > Bindings > "Tessera HUD : afficher/masquer"), pas au démarrage du jeu.
 TesseraHUD.visible = false
+-- Détection de franchissement de shard : dernier shard résolu (frame précédente) + bannière
+-- transitoire armée au changement. Un simple label "Shard: X" qui change est facile à rater en
+-- jeu ; la bannière rend le franchissement explicite quelques secondes (playtest 2026-07-17 :
+-- "le franchissement ne s'indiquait pas"). Compté en frames (pas d'horloge : robuste au sandbox CET).
+TesseraHUD.lastShardId = TesseraHUD.lastShardId or nil
+TesseraHUD.lastShardName = TesseraHUD.lastShardName or nil
+TesseraHUD.crossingText = TesseraHUD.crossingText or nil
+TesseraHUD.crossingFrames = TesseraHUD.crossingFrames or 0
+-- Debounce anti-flicker du franchissement LOCAL : un point exactement sur une arête peut osciller
+-- entre deux shards d'une frame à l'autre. On ne confirme un changement qu'après
+-- CROSSING_CONFIRM_FRAMES stables dans le nouveau shard (spec HUD moniteur de cohérence, §3.4).
+TesseraHUD.pendingShardId = TesseraHUD.pendingShardId or nil
+TesseraHUD.pendingFrames = TesseraHUD.pendingFrames or 0
+local CROSSING_CONFIRM_FRAMES = 10
+-- Décalage local vs serveur : compteur de frames consécutives où les deux diffèrent. Alerte
+-- (rouge + log) seulement si ça persiste au-delà de DESYNC_PERSIST_FRAMES — un écart bref pendant
+-- un mouvement normal près d'une frontière est attendu (latence), pas un bug (spec §2).
+TesseraHUD.desyncFrames = TesseraHUD.desyncFrames or 0
+local DESYNC_PERSIST_FRAMES = 60 -- ~1s à 60 fps
 
 -- Log explicite à chaque étape clé (2026-07-07, demandé) : jusqu'ici, en cas de souci, la seule
 -- trace était "le mod a une erreur de chargement" dans la console CET, sans dire QUOI — impossible
@@ -136,13 +164,21 @@ function TesseraHUD:ComputeShardInfo(x, y)
   end
 
   if currentShard == nil then
-    return { shardId = "?", borderDist = nil, inBuffer = false }
+    return { shardId = "?", shardName = "?", borderDist = nil, inBuffer = false }
   end
 
   local borderDist = nearestEdgeDist(x, y, currentShard)
   local inBuffer = borderDist ~= nil and borderDist <= (map.radius.base or 0)
 
-  return { shardId = currentShard.id, borderDist = borderDist, inBuffer = inBuffer }
+  -- `name` est le libellé humain émis par le générateur (repli sur l'id côté serveur si aucun
+  -- quartier nommé). Repli Lua supplémentaire sur `id` pour rester robuste à un ancien shard-map
+  -- sans champ `name` (compat ascendante — jamais de nil affiché).
+  return {
+    shardId = currentShard.id,
+    shardName = currentShard.name or currentShard.id,
+    borderDist = borderDist,
+    inBuffer = inBuffer,
+  }
 end
 
 -- Radar 2D top-down (aligné sur les axes monde, ne tourne PAS avec le regard du joueur — plus
@@ -237,13 +273,85 @@ function TesseraHUD:Render()
   if shardInfo == nil then
     ImGui.TextDisabled("(shard-map.json introuvable)")
   else
-    ImGui.Text("Shard: " .. shardInfo.shardId)
+    -- Franchissement : le shard résolu a changé depuis la frame précédente (deux shards RÉELS,
+    -- pas le sentinelle "?"). Debounce d'abord (anti-flicker à la frontière exacte), PUIS on arme
+    -- la bannière + on logue seulement une fois le nouveau shard confirmé stable. Le garde
+    -- `lastShardId ~= nil` évite un faux franchissement à la toute 1re résolution.
+    local curId = shardInfo.shardId
+    if curId ~= "?" then
+      if curId ~= TesseraHUD.pendingShardId then
+        TesseraHUD.pendingShardId = curId
+        TesseraHUD.pendingFrames = 1
+      else
+        TesseraHUD.pendingFrames = TesseraHUD.pendingFrames + 1
+      end
+      local confirmed = TesseraHUD.pendingFrames >= CROSSING_CONFIRM_FRAMES
+      if confirmed and TesseraHUD.lastShardId ~= nil and TesseraHUD.lastShardId ~= "?"
+          and curId ~= TesseraHUD.lastShardId then
+        local fromName = TesseraHUD.lastShardName or TesseraHUD.lastShardId
+        local toName = shardInfo.shardName or curId
+        TesseraHUD.crossingText = "Franchissement : " .. fromName .. "  ->  " .. toName
+        TesseraHUD.crossingFrames = 240 -- ~4 s à 60 fps
+        print("[TesseraHUD] " .. TesseraHUD.crossingText)
+      end
+      if confirmed then
+        TesseraHUD.lastShardId = curId
+        TesseraHUD.lastShardName = shardInfo.shardName
+      end
+    end
+
+    -- Bannière de franchissement, bien visible (vert vif), quelques secondes après le changement.
+    if TesseraHUD.crossingFrames > 0 and TesseraHUD.crossingText ~= nil then
+      ImGui.TextColored(0.2, 1.0, 0.4, 1.0, ">>> " .. TesseraHUD.crossingText .. " <<<")
+      TesseraHUD.crossingFrames = TesseraHUD.crossingFrames - 1
+    end
+
+    ImGui.Text("Shard: " .. (shardInfo.shardName or shardInfo.shardId))
     if shardInfo.borderDist ~= nil then
       ImGui.Text(string.format("Distance frontière: %.1f", shardInfo.borderDist))
     end
     if shardInfo.inBuffer then
       ImGui.TextColored(1.0, 0.7, 0.0, 1.0, "DANS ZONE TAMPON")
     end
+
+    -- Cohérence local vs serveur (spec HUD moniteur, §2). `Tessera_GetServerShard()` renvoie le
+    -- placement AUTORITAIRE poussé par le serveur (ServerMsg::ShardAssignment, décodé par le netcode
+    -- C++ du fork). Chaîne vide = aucun ShardAssignment reçu (hors serveur / pas encore arrivé) :
+    -- on n'affiche alors que le calcul local ci-dessus, pas de ligne « Serveur ».
+    local serverShard = player:Tessera_GetServerShard()
+    if serverShard ~= nil and serverShard ~= "" then
+      local localId = shardInfo.shardId
+      if serverShard ~= localId then
+        TesseraHUD.desyncFrames = TesseraHUD.desyncFrames + 1
+      else
+        TesseraHUD.desyncFrames = 0
+      end
+      -- Un écart bref (mouvement normal près d'une frontière, latence handoff) est attendu et reste
+      -- neutre ; seul un décalage qui PERSISTE au-delà de DESYNC_PERSIST_FRAMES (~1s) vire au rouge
+      -- + logue une fois (au franchissement du seuil, pas à chaque frame).
+      local persistent = TesseraHUD.desyncFrames >= DESYNC_PERSIST_FRAMES
+      if persistent then
+        ImGui.TextColored(1.0, 0.15, 0.15, 1.0, "Local: " .. localId)
+        ImGui.TextColored(1.0, 0.15, 0.15, 1.0, "Serveur: " .. serverShard .. "  [DÉCALAGE]")
+        if TesseraHUD.desyncFrames == DESYNC_PERSIST_FRAMES then
+          print(string.format(
+            "[TesseraHUD] DÉCALAGE shard persistant : local=%s serveur=%s",
+            localId, serverShard
+          ))
+        end
+      else
+        ImGui.Text("Local: " .. localId)
+        ImGui.Text("Serveur: " .. serverShard)
+      end
+
+      local overlapsCsv = player:Tessera_GetServerOverlaps()
+      if overlapsCsv ~= nil and overlapsCsv ~= "" then
+        ImGui.Text("Zone tampon serveur: " .. overlapsCsv)
+      end
+    end
+
+    local visibleCount = player:Tessera_GetVisiblePlayerCount()
+    ImGui.Text("Joueurs visibles: " .. tostring(visibleCount))
   end
   TesseraHUD:RenderRadar(pos)
 
