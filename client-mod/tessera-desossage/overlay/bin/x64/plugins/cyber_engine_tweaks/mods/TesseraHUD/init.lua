@@ -313,6 +313,45 @@ function TesseraHUD:Render()
     if shardInfo.inBuffer then
       ImGui.TextColored(1.0, 0.7, 0.0, 1.0, "DANS ZONE TAMPON")
     end
+
+    -- Cohérence local vs serveur (spec HUD moniteur, §2). `Tessera_GetServerShard()` renvoie le
+    -- placement AUTORITAIRE poussé par le serveur (ServerMsg::ShardAssignment, décodé par le netcode
+    -- C++ du fork). Chaîne vide = aucun ShardAssignment reçu (hors serveur / pas encore arrivé) :
+    -- on n'affiche alors que le calcul local ci-dessus, pas de ligne « Serveur ».
+    local serverShard = player:Tessera_GetServerShard()
+    if serverShard ~= nil and serverShard ~= "" then
+      local localId = shardInfo.shardId
+      if serverShard ~= localId then
+        TesseraHUD.desyncFrames = TesseraHUD.desyncFrames + 1
+      else
+        TesseraHUD.desyncFrames = 0
+      end
+      -- Un écart bref (mouvement normal près d'une frontière, latence handoff) est attendu et reste
+      -- neutre ; seul un décalage qui PERSISTE au-delà de DESYNC_PERSIST_FRAMES (~1s) vire au rouge
+      -- + logue une fois (au franchissement du seuil, pas à chaque frame).
+      local persistent = TesseraHUD.desyncFrames >= DESYNC_PERSIST_FRAMES
+      if persistent then
+        ImGui.TextColored(1.0, 0.15, 0.15, 1.0, "Local: " .. localId)
+        ImGui.TextColored(1.0, 0.15, 0.15, 1.0, "Serveur: " .. serverShard .. "  [DÉCALAGE]")
+        if TesseraHUD.desyncFrames == DESYNC_PERSIST_FRAMES then
+          print(string.format(
+            "[TesseraHUD] DÉCALAGE shard persistant : local=%s serveur=%s",
+            localId, serverShard
+          ))
+        end
+      else
+        ImGui.Text("Local: " .. localId)
+        ImGui.Text("Serveur: " .. serverShard)
+      end
+
+      local overlapsCsv = player:Tessera_GetServerOverlaps()
+      if overlapsCsv ~= nil and overlapsCsv ~= "" then
+        ImGui.Text("Zone tampon serveur: " .. overlapsCsv)
+      end
+    end
+
+    local visibleCount = player:Tessera_GetVisiblePlayerCount()
+    ImGui.Text("Joueurs visibles: " .. tostring(visibleCount))
   end
   TesseraHUD:RenderRadar(pos)
 
