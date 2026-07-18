@@ -66,6 +66,13 @@ services:
       # Port 9090 (attestation "serveur officiel" interne) : même traitement, volontairement NON
       # publié — voir TESSERA_INTERNAL_ATTESTATION_LISTEN ci-dessous et le commentaire directory/
       # en tête de fichier.
+      # ⚠️ Port 9103 (page de logs en direct, session-log-live-view 2026-07-18) : PUBLIÉ
+      # délibérément, contrairement aux trois ports ci-dessus — pensé pour être ouvert dans un
+      # navigateur pendant un playtest. AUCUNE authentification (décision explicite, cf. spec) :
+      # le pare-feu ufw de ce VPS étant inactif, ce port est accessible à quiconque en connaît
+      # l'adresse. Acceptable pour un playtest restreint (données non critiques : positions de
+      # shard, IDs client) — À DURCIR (token ou équivalent) avant tout usage à plus large échelle.
+      - "9103:9103"
     volumes:
       - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
       # `authority_artifact = "authority.json"` du manifeste est un chemin relatif résolu contre
@@ -79,6 +86,7 @@ services:
       TESSERA_GATEWAY_METRICS_ADDR: "0.0.0.0:9100"
       TESSERA_SESSION_LOG_PATH: "/data/session.jsonl"
       TESSERA_GATEWAY_SESSIONLOG_ADDR: "0.0.0.0:9102"
+      TESSERA_GATEWAY_SESSIONLOG_HTML_ADDR: "0.0.0.0:9103"
       # Défaut Rust = 127.0.0.1 (sûr hors Docker) ; ici surchargé en 0.0.0.0 comme les métriques
       # ci-dessus — jamais publié via `ports:`, donc reste interne au réseau Docker. Sans cette
       # ligne, `directory` (conteneur séparé) ne peut jamais joindre `/internal/attestation` et
