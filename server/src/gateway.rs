@@ -1227,49 +1227,71 @@ pub async fn gateway_main(
                     }
                     let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
                     placement = Some(topology.locate(x, y, r));
-                    if let (Some(sl), Some(next)) = (slog.as_mut(), placement.as_ref()) {
-                        for c in crate::session_log::diff_placement(prev_placements.get(&cid), next)
-                        {
-                            use crate::session_log::{PlacementChange, SessionEvent};
-                            let ev = match c {
-                                PlacementChange::Handoff { from, to } => SessionEvent::Handoff {
-                                    client: cid,
-                                    from,
-                                    to,
-                                    x,
-                                    y,
-                                    z,
-                                },
-                                PlacementChange::BufferEnter { shard } => {
-                                    SessionEvent::BufferEnter { client: cid, shard }
+                    if let Some(next) = placement.as_ref() {
+                        let changes =
+                            crate::session_log::diff_placement(prev_placements.get(&cid), next);
+                        // Poussé au client dès qu'un changement de placement est détecté (y compris
+                        // le tout premier après Join, où prev_placements.get(&cid) == None) : le HUD
+                        // compare ce placement autoritaire à son calcul local et signale un décalage
+                        // persistant (spec HUD moniteur de cohérence, 2026-07-18).
+                        if !changes.is_empty() {
+                            client.send(
+                                cid,
+                                &encode_shard_assignment(&next.authoritative, &next.overlaps),
+                            );
+                        }
+                        if let Some(sl) = slog.as_mut() {
+                            for c in changes {
+                                use crate::session_log::{PlacementChange, SessionEvent};
+                                let ev = match c {
+                                    PlacementChange::Handoff { from, to } => {
+                                        SessionEvent::Handoff {
+                                            client: cid,
+                                            from,
+                                            to,
+                                            x,
+                                            y,
+                                            z,
+                                        }
+                                    }
+                                    PlacementChange::BufferEnter { shard } => {
+                                        SessionEvent::BufferEnter { client: cid, shard }
+                                    }
+                                    PlacementChange::BufferExit { shard } => {
+                                        SessionEvent::BufferExit { client: cid, shard }
+                                    }
+                                };
+                                // En plus du journal JSONL (fichier, pas exploitable sans accès au
+                                // volume monté), une ligne tracing pour ce même événement : visible
+                                // dans les logs stdout du conteneur, donc récupérable à distance via
+                                // l'API Dokploy (compose.readLogs) sans SSH — utile pour suivre les
+                                // franchissements de shard en direct pendant un playtest.
+                                let name =
+                                    display_names.get(&cid).map(String::as_str).unwrap_or("?");
+                                match &ev {
+                                    crate::session_log::SessionEvent::Handoff {
+                                        from, to, ..
+                                    } => {
+                                        tracing::info!(
+                                            client = cid,
+                                            %name,
+                                            "Handoff : {name} passe de {from} à {to} ({x:.1}, {y:.1}, {z:.1})"
+                                        );
+                                    }
+                                    crate::session_log::SessionEvent::BufferEnter {
+                                        shard, ..
+                                    } => {
+                                        tracing::info!(client = cid, %name, "{name} entre en zone tampon de {shard}");
+                                    }
+                                    crate::session_log::SessionEvent::BufferExit {
+                                        shard, ..
+                                    } => {
+                                        tracing::info!(client = cid, %name, "{name} sort de la zone tampon de {shard}");
+                                    }
+                                    _ => {}
                                 }
-                                PlacementChange::BufferExit { shard } => {
-                                    SessionEvent::BufferExit { client: cid, shard }
-                                }
-                            };
-                            // En plus du journal JSONL (fichier, pas exploitable sans accès au
-                            // volume monté), une ligne tracing pour ce même événement : visible
-                            // dans les logs stdout du conteneur, donc récupérable à distance via
-                            // l'API Dokploy (compose.readLogs) sans SSH — utile pour suivre les
-                            // franchissements de shard en direct pendant un playtest.
-                            let name = display_names.get(&cid).map(String::as_str).unwrap_or("?");
-                            match &ev {
-                                crate::session_log::SessionEvent::Handoff { from, to, .. } => {
-                                    tracing::info!(
-                                        client = cid,
-                                        %name,
-                                        "Handoff : {name} passe de {from} à {to} ({x:.1}, {y:.1}, {z:.1})"
-                                    );
-                                }
-                                crate::session_log::SessionEvent::BufferEnter { shard, .. } => {
-                                    tracing::info!(client = cid, %name, "{name} entre en zone tampon de {shard}");
-                                }
-                                crate::session_log::SessionEvent::BufferExit { shard, .. } => {
-                                    tracing::info!(client = cid, %name, "{name} sort de la zone tampon de {shard}");
-                                }
-                                _ => {}
+                                sl.write(&ev);
                             }
-                            sl.write(&ev);
                         }
                         prev_placements.insert(cid, next.clone());
                     }
