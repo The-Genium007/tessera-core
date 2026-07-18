@@ -39,6 +39,17 @@ TesseraHUD.lastShardId = TesseraHUD.lastShardId or nil
 TesseraHUD.lastShardName = TesseraHUD.lastShardName or nil
 TesseraHUD.crossingText = TesseraHUD.crossingText or nil
 TesseraHUD.crossingFrames = TesseraHUD.crossingFrames or 0
+-- Debounce anti-flicker du franchissement LOCAL : un point exactement sur une arête peut osciller
+-- entre deux shards d'une frame à l'autre. On ne confirme un changement qu'après
+-- CROSSING_CONFIRM_FRAMES stables dans le nouveau shard (spec HUD moniteur de cohérence, §3.4).
+TesseraHUD.pendingShardId = TesseraHUD.pendingShardId or nil
+TesseraHUD.pendingFrames = TesseraHUD.pendingFrames or 0
+local CROSSING_CONFIRM_FRAMES = 10
+-- Décalage local vs serveur : compteur de frames consécutives où les deux diffèrent. Alerte
+-- (rouge + log) seulement si ça persiste au-delà de DESYNC_PERSIST_FRAMES — un écart bref pendant
+-- un mouvement normal près d'une frontière est attendu (latence), pas un bug (spec §2).
+TesseraHUD.desyncFrames = TesseraHUD.desyncFrames or 0
+local DESYNC_PERSIST_FRAMES = 60 -- ~1s à 60 fps
 
 -- Log explicite à chaque étape clé (2026-07-07, demandé) : jusqu'ici, en cas de souci, la seule
 -- trace était "le mod a une erreur de chargement" dans la console CET, sans dire QUOI — impossible
@@ -263,12 +274,19 @@ function TesseraHUD:Render()
     ImGui.TextDisabled("(shard-map.json introuvable)")
   else
     -- Franchissement : le shard résolu a changé depuis la frame précédente (deux shards RÉELS,
-    -- pas le sentinelle "?"). On arme la bannière + on logue (trace diagnostique côté client, en
-    -- plus du session_log serveur). Le garde `lastShardId ~= nil` évite un faux franchissement à
-    -- la toute 1re résolution.
+    -- pas le sentinelle "?"). Debounce d'abord (anti-flicker à la frontière exacte), PUIS on arme
+    -- la bannière + on logue seulement une fois le nouveau shard confirmé stable. Le garde
+    -- `lastShardId ~= nil` évite un faux franchissement à la toute 1re résolution.
     local curId = shardInfo.shardId
     if curId ~= "?" then
-      if TesseraHUD.lastShardId ~= nil and TesseraHUD.lastShardId ~= "?"
+      if curId ~= TesseraHUD.pendingShardId then
+        TesseraHUD.pendingShardId = curId
+        TesseraHUD.pendingFrames = 1
+      else
+        TesseraHUD.pendingFrames = TesseraHUD.pendingFrames + 1
+      end
+      local confirmed = TesseraHUD.pendingFrames >= CROSSING_CONFIRM_FRAMES
+      if confirmed and TesseraHUD.lastShardId ~= nil and TesseraHUD.lastShardId ~= "?"
           and curId ~= TesseraHUD.lastShardId then
         local fromName = TesseraHUD.lastShardName or TesseraHUD.lastShardId
         local toName = shardInfo.shardName or curId
@@ -276,8 +294,10 @@ function TesseraHUD:Render()
         TesseraHUD.crossingFrames = 240 -- ~4 s à 60 fps
         print("[TesseraHUD] " .. TesseraHUD.crossingText)
       end
-      TesseraHUD.lastShardId = curId
-      TesseraHUD.lastShardName = shardInfo.shardName
+      if confirmed then
+        TesseraHUD.lastShardId = curId
+        TesseraHUD.lastShardName = shardInfo.shardName
+      end
     end
 
     -- Bannière de franchissement, bien visible (vert vif), quelques secondes après le changement.
