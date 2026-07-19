@@ -10,7 +10,7 @@ max_players = 16
 tags = ["dev", "test"]
 discord_url = ""
 website_url = "https://tesserasynth.net"
-required_modset = "0.1.6"
+required_modset = "0.1.7"
 voice_required = false
 # Playtest 2 (2026-07-13+) : auth ZITADEL réelle exigée au Join (JWT vérifié), et bascule vers
 # PostgresStore (voir bin/gateway.rs) — nécessite TESSERA_POSTGRES_URL posée côté Dokploy.
@@ -19,6 +19,13 @@ public = true
 [runtime]
 whitelist = false
 store_path = "/data/players.json"
+
+# Point de spawn par défaut pour un joueur neuf (sans position/résidence connue). X/Y/Z = repère
+# monde du jeu (GetWorldPosition brut). Coordonnée Night City réelle et testée (zone de sauvegarde
+# observée au playtest 2026-07-17). CRITIQUE : sans cette ligne, le défaut est [0,0,0] = l'origine
+# du monde, où naissaient les joueurs neufs (bug P5, `placement décidé [0,0,0]` dans les logs live).
+# Le Gateway logue désormais un WARN de boot si le spawn vaut [0,0,0].
+spawn = [-1431.17, 1302.27, 27.06]
 
 [runtime.gateway]
 listen_addr = "0.0.0.0:27020"
