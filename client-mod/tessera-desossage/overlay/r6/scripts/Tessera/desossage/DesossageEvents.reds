@@ -25,22 +25,29 @@ public func Tessera_ApplyEncounterCategory(game: GameInstance, kind: CName, e: r
   FTLog(s"[Tessera/Desossage] (stub) rencontres \(kind) → densité \(factor)");
 }
 
-// Couvre le volet « appels fixers » de questTriggers (symbole réel, confirmé via le dump RTTI
-// du jeu — GameInstance.GetPhoneManager -> questPhoneManager.ApplyPhoneCallRestriction(Bool)).
-// Best-effort : bloque les appels entrants (donc les gigs/side-quests poussés par téléphone),
-// mais PAS les déclencheurs de proximité ni les donneurs de quête in-world — ceux-là restent
-// des PIN IN-GAME (aucun symbole vérifié trouvé côté déclencheurs de zone/PNJ).
+// Levier phoneCalls (ex-questTriggers, renommé 2026-07-19) — coupe les appels téléphoniques
+// entrants « définitivement » (demande de Lucas : plus d'appels sur la map vide). Symbole réel,
+// confirmé via le dump RTTI du jeu — GameInstance.GetPhoneManager ->
+// questPhoneManager.ApplyPhoneCallRestriction(Bool) : bloque tous les appels entrants (fixers,
+// gigs/side-quests poussés par téléphone).
+//
+// Ce que ce levier NE couvre PAS (et pourquoi ce n'est plus un trou) : les déclencheurs de
+// proximité / donneurs de quête in-world (qui n'ont jamais transité par le téléphone). Ils sont
+// désormais pris en charge côté natif par le blocage des spawn nodes (tessera-client phase 2,
+// `QuestPhaseInstance::ExecuteNode` → questSpawnManagerNodeDefinition bloqué) — le donneur ne
+// spawn plus, donc ne déclenche plus. Les deux leviers se complètent ; aucun symbole redscript
+// vérifié n'existe côté déclencheurs de zone/PNJ, c'est bien le C++ qui ferme ce trou.
 //
 // CONFIRMÉ EN JEU (2026-07-03) : effet observable immédiat sans attendre un vrai appel — le jeu
 // verrouille l'icône de sélection de station radio tant que les appels sont autorisés (icône
 // rouge). Décocher (e.active=false → ApplyPhoneCallRestriction(true)) déverrouille l'icône
 // (rouge → bleu). C'est le moyen de vérif de référence pour ce levier en test manuel.
-public func Tessera_ApplyQuestTriggers(game: GameInstance, e: ref<DesossageEntry>) -> Void {
+public func Tessera_ApplyPhoneCalls(game: GameInstance, e: ref<DesossageEntry>) -> Void {
   GameInstance.GetPhoneManager(game).ApplyPhoneCallRestriction(!e.active);
   if e.active {
-    FTLog(s"[Tessera/Desossage] déclencheurs de quêtes → appels fixers réactivés");
+    FTLog(s"[Tessera/Desossage] appels téléphoniques → réactivés");
   } else {
-    FTLog(s"[Tessera/Desossage] déclencheurs de quêtes → appels fixers bloqués (ApplyPhoneCallRestriction)");
+    FTLog(s"[Tessera/Desossage] appels téléphoniques → bloqués (ApplyPhoneCallRestriction)");
   }
 }
 

@@ -25,6 +25,7 @@ système**, chacun une `DesossageEntry { active, density }`. Défaut = **tout co
 | `DesossageConfig.reds` | la config centrale + défauts (monde vide) |
 | `DesossageSystem.reds` | applicateur (`ScriptableSystem`) + déclencheur au chargement (`OnGameAttached`) |
 | `DesossagePopulation.reds` | leviers piétons (couvre aussi trafic véhicules, doublon retiré 2026-07-07) / transit |
+| `DesossageRadio.reds` | levier radios ambiantes (fact save `radio_on`) + fallback device documenté |
 | `DesossageOrder.reds` | levier police (`PreventionSystem`) + sécurité ambiante |
 | `DesossageDevices.reds` | voyage rapide (kiosques) / vendeurs / distributeurs / interactables |
 | `DesossageEvents.reds` | rencontres (par type) / quêtes / tutoriels |
@@ -64,7 +65,7 @@ les commentaires du fichier `.reds` concerné (lien dans « Structure » ci-dess
 
 | Levier | Statut | Mécanisme | Testé en jeu | Limites / notes |
 |---|---|---|---|---|
-| `police` | ✅ Réel | `@wrapMethod(PreventionSystem) OnAttach()` | ✅ 2026-07-05 (plus d'étoiles) | BOOT ONLY (recharge nécessaire pour changer) |
+| `police` | ✅ Réel | `@wrapMethod(PreventionSystem) OnAttach()` | ✅ 2026-07-05 (plus d'étoiles) | BOOT ONLY (recharge nécessaire pour changer). Ne coupe QUE les étoiles/prévention — la police **garée/statique** (PNJ + voitures posées) est du spawn communautaire, coupée côté natif par le blocage des spawn nodes (tessera-client phase 2, 2026-07-19) |
 | `ambientSecurity` | ⚠️ Partiel | `@wrapMethod(SecurityTurretControllerPS) GetActions` | ✅ 2026-07-05 (menu quickhack absent) | Coupe l'interaction, pas la détection IA — tourelle peut rester hostile |
 | `gangHostility` | ✅ Réel | attitude/relations gangs | ✅ 2026-07-05 | Décoché = gangs non hostiles (relations neutres) |
 | `pedestrians` | ✅ Réel | `engine/config/platform/pc/user.ini` `[Crowd]` (`Enabled`/`EnablePedestrians`/`EnableVehicles` = false) — lu au chargement, s'applique à toute la carte, jamais réinitialisé par le streaming | ✅ ini confirmé par Lucas en jeu (2026-07-06, v2.31, plus aucun piéton/véhicule) | Couvre aussi le trafic véhicules (même nœud de spawn, confirmé en jeu 2026-07-05). Le levier `traffic` dédié (config+UI+console) a été **retiré 2026-07-07** — doublon confirmé, plus de code à maintenir |
@@ -73,13 +74,14 @@ les commentaires du fichier `.reds` concerné (lien dans « Structure » ci-dess
 | `fastTravel` | ✅ Réel | `FastTravelSystem.ManageFastTravelLock` | — | BOOT ONLY. Ne touche pas le métro (système distinct, confirmé) |
 | `vendingDevices` | ✅ Réel | `@wrapMethod(VendingMachineControllerPS) GetActions` + `@wrapMethod(DropPointControllerPS) GetActions` (2 hooks) | boissons/nourriture ✅ ; droppoints ⚠️ jamais testés | `WeaponVendingMachineControllerPS` **hérite** de `VendingMachineControllerPS` et n'override PAS `GetActions` (vérifié au dump RTTI 2026-07-15) : son hook dédié échouait en `[UNRESOLVED_METHOD]` et a été retiré — les distributeurs d'armes sont couverts par le wrap du parent (dispatch virtuel) |
 | `worldInteractables` | ✅ Réel | `@wrapMethod(ScriptableDeviceComponentPS) GetActions` (hook générique, base commune) | ⚠️ jamais testé | Couvre points d'accès/hackables **et**, découvert 2026-07-06, l'écran de statut de loyer d'appartement (`ApartmentScreenControllerPS` hérite de la même base) — gratuit, pas de code dédié nécessaire. Ne couvre PAS l'achat d'un nouvel appartement (classe distincte non trouvée) |
-| `questTriggers` | ⚠️ Partiel | `questPhoneManager.ApplyPhoneCallRestriction` | ✅ (icône radio déverrouillée si décoché) | Bloque les appels fixers, pas les déclencheurs de proximité (gigs) ni les hustles NCPD — nécessiterait un hook C++ natif sur `questSpawnManagerNodeDefinition`/`ExecuteNode` (recherche 2026-07-07, pas encore décidé) |
+| `phoneCalls` (ex-`questTriggers`, renommé 2026-07-19) | ✅ Réel | `questPhoneManager.ApplyPhoneCallRestriction` | ✅ (icône radio déverrouillée si décoché) | Décoché = tous les appels téléphoniques entrants bloqués (fixers/gigs). Les déclencheurs de proximité / donneurs de quête ne passent plus par ce levier : ils sont couverts par le **blocage natif des spawn nodes** (tessera-client phase 2) — le donneur ne spawn plus |
+| `radios` (nouveau 2026-07-19) | 🟡 Hypothèse, non testé | fact save `radio_on` via `SetFact` (même mécanisme que `tutorials`/`airTraffic`) | ⚠️ jamais testé | Compile-safe (pas d'override risqué). PIN IN-GAME : à confirmer que `radio_on` est un fact global qui coupe les radios ambiantes (bornes de rue/boombox) et la polarité on=1/off=0. Fallback documenté si sans effet : `@wrapMethod(Radio) ResolveGameplayState` → `TurnOffDevice()` (voir `DesossageRadio.reds`) |
 | `tutorials` | ✅ Réel (2026-07-07) | fact save `disable_tutorials` posé via `QuestsSystem.SetFact` (retrouvé dans un export CyberCAT réel, non préfixé par un code de quête) | ⚠️ jamais testé | Remplace l'ancienne piste `questTutorialManager` (confirmée insuffisante — ne fermait qu'un overlay déjà ouvert) |
 | `airTraffic` (nouveau 2026-07-07) | ✅ Réel | fact save `air_traffic_off` via `SetFact`, même mécanisme que `tutorials` | ⚠️ jamais testé | — |
-| `ncpdHustles` | 🔴 Stub confirmé mort | `questSpawnManagerNodeType`/enum `populationSpawnerObjectCtrlAction` — exécution purement native (nœud de graphe de quête) | — | Nécessiterait un hook C++ natif (`QuestPhaseInstance::ExecuteNode`) |
-| `randomEncounters` | 🔴 Stub confirmé mort | idem `ncpdHustles` | — | idem |
-| `cyberpsychos` | 🔴 Stub confirmé mort | idem `ncpdHustles` | — | idem |
-| **PNJ statiques (groupes qui discutent, ne marchent pas)** | 🔴 Nouveau cas sans levier (signalé 2026-07-07) | Système **Community** (`worldCommunityRegistryNode`, champ `representsCrowd:Bool`) — DISTINCT du système **Crowd** que pilote `ChangeDensityModifier`/`pedestrians`. Contrôle natif seulement, via le même `questSpawnManagerNodeType` que ci-dessus | — | Recherche déléguée (Fable 5, 2026-07-07) confirmée par script décompilé (`communitySystem.script` : 4 méthodes, toutes côté Crowd) + mods publiés (Nova Crowds, No Crowds and Cars, Disabled Crowd — tous confirment ne pas retirer les PNJ fixes). Même hook C++ candidat que `ncpdHustles`/`randomEncounters`/`cyberpsychos` |
+| `ncpdHustles` | 🟡 Couvert côté natif (phase 2) | Le levier redscript reste un stub, MAIS le spawn (`questSpawnManagerNodeDefinition`) est bloqué en dur par le hook C++ (voir ligne « PNJ statiques » ci-dessous) | ⚠️ jamais testé | Plus besoin d'un levier redscript dédié : le blocage natif des spawn nodes couvre le cas |
+| `randomEncounters` | 🟡 Couvert côté natif (phase 2) | idem `ncpdHustles` | ⚠️ jamais testé | idem |
+| `cyberpsychos` | 🟡 Couvert côté natif (phase 2) | idem `ncpdHustles` | ⚠️ jamais testé | idem |
+| **PNJ statiques (groupes qui discutent, devant les distributeurs) + police garée** | 🟡 Bloqué côté natif (phase 2, 2026-07-19), non testé | Système **Community**, spawné nativement via `questSpawnManagerNodeDefinition` → **bloqué en dur** par le hook C++ `QuestPhaseInstance::ExecuteNode` (tessera-client, kill-switch `kBlockSpawnNodes`) | ⚠️ jamais testé | Décision de Lucas « bloquer tous les spawn nodes » (2026-07-19). Couvre du même coup `ncpdHustles`/`randomEncounters`/`cyberpsychos`/donneurs de quête par proximité (tous du même spawn natif). PIN IN-GAME : vérifier boot + plus de PNJ statiques ; si soft-lock, passer `kBlockSpawnNodes=false`. Voir `tessera-client/README.md` |
 | `mapMarkers` | ⚠️ Partiel | nettoyage ponctuel carte/minimap + masque icône vigilance PNJ | ✅ 2026-07-05 | Nettoyage ponctuel seulement (pas garanti map-wide/persistant) — même famille de risque que le fix district : candidat prioritaire pour la migration ini (2026-07-06) |
 | `dayNightCycleScale` | 🔴 Stub, pas assez sûr | `gameTimeSystem.SetTimeDilation` existe mais affecte aussi le joueur (mauvaise sémantique) | — | Pas codé à l'aveugle, en attente d'une meilleure piste |
 
@@ -113,6 +115,16 @@ marqueurs d'action joueur) est ajouté à ce module pour préparer un futur Pali
 sélectif). Voir `gate-observation-protocol.md` (racine du dépôt) pour le protocole de session, et
 `docs/superpowers/specs/2026-07-16-desossage-campagne-gelee-observation-design.md` pour le design
 complet. Ces canaux ne modifient AUCUN comportement de jeu — ils journalisent seulement.
+
+## Note (2026-07-19) — Blocage natif des spawn nodes (phase 2)
+
+Décision de Lucas « bloquer tous les spawn nodes » (méthode C++), pour retirer les PNJ statiques
+(Community) et la police garée, hors de portée du redscript. Le hook `QuestPhaseInstance::ExecuteNode`
+(tessera-client) passe de log-only à **blocage réel** de tout nœud `questSpawnManagerNodeDefinition`.
+C'est un raccourci « on casse tout » assumé (map RP à campagne gelée), PAS le blocage sélectif que
+le Gate d'observation ci-dessus préparait — ce dernier reste pertinent si on veut plus tard un
+blocage fin. Kill-switch `kBlockSpawnNodes` (voir `tessera-client/README.md`) pour revenir en
+log-only si le jeu ne boote plus. **PIN IN-GAME : jamais testé.**
 
 ## Où ça se déploie
 

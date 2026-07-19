@@ -60,6 +60,7 @@ public class DesossageSystem extends ScriptableSystem {
     let c = this.m_config;
     Tessera_ApplyPedestrians(game, c.pedestrians);
     Tessera_ApplyTransit(game, c.transit);
+    Tessera_ApplyRadios(game, c.radios);
   }
 
   public func ApplyOrder(game: GameInstance) -> Void {
@@ -81,7 +82,7 @@ public class DesossageSystem extends ScriptableSystem {
     Tessera_ApplyEncounterCategory(game, n"ncpdHustles", c.ncpdHustles);
     Tessera_ApplyEncounterCategory(game, n"randomEncounters", c.randomEncounters);
     Tessera_ApplyEncounterCategory(game, n"cyberpsychos", c.cyberpsychos);
-    Tessera_ApplyQuestTriggers(game, c.questTriggers);
+    Tessera_ApplyPhoneCalls(game, c.phoneCalls);
     Tessera_ApplyTutorials(game, c.tutorials);
     Tessera_ApplyAirTraffic(game, c.airTraffic);
   }
@@ -103,6 +104,7 @@ public class DesossageSystem extends ScriptableSystem {
     FTLog(s"[Tessera/Gate/State] pedestrians active=\(c.pedestrians.active) density=\(c.pedestrians.density)");
     FTLog(s"[Tessera/Gate/State] vendors active=\(c.vendors.active) density=\(c.vendors.density)");
     FTLog(s"[Tessera/Gate/State] transit active=\(c.transit.active) density=\(c.transit.density)");
+    FTLog(s"[Tessera/Gate/State] radios active=\(c.radios.active) density=\(c.radios.density)");
     FTLog(s"[Tessera/Gate/State] police active=\(c.police.active) density=\(c.police.density)");
     FTLog(s"[Tessera/Gate/State] ambientSecurity active=\(c.ambientSecurity.active) density=\(c.ambientSecurity.density)");
     FTLog(s"[Tessera/Gate/State] gangHostility active=\(c.gangHostility.active) density=\(c.gangHostility.density)");
@@ -112,7 +114,7 @@ public class DesossageSystem extends ScriptableSystem {
     FTLog(s"[Tessera/Gate/State] fastTravel active=\(c.fastTravel.active) density=\(c.fastTravel.density)");
     FTLog(s"[Tessera/Gate/State] vendingDevices active=\(c.vendingDevices.active) density=\(c.vendingDevices.density)");
     FTLog(s"[Tessera/Gate/State] worldInteractables active=\(c.worldInteractables.active) density=\(c.worldInteractables.density)");
-    FTLog(s"[Tessera/Gate/State] questTriggers active=\(c.questTriggers.active) density=\(c.questTriggers.density)");
+    FTLog(s"[Tessera/Gate/State] phoneCalls active=\(c.phoneCalls.active) density=\(c.phoneCalls.density)");
     FTLog(s"[Tessera/Gate/State] tutorials active=\(c.tutorials.active) density=\(c.tutorials.density)");
     FTLog(s"[Tessera/Gate/State] airTraffic active=\(c.airTraffic.active) density=\(c.airTraffic.density)");
     FTLog(s"[Tessera/Gate/State] mapMarkers active=\(c.mapMarkers.active) density=\(c.mapMarkers.density)");
