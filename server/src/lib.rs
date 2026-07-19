@@ -1,4 +1,8 @@
 //! Squelette du serveur autoritaire. Constantes de simulation (voir spec §6).
+//!
+//! Réalign de base 0.1.6 (2026-07-19) : bump volontaire (aucun changement fonctionnel) pour
+//! forcer un rebuild serveur frais à la base 0.1.6, condition du promote playtest du désossage
+//! (dev était resté en base 0.1.5 sous playtest 0.1.6 ; cf. release/promote-desossage-playtest-0.1.6).
 
 pub mod admin_commands;
 pub mod admin_store;
