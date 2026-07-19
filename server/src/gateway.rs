@@ -1105,9 +1105,15 @@ pub async fn gateway_main(
                             rate_states.remove(&cid);
                             continue;
                         }
+                        // NB: on renomme le champ `display` en `disp_name` — une variable locale
+                        // nommée `display` entre en COLLISION avec `tracing::field::display` dans les
+                        // macros `tracing::info!` (`%display` / `{display}` résolvent alors vers la
+                        // fonction, pas la variable → E0277 "doesn't implement Display"). Invisible
+                        // sans `--features gns` (gateway_main est gns-gated, non compilé par la CI) —
+                        // a cassé le build Docker du gateway (merge display-name-from-jwt, PR #9).
                         let JoinIdentity {
                             key: effective_key,
-                            display,
+                            display: disp_name,
                         } = match resolve_join_key(
                             identity_public,
                             &name,
@@ -1135,13 +1141,13 @@ pub async fn gateway_main(
                             rate_states.remove(&cid);
                             continue;
                         }
-                        store.note_display_name(&effective_key, &display);
+                        store.note_display_name(&effective_key, &disp_name);
                         let record = store.load(&effective_key);
                         let (pos, source) =
                             resolve_join_spawn(&effective_key, &hot_state, record.as_ref(), spawn)
                                 .await;
                         tracing::info!(
-                            "Connexion de {display} : placement décidé {pos:?} (source: {source:?})"
+                            "Connexion de {disp_name} : placement décidé {pos:?} (source: {source:?})"
                         );
                         residence.insert(cid, record.and_then(|r| r.residence));
                         last_pos.insert(cid, pos); // départ tant qu'aucune position réelle
@@ -1155,12 +1161,12 @@ pub async fn gateway_main(
                             identity_public.then_some(effective_key.as_str());
                         let is_root = is_root_by_sub_or_display_name(
                             sub_for_admin,
-                            &display,
+                            &disp_name,
                             &root_admins,
                             playtest_all_admin,
                         );
                         let admin_record =
-                            resolve_admin_record(sub_for_admin, &display, &admin_store.admins)
+                            resolve_admin_record(sub_for_admin, &disp_name, &admin_store.admins)
                                 .cloned();
                         // Backfill (Task D3) : un admin attribué par `/promote` avant son premier
                         // Join sur un serveur public (ou avant cette migration) a un `AdminRecord`
@@ -1191,7 +1197,7 @@ pub async fn gateway_main(
                         );
                         let rank = derive_rank(&resolved);
                         if rank != Rank::Player {
-                            tracing::info!(client = cid, %display, ?rank, "rang attribué");
+                            tracing::info!(client = cid, %disp_name, ?rank, "rang attribué");
                             ranks.insert(cid, rank);
                         }
                         if !resolved.is_empty() {
