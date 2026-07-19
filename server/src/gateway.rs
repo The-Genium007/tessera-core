@@ -429,22 +429,43 @@ pub fn resolve_admin_record<'a>(
 ///
 /// `Err` porte le message `Kicked` à renvoyer au client avant de couper la connexion (token
 /// absent ou invalide) — jamais un timeout silencieux.
+/// Identité résolue au Join. `key` = clé de persistance (`sub` OIDC vérifié sur serveur public,
+/// `display_name` brut du client sur serveur privé). `display` = nom d'affichage
+/// **server-autoritaire** : dérivé du JWT vérifié sur serveur public (`Claims::display_name`,
+/// jamais le username Windows envoyé par le client), = `display_name` brut sur serveur privé.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinIdentity {
+    pub key: String,
+    pub display: String,
+}
+
 pub fn resolve_join_key(
     identity_public: bool,
     name: &str,
     token: &str,
     expected_aud: &str,
     jwks_cache: &crate::jwks::JwksCache,
-) -> Result<String, &'static str> {
+) -> Result<JoinIdentity, &'static str> {
     if !identity_public {
-        return Ok(name.to_string());
+        // Serveur privé (petit groupe de confiance) : pas de JWT ; le `display_name` brut du client
+        // sert de clé ET de nom affiché — comportement historique strictement inchangé.
+        return Ok(JoinIdentity {
+            key: name.to_string(),
+            display: name.to_string(),
+        });
     }
     let token = token.trim();
     if token.is_empty() {
         return Err("compte requis sur ce serveur");
     }
     match jwks_cache.verify(token, expected_aud) {
-        Ok(claims) => Ok(claims.sub),
+        // Serveur public : clé = `sub` (unique par compte), nom affiché = dérivé du JWT vérifié
+        // (`name` > `preferred_username` > `sub`). Le `Join.display_name` du client (username
+        // Windows via GetUserNameA côté netcode) est IGNORÉ : non fiable, usurpable, collisionnant.
+        Ok(claims) => Ok(JoinIdentity {
+            display: claims.display_name(),
+            key: claims.sub,
+        }),
         Err(_) => Err("session invalide, reconnectez-vous"),
     }
 }
@@ -1084,14 +1105,17 @@ pub async fn gateway_main(
                             rate_states.remove(&cid);
                             continue;
                         }
-                        let effective_key = match resolve_join_key(
+                        let JoinIdentity {
+                            key: effective_key,
+                            display,
+                        } = match resolve_join_key(
                             identity_public,
                             &name,
                             &token,
                             &launcher_audience,
                             &jwks_cache,
                         ) {
-                            Ok(key) => key,
+                            Ok(identity) => identity,
                             Err(reason) => {
                                 tracing::warn!(client = cid, %reason, "kick : Join refusé");
                                 client.send(cid, &encode_kicked(reason));
@@ -1111,13 +1135,13 @@ pub async fn gateway_main(
                             rate_states.remove(&cid);
                             continue;
                         }
-                        store.note_display_name(&effective_key, &name);
+                        store.note_display_name(&effective_key, &display);
                         let record = store.load(&effective_key);
                         let (pos, source) =
                             resolve_join_spawn(&effective_key, &hot_state, record.as_ref(), spawn)
                                 .await;
                         tracing::info!(
-                            "Connexion de {name} : placement décidé {pos:?} (source: {source:?})"
+                            "Connexion de {display} : placement décidé {pos:?} (source: {source:?})"
                         );
                         residence.insert(cid, record.and_then(|r| r.residence));
                         last_pos.insert(cid, pos); // départ tant qu'aucune position réelle
@@ -1131,12 +1155,12 @@ pub async fn gateway_main(
                             identity_public.then_some(effective_key.as_str());
                         let is_root = is_root_by_sub_or_display_name(
                             sub_for_admin,
-                            &name,
+                            &display,
                             &root_admins,
                             playtest_all_admin,
                         );
                         let admin_record =
-                            resolve_admin_record(sub_for_admin, &name, &admin_store.admins)
+                            resolve_admin_record(sub_for_admin, &display, &admin_store.admins)
                                 .cloned();
                         // Backfill (Task D3) : un admin attribué par `/promote` avant son premier
                         // Join sur un serveur public (ou avant cette migration) a un `AdminRecord`
@@ -1167,7 +1191,7 @@ pub async fn gateway_main(
                         );
                         let rank = derive_rank(&resolved);
                         if rank != Rank::Player {
-                            tracing::info!(client = cid, %name, ?rank, "rang attribué");
+                            tracing::info!(client = cid, %display, ?rank, "rang attribué");
                             ranks.insert(cid, rank);
                         }
                         if !resolved.is_empty() {
@@ -1177,11 +1201,11 @@ pub async fn gateway_main(
                         if let Some(sl) = slog.as_mut() {
                             sl.write(&crate::session_log::SessionEvent::Join {
                                 client: cid,
-                                name: name.clone(),
+                                name: display.clone(),
                             });
                         }
                         keys.insert(cid, effective_key);
-                        display_names.insert(cid, name);
+                        display_names.insert(cid, display);
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
                     let now = std::time::Instant::now();
@@ -2528,21 +2552,27 @@ mod tests {
         let claims_alice = crate::jwks::Claims {
             sub: "oidc-sub-alice".into(),
             aud: "launcher".into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token_alice = encode_join_test_token(&claims_alice, &material.encoding_key);
         let claims_bob = crate::jwks::Claims {
             sub: "oidc-sub-bob".into(),
             aud: "launcher".into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token_bob = encode_join_test_token(&claims_bob, &material.encoding_key);
 
         // Les deux Join sont traités (pas de kick sur la collision de display_name).
         let key_alice = resolve_join_key(true, display_name, &token_alice, "launcher", &jwks_cache)
-            .expect("alice : join accepté malgré la collision de display_name");
+            .expect("alice : join accepté malgré la collision de display_name")
+            .key;
         let key_bob = resolve_join_key(true, display_name, &token_bob, "launcher", &jwks_cache)
-            .expect("bob : join accepté malgré la collision de display_name");
+            .expect("bob : join accepté malgré la collision de display_name")
+            .key;
 
         // Clés de persistance distinctes : deux enregistrements Postgres/FileStore distincts.
         assert_ne!(
@@ -2612,21 +2642,27 @@ mod tests {
         let claims_alice = crate::jwks::Claims {
             sub: "oidc-sub-alice".into(),
             aud: "launcher".into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token_alice = encode_join_test_token(&claims_alice, &material.encoding_key);
         let claims_bob = crate::jwks::Claims {
             sub: "oidc-sub-bob".into(),
             aud: "launcher".into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token_bob = encode_join_test_token(&claims_bob, &material.encoding_key);
 
         // --- Étage Gateway : les deux Join sont acceptés, avec des clés de persistance distinctes.
         let key_alice = resolve_join_key(true, display_name, &token_alice, "launcher", &jwks_cache)
-            .expect("alice : join accepté malgré la collision de display_name");
+            .expect("alice : join accepté malgré la collision de display_name")
+            .key;
         let key_bob = resolve_join_key(true, display_name, &token_bob, "launcher", &jwks_cache)
-            .expect("bob : join accepté malgré la collision de display_name");
+            .expect("bob : join accepté malgré la collision de display_name")
+            .key;
         assert_ne!(
             key_alice, key_bob,
             "deux sub distincts doivent produire deux clés de persistance distinctes"
@@ -2919,6 +2955,8 @@ mod tests {
         let claims = crate::jwks::Claims {
             sub: "user-attacker".into(),
             aud: "launcher".into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token = encode_join_test_token(&claims, &other_material.encoding_key);
@@ -2933,6 +2971,8 @@ mod tests {
         let claims = crate::jwks::Claims {
             sub: "oidc-user-abc".into(),
             aud: "launcher".into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token = encode_join_test_token(&claims, &material.encoding_key);
@@ -2941,7 +2981,77 @@ mod tests {
         // effective doit être le `sub` vérifié, jamais le texte libre non vérifié (root cause
         // du bug playtest 1).
         let result = resolve_join_key(true, "DisplayNameLibre", &token, "launcher", &jwks_cache);
-        assert_eq!(result, Ok("oidc-user-abc".to_string()));
+        assert_eq!(result.map(|i| i.key), Ok("oidc-user-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn public_server_display_name_comes_from_verified_jwt_not_windows_username() {
+        // Sur un serveur public, le nom AFFICHÉ est dérivé du JWT vérifié (`name`), JAMAIS le
+        // `Join.display_name` du client (= username Windows via GetUserNameA côté netcode, usurpable
+        // et collisionnant). Deux joueurs « Lucas » (même nom Windows) affichent leur pseudo ZITADEL
+        // distinct. Régression cible : « connexion de Lucas » au lieu du pseudo ZITADEL, 2026-07-19.
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        let claims = crate::jwks::Claims {
+            sub: "oidc-sub-xyz".into(),
+            name: Some("Neo".into()),
+            preferred_username: Some("neo_zitadel".into()),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token = encode_join_test_token(&claims, &material.encoding_key);
+
+        let identity = resolve_join_key(true, "LucasWindows", &token, "launcher", &jwks_cache)
+            .expect("token valide → join accepté");
+        assert_eq!(identity.key, "oidc-sub-xyz", "clé de persistance = sub vérifié");
+        assert_eq!(
+            identity.display, "Neo",
+            "nom affiché = claim `name` du JWT, jamais le username Windows du client"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_display_name_falls_back_preferred_username_then_sub() {
+        let (jwks_cache, material) = join_test_jwks_cache_with_valid_key().await;
+        // Pas de `name` → repli sur `preferred_username` (le pseudo unique ZITADEL).
+        let claims_pu = crate::jwks::Claims {
+            sub: "sub-1".into(),
+            name: None,
+            preferred_username: Some("pseudo_unique".into()),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token_pu = encode_join_test_token(&claims_pu, &material.encoding_key);
+        assert_eq!(
+            resolve_join_key(true, "X", &token_pu, "launcher", &jwks_cache)
+                .unwrap()
+                .display,
+            "pseudo_unique"
+        );
+        // Ni `name` ni `preferred_username` → repli ultime sur `sub` (nom jamais vide).
+        let claims_sub = crate::jwks::Claims {
+            sub: "sub-2".into(),
+            name: None,
+            preferred_username: None,
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        let token_sub = encode_join_test_token(&claims_sub, &material.encoding_key);
+        assert_eq!(
+            resolve_join_key(true, "X", &token_sub, "launcher", &jwks_cache)
+                .unwrap()
+                .display,
+            "sub-2"
+        );
+    }
+
+    #[test]
+    fn private_server_display_name_stays_the_client_name() {
+        // Serveur privé (pas de JWT) : comportement historique inchangé — clé ET nom = display_name
+        // brut du client.
+        let jwks_cache = crate::jwks::JwksCache::new();
+        let identity = resolve_join_key(false, "Lucas", "", "launcher", &jwks_cache).unwrap();
+        assert_eq!(identity.key, "Lucas");
+        assert_eq!(identity.display, "Lucas");
     }
 
     #[tokio::test]
@@ -2956,6 +3066,8 @@ mod tests {
         let claims = crate::jwks::Claims {
             sub: "oidc-user-abc".into(),
             aud: real_client_id.into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token = encode_join_test_token(&claims, &material.encoding_key);
@@ -2966,7 +3078,7 @@ mod tests {
 
         // Audience configurée = le vrai client_id du token → accepté, clé = sub vérifié.
         let ok = resolve_join_key(true, "N", &token, real_client_id, &jwks_cache);
-        assert_eq!(ok, Ok("oidc-user-abc".to_string()));
+        assert_eq!(ok.map(|i| i.key), Ok("oidc-user-abc".to_string()));
     }
 
     #[tokio::test]
@@ -2975,7 +3087,7 @@ mod tests {
         // intégralement, même vide, même si le JwksCache est vide/jamais rafraîchi.
         let jwks_cache = crate::jwks::JwksCache::new();
         let result = resolve_join_key(false, "Lucas", "", "launcher", &jwks_cache);
-        assert_eq!(result, Ok("Lucas".to_string()));
+        assert_eq!(result.map(|i| i.key), Ok("Lucas".to_string()));
     }
 
     // --- Migration D3 : identité admin résolue par sub OIDC vérifié sur serveur public ---------
@@ -2997,6 +3109,8 @@ mod tests {
         let claims = crate::jwks::Claims {
             sub: "oidc-user-xyz".into(),
             aud: "launcher".into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token = encode_join_test_token(&claims, &material.encoding_key);
@@ -3005,7 +3119,8 @@ mod tests {
         // Join sur un serveur public : la clé effective (persistance) est le `sub` vérifié, pas
         // le display_name — exactement ce que fait `resolve_join_key` (Task C2) dans la boucle.
         let effective_key = resolve_join_key(true, display_name, &token, "launcher", &jwks_cache)
-            .expect("token valide, join accepté");
+            .expect("token valide, join accepté")
+            .key;
         assert_ne!(
             effective_key, display_name,
             "précondition du test : le sub doit diverger du display_name"
@@ -3055,12 +3170,15 @@ mod tests {
         let claims = crate::jwks::Claims {
             sub: "oidc-user-xyz".into(),
             aud: "launcher".into(),
+            name: None,
+            preferred_username: None,
             exp: far_future_timestamp(),
         };
         let token = encode_join_test_token(&claims, &material.encoding_key);
         let display_name = "AdminDisplayName";
         let effective_key = resolve_join_key(true, display_name, &token, "launcher", &jwks_cache)
-            .expect("token valide, join accepté");
+            .expect("token valide, join accepté")
+            .key;
 
         let root_admins: std::collections::HashSet<String> =
             [display_name.to_string()].into_iter().collect();

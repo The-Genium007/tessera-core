@@ -50,6 +50,31 @@ pub struct Claims {
     pub sub: String,
     pub aud: Audience,
     pub exp: u64,
+    /// Nom d'affichage ZITADEL (claim `name`, peuplé quand le scope `profile` est demandé — ce que
+    /// le launcher fait, `auth.rs`). Absent d'un token sans ce scope → `None`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Pseudo unique ZITADEL (claim `preferred_username`). Repli quand `name` est absent.
+    #[serde(default)]
+    pub preferred_username: Option<String>,
+}
+
+impl Claims {
+    /// Nom d'affichage **server-autoritaire** dérivé du JWT vérifié : `name` > `preferred_username`
+    /// > `sub`. Même ordre de priorité que le launcher (`session.rs`) → le nom montré en jeu est
+    /// identique à celui affiché dans le launcher. Sur un serveur public, ce nom REMPLACE le
+    /// `Join.display_name` fourni par le client (= username Windows via `GetUserNameA` côté netcode) :
+    /// ce dernier n'est jamais fiable (usurpable), collisionne (deux « Lucas », « Admin », « User »…)
+    /// et n'est pas une identité ZITADEL. Le `sub` (repli ultime) garantit un nom toujours non vide.
+    pub fn display_name(&self) -> String {
+        let non_empty = |s: &String| !s.trim().is_empty();
+        self.name
+            .as_ref()
+            .filter(|s| non_empty(s))
+            .or_else(|| self.preferred_username.as_ref().filter(|s| non_empty(s)))
+            .cloned()
+            .unwrap_or_else(|| self.sub.clone())
+    }
 }
 
 #[derive(Debug)]
@@ -247,10 +272,29 @@ mod tests {
     }
 
     #[test]
+    fn display_name_prefers_name_then_preferred_username_then_sub() {
+        let mk = |name: Option<&str>, pu: Option<&str>| Claims {
+            sub: "sub-xyz".into(),
+            name: name.map(String::from),
+            preferred_username: pu.map(String::from),
+            aud: "launcher".into(),
+            exp: far_future_timestamp(),
+        };
+        assert_eq!(mk(Some("Neo"), Some("neo_z")).display_name(), "Neo");
+        assert_eq!(mk(None, Some("neo_z")).display_name(), "neo_z");
+        assert_eq!(mk(None, None).display_name(), "sub-xyz");
+        // Un `name`/`preferred_username` vide ou blanc ne compte pas : on retombe au niveau suivant.
+        assert_eq!(mk(Some("  "), Some("neo_z")).display_name(), "neo_z");
+        assert_eq!(mk(Some(""), None).display_name(), "sub-xyz");
+    }
+
+    #[test]
     fn verify_accepts_token_signed_with_matching_key() {
         let (encoding_key, jwks_cache) = test_key_pair_and_cache();
         let claims = Claims {
             sub: "user-123".into(),
+            name: None,
+            preferred_username: None,
             aud: "launcher".into(),
             exp: far_future_timestamp(),
         };
@@ -266,6 +310,8 @@ mod tests {
         let other_encoding_key = other_encoding_key();
         let claims = Claims {
             sub: "user-123".into(),
+            name: None,
+            preferred_username: None,
             aud: "launcher".into(),
             exp: far_future_timestamp(),
         };
@@ -279,6 +325,8 @@ mod tests {
         let (encoding_key, jwks_cache) = test_key_pair_and_cache();
         let claims = Claims {
             sub: "user-123".into(),
+            name: None,
+            preferred_username: None,
             aud: "launcher".into(),
             exp: 1, // 1970
         };
@@ -362,6 +410,8 @@ mod tests {
         let (encoding_key, jwks_cache) = test_key_pair_and_cache();
         let claims = Claims {
             sub: "user-123".into(),
+            name: None,
+            preferred_username: None,
             aud: "other-client".into(),
             exp: far_future_timestamp(),
         };
@@ -416,6 +466,8 @@ mod tests {
 
         let claims = Claims {
             sub: "user-123".into(),
+            name: None,
+            preferred_username: None,
             aud: "launcher".into(),
             exp: far_future_timestamp(),
         };
