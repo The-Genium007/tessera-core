@@ -1207,11 +1207,11 @@ pub async fn gateway_main(
                         if let Some(sl) = slog.as_mut() {
                             sl.write(&crate::session_log::SessionEvent::Join {
                                 client: cid,
-                                name: display.clone(),
+                                name: disp_name.clone(),
                             });
                         }
                         keys.insert(cid, effective_key);
-                        display_names.insert(cid, display);
+                        display_names.insert(cid, disp_name);
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
                     let now = std::time::Instant::now();
