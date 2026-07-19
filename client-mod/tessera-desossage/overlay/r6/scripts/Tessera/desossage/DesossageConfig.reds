@@ -27,6 +27,8 @@ public class DesossageConfig {
   public let pedestrians: ref<DesossageEntry>;
   public let vendors: ref<DesossageEntry>;
   public let transit: ref<DesossageEntry>;
+  // Radios ambiantes (bornes de rue / appartements). Voir DesossageRadio.reds.
+  public let radios: ref<DesossageEntry>;
   // B. Ordre public & hostilité
   public let police: ref<DesossageEntry>;
   public let ambientSecurity: ref<DesossageEntry>;
@@ -40,7 +42,12 @@ public class DesossageConfig {
   public let vendingDevices: ref<DesossageEntry>;
   public let worldInteractables: ref<DesossageEntry>;
   // E. Quêtes & progression
-  public let questTriggers: ref<DesossageEntry>;
+  // phoneCalls (ex-questTriggers, renommé 2026-07-19) : coupe les appels téléphoniques entrants
+  // (fixers/gigs poussés par téléphone). Son SEUL mécanisme a toujours été ApplyPhoneCallRestriction
+  // — le nom « questTriggers » était trompeur (les déclencheurs de proximité/donneurs de quête n'y
+  // étaient jamais couverts ; ils passent désormais par le blocage natif des spawn nodes, cf.
+  // tessera-client phase 2). Voir DesossageEvents.reds (Tessera_ApplyPhoneCalls).
+  public let phoneCalls: ref<DesossageEntry>;
   public let tutorials: ref<DesossageEntry>;
   // Fact save `air_traffic_off` (posé via QuestsSystem.SetFactStr, pas un système de spawn) —
   // rattaché ici plutôt qu'à A. car appliqué par le même mécanisme que tutorials, pas par
@@ -59,6 +66,7 @@ public class DesossageConfig {
     c.pedestrians = DesossageEntry.New(false, 0.0);
     c.vendors = DesossageEntry.New(false, 0.0);
     c.transit = DesossageEntry.New(false, 0.0);
+    c.radios = DesossageEntry.New(false, 0.0);
     // B.
     c.police = DesossageEntry.New(false, 0.0);
     c.ambientSecurity = DesossageEntry.New(false, 0.0);
@@ -72,7 +80,7 @@ public class DesossageConfig {
     c.vendingDevices = DesossageEntry.New(false, 0.0);
     c.worldInteractables = DesossageEntry.New(false, 0.0);
     // E.
-    c.questTriggers = DesossageEntry.New(false, 0.0);
+    c.phoneCalls = DesossageEntry.New(false, 0.0);
     c.tutorials = DesossageEntry.New(false, 0.0);
     c.airTraffic = DesossageEntry.New(false, 0.0);
     // F.

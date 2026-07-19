@@ -9,8 +9,8 @@ module Tessera.UiKit.Test
 // créer. `PhoneSystem` (gameScriptableSystem) expose `IsPhoneAvailable() -> Bool` et
 // `OnUsePhone(handle:UsePhoneRequest) -> Void` mais ce dernier attend un objet requête construit,
 // pas un simple booléen. Le seul accesseur déjà confirmé sur ce projet est
-// `GameInstance.GetPhoneManager(game).ApplyPhoneCallRestriction(Bool)` (désossage `questTriggers`,
-// DesossageEvents.reds) — bloque/débloque les appels, n'ouvre pas l'écran lui-même.
+// `GameInstance.GetPhoneManager(game).ApplyPhoneCallRestriction(Bool)` (désossage `phoneCalls`,
+// ex-`questTriggers`, DesossageEvents.reds) — bloque/débloque les appels, n'ouvre pas l'écran lui-même.
 //
 // PIN IN-GAME : deux pistes à essayer en priorité au palier H1 (console CET, sans rebuild) —
 // (a) `GameInstance.GetPhoneManager(game)` expose peut-être une méthode d'ouverture directe non

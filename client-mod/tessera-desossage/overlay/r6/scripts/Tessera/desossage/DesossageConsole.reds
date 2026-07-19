@@ -37,6 +37,7 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
   if StrCmp(name, "pedestrians") == 0 { e = c.pedestrians; }
   else if StrCmp(name, "vendors") == 0 { e = c.vendors; }
   else if StrCmp(name, "transit") == 0 { e = c.transit; }
+  else if StrCmp(name, "radios") == 0 { e = c.radios; }
   else if StrCmp(name, "police") == 0 { e = c.police; }
   else if StrCmp(name, "ambientSecurity") == 0 { e = c.ambientSecurity; }
   else if StrCmp(name, "gangHostility") == 0 { e = c.gangHostility; }
@@ -46,7 +47,7 @@ public func Tessera_SetLever(name: String, active: Bool, density: Float) -> Void
   else if StrCmp(name, "fastTravel") == 0 { e = c.fastTravel; }
   else if StrCmp(name, "vendingDevices") == 0 { e = c.vendingDevices; }
   else if StrCmp(name, "worldInteractables") == 0 { e = c.worldInteractables; }
-  else if StrCmp(name, "questTriggers") == 0 { e = c.questTriggers; }
+  else if StrCmp(name, "phoneCalls") == 0 { e = c.phoneCalls; }
   else if StrCmp(name, "tutorials") == 0 { e = c.tutorials; }
   else if StrCmp(name, "mapMarkers") == 0 { e = c.mapMarkers; }
   else {
