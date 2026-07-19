@@ -48,7 +48,7 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
         with:
           components: rustfmt, clippy
       - name: Installer flatc (version exacte du crate flatbuffers, cf. server/Dockerfile)
