@@ -59,6 +59,9 @@ pub fn encode_position_update(pos: [f32; 3]) -> Vec<u8> {
         &PositionUpdateArgs {
             position: Some(&p),
             yaw: 0.0,
+            locomotion: 0,
+            move_dir: 0,
+            flags: 0,
         },
     );
     let env = ClientEnvelope::create(
@@ -237,6 +240,9 @@ mod tests {
             &PositionUpdateArgs {
                 position: Some(&pos),
                 yaw: 0.0,
+                locomotion: 0,
+                move_dir: 0,
+                flags: 0,
             },
         );
         let env = ClientEnvelope::create(
@@ -335,6 +341,9 @@ mod tests {
             &PositionUpdateArgs {
                 position: Some(&pos),
                 yaw: 1.25,
+                locomotion: 0,
+                move_dir: 0,
+                flags: 0,
             },
         );
         let env = ClientEnvelope::create(

@@ -105,6 +105,9 @@ fn main() {
                 &PositionUpdateArgs {
                     position: Some(&pos),
                     yaw,
+                    locomotion: 0,
+                    move_dir: 0,
+                    flags: 0,
                 },
             );
             let env = ClientEnvelope::create(

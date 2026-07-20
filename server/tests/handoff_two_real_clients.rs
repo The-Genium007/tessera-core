@@ -133,6 +133,9 @@ fn encode_position(x: f32, y: f32, z: f32) -> Vec<u8> {
         &PositionUpdateArgs {
             position: Some(&pos),
             yaw: 0.0,
+            locomotion: 0,
+            move_dir: 0,
+            flags: 0,
         },
     );
     let env = ClientEnvelope::create(

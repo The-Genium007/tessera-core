@@ -48,6 +48,10 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
                     id: *id,
                     position: Some(&pos),
                     yaw: *yaw,
+                    locomotion: 0,
+                    move_dir: 0,
+                    flags: 0,
+                    sustained: 0,
                 },
             )
         })
@@ -89,6 +93,10 @@ mod tests {
                         id: *id,
                         position: Some(&pos),
                         yaw: 0.0,
+                        locomotion: 0,
+                        move_dir: 0,
+                        flags: 0,
+                        sustained: 0,
                     },
                 )
             })

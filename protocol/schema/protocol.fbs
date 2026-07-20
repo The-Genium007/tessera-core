@@ -11,10 +11,30 @@ struct Vec3 { x:float; y:float; z:float; }
 // évolutions du schéma). 0 par défaut FlatBuffers si absent (client trop ancien pour connaître le
 // champ) — mismatch avec la version courante dès qu'elle dépasse 0.
 table Join { display_name:string; token:string; protocol_version:uint; }
-table PositionUpdate { position:Vec3; yaw:float; }
 
-table PlayerState { id:ulong; position:Vec3; yaw:float; }
+// locomotion : enum EXTENSIBLE en ubyte (append-only) — 0=Idle 1=Walk 2=Run 3=Sprint
+//              4=CrouchIdle 5=CrouchMove 6=InAir/Jump (documenté, jamais re-gelé).
+// move_dir   : direction du déplacement RELATIVE au regard, quantifiée sur 1 octet (256
+//              directions) → l'AnimGraph choisit strafe / marche arrière ; 0 si immobile.
+// flags      : bitfield ubyte réservé (visée haut-du-corps, futur — non implémenté ici).
+table PositionUpdate { position:Vec3; yaw:float; locomotion:ubyte; move_dir:ubyte; flags:ubyte; }
+
+// sustained : pose/émote TENUE en cours (id d'émote natif), 0 = aucune. N'existe que côté
+// PlayerState (le début/fin d'une pose tenue passe par EmoteReport, pas PositionUpdate).
+table PlayerState { id:ulong; position:Vec3; yaw:float; locomotion:ubyte; move_dir:ubyte; flags:ubyte; sustained:uint; }
 table Snapshot { tick:ulong; players:[PlayerState]; }
+
+// Client -> serveur, one-shot (saut, tir, reload, dodge, et émote one-shot type coucou).
+// action = enum extensible ; param = contexte (arme, id émote one-shot...).
+table PlayerActionReport { action:ubyte; param:uint; }
+
+// Client -> serveur. Pose TENUE uniquement : start=true la commence, start=false la termine.
+table EmoteReport { emote:uint; start:bool; }
+
+// Serveur -> clients proches (relais filtré par AoI, porte l'identité de l'acteur).
+// kind : 0=Action (extensible, réservé pour de futurs types d'événement) — une pose TENUE
+// n'est PAS un PlayerEvent (elle vit dans PlayerState.sustained, auto-cicatrisant).
+table PlayerEvent { actor:ulong; kind:ubyte; action:ubyte; param:uint; }
 
 // Envoyé juste avant de fermer la connexion, avec un motif lisible — serveur plein, flood
 // soutenu, etc. (audit prod 2026-07-03 §5.4 : avant, un client rejeté ne recevait aucune
@@ -66,8 +86,8 @@ table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
 // inter-joueurs au franchissement). Reste en FIN d'union, après PositionCorrection.
 table ShardAssignment { authoritative:string; overlaps:[string]; }
 
-union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment }
+union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }
