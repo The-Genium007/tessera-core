@@ -147,6 +147,19 @@ pub fn extract_admin_command(client_payload: &[u8]) -> Option<String> {
     cmd.text().map(|s| s.to_string())
 }
 
+/// Décode un `ClientEnvelope` client ; si c'est un `EntityInteraction` (fondation PNJ, palier 2),
+/// renvoie `(target, kind, param)` — l'entité visée, le type d'interaction rapporté (0=Menace/
+/// attaque 1=Parle 2=Interagit) et son contexte. L'arbitrage (traduire ou non en transition FSM)
+/// vit dans `NpcRecord::apply_interaction` (npc.rs), pas ici : ce module reste pur décodage.
+pub fn extract_entity_interaction(client_payload: &[u8]) -> Option<(u64, u8, u32)> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::EntityInteraction {
+        return None;
+    }
+    let ei = env.msg_as_entity_interaction()?;
+    Some((ei.target(), ei.kind(), ei.param()))
+}
+
 // ── Flux d'arrivée : dispatch personnage (palier 2, tranche A serveur) ────────────────────────
 // Même patron que `extract_admin_command`/`encode_command_result` : décodage/encodage pur, sans
 // connaissance du `CharacterStore` ni de la machine à états (celle-ci vit dans `gateway_main`).
@@ -697,6 +710,33 @@ mod tests {
         );
         assert_eq!(extract_admin_command(&client_join()), None); // pas un AdminCommand
         assert_eq!(extract_admin_command(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
+    fn extract_entity_interaction_reads_target_kind_and_param() {
+        let mut b = FlatBufferBuilder::new();
+        let ei = EntityInteraction::create(
+            &mut b,
+            &EntityInteractionArgs {
+                target: 42,
+                kind: 1,
+                param: 7,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::EntityInteraction,
+                msg: Some(ei.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        assert_eq!(
+            extract_entity_interaction(b.finished_data()),
+            Some((42, 1, 7))
+        );
+        assert_eq!(extract_entity_interaction(&client_join()), None); // pas un EntityInteraction
+        assert_eq!(extract_entity_interaction(&[9, 9, 9]), None); // garbage
     }
 
     #[test]

@@ -166,6 +166,9 @@ impl Server {
             &SnapshotArgs {
                 tick: self.world.tick(),
                 players: Some(players),
+                // PNJ pas encore peuplés dans cette boucle (fondation protocole, Task 5) —
+                // câblage réel (PopulationDirector -> NpcState) à Task 6.
+                npcs: None,
             },
         );
         let env = ServerEnvelope::create(
