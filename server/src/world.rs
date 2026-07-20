@@ -306,11 +306,11 @@ mod tests {
         let mut w = World::new();
         w.add_player(1);
         w.add_player(2);
-        // Si la taille de cellule choisie est ~radius (25.0 par exemple), placer les deux joueurs de
-        // part et d'autre d'une frontière de cellule plausible, à une distance réelle de 5.0 (bien
-        // sous radius=25.0).
-        w.set_pose(1, Pose { x: 24.0, y: 0.0, ..Default::default() });
-        w.set_pose(2, Pose { x: 29.0, y: 0.0, ..Default::default() }); // distance réelle = 5.0
+        // CELL_SIZE = 32.0 → frontières de cellule à x = 0, 32, 64, ... Les deux joueurs sont
+        // placés de part et d'autre de la frontière x=32 (cellules ADJACENTES réelles, pas la
+        // même cellule), à une distance réelle de 2.0 — bien sous radius=25.0.
+        w.set_pose(1, Pose { x: 31.0, y: 0.0, ..Default::default() });
+        w.set_pose(2, Pose { x: 33.0, y: 0.0, ..Default::default() }); // distance réelle = 2.0
         let snap = w.snapshot_for(1, 25.0);
         assert_eq!(snap.len(), 1, "joueur 2 doit être visible malgré une frontière de cellule potentielle entre les deux");
         assert_eq!(snap[0].0, 2);
