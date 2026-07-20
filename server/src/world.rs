@@ -27,7 +27,10 @@ type CellCoord = (i64, i64);
 const CELL_SIZE: f32 = 32.0;
 
 fn cell_of(x: f32, y: f32) -> CellCoord {
-    ((x / CELL_SIZE).floor() as i64, (y / CELL_SIZE).floor() as i64)
+    (
+        (x / CELL_SIZE).floor() as i64,
+        (y / CELL_SIZE).floor() as i64,
+    )
 }
 
 #[derive(Default)]
@@ -133,12 +136,16 @@ impl World {
         for dx in -cell_radius..=cell_radius {
             for dy in -cell_radius..=cell_radius {
                 let cell = (vcx + dx, vcy + dy);
-                let Some(bucket) = self.grid.get(&cell) else { continue };
+                let Some(bucket) = self.grid.get(&cell) else {
+                    continue;
+                };
                 for &id in bucket {
                     if id == viewer {
                         continue;
                     }
-                    let Some(pose) = self.players.get(&id) else { continue };
+                    let Some(pose) = self.players.get(&id) else {
+                        continue;
+                    };
                     let dx = pose.x - viewer_pose.x;
                     let dy = pose.y - viewer_pose.y;
                     if (dx * dx + dy * dy).sqrt() <= radius {
@@ -235,12 +242,24 @@ mod tests {
         let mut w = World::new();
         w.add_player(1);
         w.add_player(2);
-        w.set_pose(1, Pose { x: 5.0, y: 0.0, z: 0.0, yaw: 1.0, ..Default::default() });
+        w.set_pose(
+            1,
+            Pose {
+                x: 5.0,
+                y: 0.0,
+                z: 0.0,
+                yaw: 1.0,
+                ..Default::default()
+            },
+        );
         w.set_locomotion(1, 2, 10, 0);
         let snap = w.snapshot_for(2, 1000.0);
         assert_eq!(snap.len(), 1);
         let (_, pose) = snap[0];
-        assert_eq!(pose.x, 5.0, "la position ne doit pas être affectée par set_locomotion");
+        assert_eq!(
+            pose.x, 5.0,
+            "la position ne doit pas être affectée par set_locomotion"
+        );
         assert_eq!(pose.locomotion, 2);
         assert_eq!(pose.move_dir, 10);
     }
@@ -309,10 +328,28 @@ mod tests {
         // CELL_SIZE = 32.0 → frontières de cellule à x = 0, 32, 64, ... Les deux joueurs sont
         // placés de part et d'autre de la frontière x=32 (cellules ADJACENTES réelles, pas la
         // même cellule), à une distance réelle de 2.0 — bien sous radius=25.0.
-        w.set_pose(1, Pose { x: 31.0, y: 0.0, ..Default::default() });
-        w.set_pose(2, Pose { x: 33.0, y: 0.0, ..Default::default() }); // distance réelle = 2.0
+        w.set_pose(
+            1,
+            Pose {
+                x: 31.0,
+                y: 0.0,
+                ..Default::default()
+            },
+        );
+        w.set_pose(
+            2,
+            Pose {
+                x: 33.0,
+                y: 0.0,
+                ..Default::default()
+            },
+        ); // distance réelle = 2.0
         let snap = w.snapshot_for(1, 25.0);
-        assert_eq!(snap.len(), 1, "joueur 2 doit être visible malgré une frontière de cellule potentielle entre les deux");
+        assert_eq!(
+            snap.len(),
+            1,
+            "joueur 2 doit être visible malgré une frontière de cellule potentielle entre les deux"
+        );
         assert_eq!(snap[0].0, 2);
     }
 
@@ -328,7 +365,14 @@ mod tests {
             .collect();
         for (id, x, y) in &positions {
             w.add_player(*id);
-            w.set_pose(*id, Pose { x: *x, y: *y, ..Default::default() });
+            w.set_pose(
+                *id,
+                Pose {
+                    x: *x,
+                    y: *y,
+                    ..Default::default()
+                },
+            );
         }
         let radius = 20.0;
         for (viewer_id, vx, vy) in &positions {
@@ -369,12 +413,22 @@ mod tests {
             // Répartition large (grille 1000x1000 unités) pour garantir peu de voisins par cellule.
             let x = (i * 37 % 1000) as f32;
             let y = (i * 53 % 1000) as f32;
-            w.set_pose(i as u64, Pose { x, y, ..Default::default() });
+            w.set_pose(
+                i as u64,
+                Pose {
+                    x,
+                    y,
+                    ..Default::default()
+                },
+            );
         }
         let start = Instant::now();
         let snap = w.snapshot_for(0, 32.0); // rayon ~= une cellule
         let elapsed = start.elapsed();
-        println!("snapshot_for sur {n} joueurs dispersés : {elapsed:?}, {} voisins trouvés", snap.len());
+        println!(
+            "snapshot_for sur {n} joueurs dispersés : {elapsed:?}, {} voisins trouvés",
+            snap.len()
+        );
         assert!(
             elapsed.as_millis() < 5,
             "un snapshot sur une population dispersée doit rester sous quelques ms, pas dépendre de n"

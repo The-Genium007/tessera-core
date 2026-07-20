@@ -68,9 +68,10 @@ impl DegradationPolicy {
     pub fn cap_neighbors<T>(&self, sorted_by_distance: Vec<T>, tier: DegradationTier) -> Vec<T> {
         match tier {
             DegradationTier::Normal => sorted_by_distance,
-            DegradationTier::Degraded => {
-                sorted_by_distance.into_iter().take(self.neighbor_cap).collect()
-            }
+            DegradationTier::Degraded => sorted_by_distance
+                .into_iter()
+                .take(self.neighbor_cap)
+                .collect(),
         }
     }
 }
@@ -154,7 +155,10 @@ mod tests {
         let items: Vec<u32> = (0..100).collect();
         let result = policy.cap_neighbors(items, DegradationTier::Degraded);
         assert_eq!(result.len(), 60);
-        assert_eq!(result[0], 0, "garde les plus proches (déjà triés par distance croissante par le caller)");
+        assert_eq!(
+            result[0], 0,
+            "garde les plus proches (déjà triés par distance croissante par le caller)"
+        );
     }
 
     #[test]
@@ -167,17 +171,37 @@ mod tests {
 
     #[test]
     fn should_include_this_tick_always_true_in_normal_tier() {
-        assert!(should_include_this_tick(1000.0, 25.0, 7, DegradationTier::Normal));
+        assert!(should_include_this_tick(
+            1000.0,
+            25.0,
+            7,
+            DegradationTier::Normal
+        ));
     }
 
     #[test]
     fn should_include_this_tick_always_true_for_close_entities_even_when_degraded() {
-        assert!(should_include_this_tick(5.0, 25.0, 7, DegradationTier::Degraded));
+        assert!(should_include_this_tick(
+            5.0,
+            25.0,
+            7,
+            DegradationTier::Degraded
+        ));
     }
 
     #[test]
     fn should_include_this_tick_skips_far_entities_on_odd_ticks_when_degraded() {
-        assert!(!should_include_this_tick(20.0, 25.0, 7, DegradationTier::Degraded));
-        assert!(should_include_this_tick(20.0, 25.0, 8, DegradationTier::Degraded));
+        assert!(!should_include_this_tick(
+            20.0,
+            25.0,
+            7,
+            DegradationTier::Degraded
+        ));
+        assert!(should_include_this_tick(
+            20.0,
+            25.0,
+            8,
+            DegradationTier::Degraded
+        ));
     }
 }
