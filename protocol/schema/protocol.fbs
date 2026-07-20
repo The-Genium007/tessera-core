@@ -67,6 +67,10 @@ table CommandResult { success:bool; message:string; }
 // changement affectant ce compte, sans reconnexion nécessaire.
 table PermissionSync { nodes:[string]; }
 
+// File d'attente côté launcher (sous-projet C) — position et estimation, consommé AVANT même
+// de lancer le jeu. Pas d'écran d'attente in-game en v1.
+table QueueStatus { position:uint; eta_seconds:uint; }
+
 // Départ volontaire (déconnexion propre, ex. joueur qui quitte via un menu) — distinct d'une
 // coupure réseau/crash (`TransportEvent::Disconnected`, jamais annoncé par le client). Permet au
 // Gateway de libérer immédiatement le slot du joueur plutôt que d'attendre l'expiration d'un
@@ -91,7 +95,7 @@ table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
 table ShardAssignment { authoritative:string; overlaps:[string]; }
 
 union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, QueueStatus }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }
