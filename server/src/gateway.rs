@@ -1505,6 +1505,15 @@ pub async fn gateway_main(
                             }
                         } else if let Some(target) = unban_target.as_ref() {
                             if let Some((ban_persist, _)) = ban_store.as_mut() {
+                                // LIMITE ASSUMÉE (Task 1 : BanStore n'expose que
+                                // delete_by_subject_async, aucune suppression IP/HWID côté
+                                // Postgres) : un `/unban ip:X` ou `/unban hwid:Y` retire bien le
+                                // ban de la liste RAM `bans` juste au-dessus (execute() dans
+                                // admin_commands.rs traite les 3 vecteurs) — l'effet est donc
+                                // réel pour le reste de l'uptime de ce process — mais RIEN n'est
+                                // supprimé en base : au prochain redémarrage, le ban IP/HWID est
+                                // rechargé depuis Postgres et réapparaît silencieusement. Seul le
+                                // vecteur account est durablement débanni ici.
                                 if let Some(subject) = target.strip_prefix("account:") {
                                     if let Err(e) =
                                         ban_persist.delete_by_subject_async(subject).await
