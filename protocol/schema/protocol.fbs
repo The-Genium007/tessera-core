@@ -105,7 +105,7 @@ table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
 table ShardAssignment { authoritative:string; overlaps:[string]; }
 
 union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, QueueStatus, CharacterList, CharacterResult }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult, QueueStatus }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }
