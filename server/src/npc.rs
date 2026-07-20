@@ -50,6 +50,37 @@ impl NpcRecord {
             self.behavior = EntityBehavior::Fuite { menace: from };
         }
     }
+
+    /// Un pas du moteur de briques (spec modèle serveur §5 : « lit ces configs et pilote le FSM +
+    /// les intentions »). Nav-indépendant uniquement — aucune brique ici ne modifie la position ;
+    /// `marcher-route`/`patrouiller`/`aller-au-point`/`errer` sont différées au plan de navigation
+    /// et n'existent pas dans ce catalogue (Task 2 les rejetterait comme brique inconnue si un
+    /// opérateur les déclarait par erreur avant que le plan suivant ne les implémente — la
+    /// résolution ci-dessous ignore silencieusement une brique qu'elle ne reconnaît pas, un
+    /// comportement délibérément permissif pour ne pas faire planter le serveur sur une config
+    /// TOML en avance sur le code : documenté ici, pas un oubli).
+    ///
+    /// Ne fait RIEN si `behavior` est `Fuite`/`Hostile`/`ATerre` — ces états sont pilotés par la
+    /// FSM (interactions), pas par la brique passive de l'archétype (cohérent avec spec §2 : « le
+    /// FSM est la cause, la brique/pathfinding est l'effet » — une brique sociale ne doit jamais
+    /// écraser un état de peur/agression en cours).
+    pub fn apply_brique_tick(&mut self, archetype: &crate::npc_catalog::NpcArchetypeConfig) {
+        if !matches!(self.behavior, EntityBehavior::Calme | EntityBehavior::Flane) {
+            return;
+        }
+        if archetype
+            .briques
+            .iter()
+            .any(|b| b == "flaner-sur-place")
+        {
+            self.behavior = EntityBehavior::Flane;
+        }
+        // "rester-statique" : ne change jamais `behavior` (reste Calme) — c'est la définition même
+        // de la brique (spec §4 : « le danseur hip-hop = brique… zéro navigation »).
+        // "vendre"/"donner-quête"/"réagir-dialogue" : hooks sociaux, pas de transition de
+        // mouvement — traités par un futur plan d'interaction (fondation d'interaction, séquencement
+        // Phase 3.1), hors périmètre ici.
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +138,60 @@ mod record_tests {
         r.apply_interaction(55, 0);
         r.apply_interaction(99, 0);
         assert_eq!(r.behavior, EntityBehavior::Fuite { menace: 99 });
+    }
+}
+
+#[cfg(test)]
+mod brique_engine_tests {
+    use super::*;
+    use crate::npc_catalog::parse_and_validate;
+
+    fn archetype_with_briques(briques: &[&str]) -> crate::npc_catalog::NpcArchetypeConfig {
+        let toml = format!(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"test\"\nbriques = [{}]\n",
+            briques
+                .iter()
+                .map(|b| format!("\"{b}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        parse_and_validate(&toml).unwrap().archetype(1).unwrap().clone()
+    }
+
+    #[test]
+    fn flaner_sur_place_brique_moves_calme_npc_to_flane() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = archetype_with_briques(&["flaner-sur-place"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(r.behavior, EntityBehavior::Flane);
+    }
+
+    #[test]
+    fn rester_statique_brique_never_changes_calme() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = archetype_with_briques(&["rester-statique"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(r.behavior, EntityBehavior::Calme);
+    }
+
+    #[test]
+    fn brique_tick_never_overrides_an_active_fuite_state() {
+        let mut r = NpcRecord::new(1, 1);
+        r.apply_interaction(99, 0); // déclenche Fuite
+        let archetype = archetype_with_briques(&["flaner-sur-place"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(
+            r.behavior,
+            EntityBehavior::Fuite { menace: 99 },
+            "une brique passive ne doit jamais écraser un état de peur en cours"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_brique_name_is_silently_ignored_not_a_panic() {
+        let mut r = NpcRecord::new(1, 1); // brique nav, pas encore implémentée ici
+        let archetype = archetype_with_briques(&["marcher-route"]);
+        r.apply_brique_tick(&archetype); // ne doit pas paniquer
+        assert_eq!(r.behavior, EntityBehavior::Calme);
     }
 }
