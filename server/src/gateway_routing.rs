@@ -160,6 +160,18 @@ pub fn extract_entity_interaction(client_payload: &[u8]) -> Option<(u64, u8, u32
     Some((ei.target(), ei.kind(), ei.param()))
 }
 
+/// Décode un `ClientEnvelope` ; si c'est un `InteractionChoice` (fondation d'interaction, palier 2),
+/// renvoie `(session_id, choice, param)`. Pur décodage — l'arbitrage (session valide ? bon
+/// propriétaire ?) vit dans `interaction_session.rs`, pas ici.
+pub fn extract_interaction_choice(client_payload: &[u8]) -> Option<(u64, u8, u32)> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::InteractionChoice {
+        return None;
+    }
+    let ic = env.msg_as_interaction_choice()?;
+    Some((ic.session_id(), ic.choice(), ic.param()))
+}
+
 // ── Flux d'arrivée : dispatch personnage (palier 2, tranche A serveur) ────────────────────────
 // Même patron que `extract_admin_command`/`encode_command_result` : décodage/encodage pur, sans
 // connaissance du `CharacterStore` ni de la machine à états (celle-ci vit dans `gateway_main`).
@@ -216,6 +228,69 @@ pub fn encode_character_result(success: bool, reason: &str) -> Vec<u8> {
         &ServerEnvelopeArgs {
             msg_type: ServerMsg::CharacterResult,
             msg: Some(res.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Construit le payload serveur d'un `InteractionOpen` (fondation d'interaction, palier 2 —
+/// ouverture de session). `payload` est copié tel quel (opaque, cf. commentaire du schéma) :
+/// ni ce module ni le schéma n'en interprètent le contenu.
+pub fn encode_interaction_open(
+    session_id: u64,
+    target: u64,
+    ui_kind: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    use protocol::{
+        InteractionOpen, InteractionOpenArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
+    };
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let payload_off = b.create_vector(payload);
+    let open = InteractionOpen::create(
+        &mut b,
+        &InteractionOpenArgs {
+            session_id,
+            target,
+            ui_kind,
+            payload: Some(payload_off),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::InteractionOpen,
+            msg: Some(open.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Construit le payload serveur d'un `InteractionResult` (fondation d'interaction, palier 2 —
+/// verdict de session). `ok=false` avec `payload` vide = refus sans détail transporté (session
+/// inconnue/expirée) ; `ok=false` avec `payload` = raison in-fiction encodée par le contenu réel
+/// (différé, cf. commentaire du schéma).
+pub fn encode_interaction_result(session_id: u64, ok: bool, payload: &[u8]) -> Vec<u8> {
+    use protocol::{
+        InteractionResult, InteractionResultArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
+    };
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let payload_off = b.create_vector(payload);
+    let result = InteractionResult::create(
+        &mut b,
+        &InteractionResultArgs {
+            session_id,
+            ok,
+            payload: Some(payload_off),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::InteractionResult,
+            msg: Some(result.as_union_value()),
         },
     );
     b.finish(env, None);
@@ -740,6 +815,33 @@ mod tests {
     }
 
     #[test]
+    fn extract_interaction_choice_reads_session_id_choice_and_param() {
+        let mut b = FlatBufferBuilder::new();
+        let ic = InteractionChoice::create(
+            &mut b,
+            &InteractionChoiceArgs {
+                session_id: 99,
+                choice: 2,
+                param: 5,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::InteractionChoice,
+                msg: Some(ic.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        assert_eq!(
+            extract_interaction_choice(b.finished_data()),
+            Some((99, 2, 5))
+        );
+        assert_eq!(extract_interaction_choice(&client_join()), None); // pas un InteractionChoice
+        assert_eq!(extract_interaction_choice(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
     fn extract_create_character_reads_the_pseudonym() {
         let mut b = FlatBufferBuilder::new();
         let p = b.create_string("Nyx");
@@ -802,6 +904,29 @@ mod tests {
         let res = env.msg_as_character_result().unwrap();
         assert!(!res.success());
         assert_eq!(res.reason(), Some("pseudonym_taken"));
+    }
+
+    #[test]
+    fn encode_interaction_open_roundtrips() {
+        let bytes = encode_interaction_open(7, 42, 1, &[1, 2, 3]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::InteractionOpen);
+        let open = env.msg_as_interaction_open().unwrap();
+        assert_eq!(open.session_id(), 7);
+        assert_eq!(open.target(), 42);
+        assert_eq!(open.ui_kind(), 1);
+        assert_eq!(open.payload().unwrap().bytes(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn encode_interaction_result_roundtrips() {
+        let bytes = encode_interaction_result(7, false, &[9]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::InteractionResult);
+        let res = env.msg_as_interaction_result().unwrap();
+        assert_eq!(res.session_id(), 7);
+        assert!(!res.ok());
+        assert_eq!(res.payload().unwrap().bytes(), &[9]);
     }
 
     #[test]

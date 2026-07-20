@@ -52,6 +52,22 @@ table EmoteReport { emote:uint; start:bool; }
 // seulement RAPPORTER une interaction que le serveur choisit ou non de traduire en transition FSM.
 table EntityInteraction { target:ulong; kind:ubyte; param:uint; }
 
+// Enveloppe de session d'interaction (fondation d'interaction, palier 2, Phase 3.1). session_id
+// arbitre la concurrence (deux joueurs au même comptoir) et le timeout — géré par
+// interaction_session.rs, jamais interprété côté client au-delà du renvoyer tel quel dans
+// InteractionChoice. `payload` OPAQUE (spec §7 : « payload opaque de l'enveloppe... zéro re-gel ») —
+// ni ce schéma ni le serveur transport n'interprètent son contenu, seul un futur plan de contenu
+// (économie/dialogue) le fera. `ui_kind` sélectionne l'écran tessera-uikit côté client (vendeur/
+// dialogue/contrat...), catalogue non figé ici (contenu différé, spec §9).
+table InteractionOpen { session_id:ulong; target:ulong; ui_kind:ubyte; payload:[ubyte]; }
+// Client -> serveur : réponse à une InteractionOpen. `choice`/`param` opaques, interprétés par le
+// contenu réel (différé) ; ce plan ne transporte que la plomberie.
+table InteractionChoice { session_id:ulong; choice:ubyte; param:uint; }
+// Verdict serveur (spec §2 : succès, OU refus avec raison IN-FICTION portée dans `payload`, jamais
+// un code d'erreur générique). `ok=false` avec payload vide = refus sans détail transporté (ex.
+// session inconnue/expirée) ; `ok=false` avec payload = raison encodée par le contenu réel (différé).
+table InteractionResult { session_id:ulong; ok:bool; payload:[ubyte]; }
+
 // Serveur -> clients proches (relais filtré par AoI, porte l'identité de l'acteur).
 // kind : 0=Action (extensible, réservé pour de futurs types d'événement) — une pose TENUE
 // n'est PAS un PlayerEvent (elle vit dans PlayerState.sustained, auto-cicatrisant).
@@ -121,8 +137,8 @@ table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
 // inter-joueurs au franchissement). Reste en FIN d'union, après PositionCorrection.
 table ShardAssignment { authoritative:string; overlaps:[string]; }
 
-union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter, EntityInteraction }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult, QueueStatus }
+union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter, EntityInteraction, InteractionChoice }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult, QueueStatus, InteractionOpen, InteractionResult }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }
