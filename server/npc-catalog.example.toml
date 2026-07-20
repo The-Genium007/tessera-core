@@ -1,0 +1,18 @@
+# Catalogue de briques comportementales PNJ (fondation nav-indépendante, palier 2).
+# Versionné comme les manifestes serveur — format_version bump à toute rupture de compat.
+format_version = 1
+
+[[archetype]]
+id = 1
+name = "marcheur-de-rue"
+briques = ["flaner-sur-place", "fuir-si-menace"]
+
+[[archetype]]
+id = 2
+name = "danseur-hip-hop"
+briques = ["rester-statique"]
+
+[[archetype]]
+id = 3
+name = "vendeur"
+briques = ["rester-statique", "vendre", "fuir-si-menace"]
