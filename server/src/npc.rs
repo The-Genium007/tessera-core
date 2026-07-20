@@ -85,6 +85,95 @@ impl NpcRecord {
     }
 }
 
+/// Une cible en `Fuite`/`Hostile`/`ATerre` refuse toute interaction fonctionnelle (spec §2 : « un
+/// vendeur `fuite`/`à terre` refuse ») — matrice interaction×FSM minimale (spec §10, « à écrire
+/// dans le moteur de briques »). `Calme`/`Flane`/`Alerte` restent interactibles : `Alerte` n'est
+/// qu'une vigilance accrue, pas un refus de contact (un PNJ qui a repéré une menace au loin peut
+/// encore répondre à un client qui l'aborde calmement).
+pub fn interaction_allowed(behavior: EntityBehavior) -> bool {
+    !matches!(
+        behavior,
+        EntityBehavior::Fuite { .. } | EntityBehavior::Hostile { .. } | EntityBehavior::ATerre
+    )
+}
+
+/// Résultat d'une transaction d'interaction (spec §4 : « transaction atomique »). `ok=false` porte
+/// une raison IN-FICTION (spec §2 : jamais « erreur 409 »load) — le CONTENU de cette raison est
+/// hors périmètre ici (aucune string réelle n'est décidée par ce squelette), seul le TRANSPORT
+/// (succès/échec + payload opaque) est fondé.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransactionOutcome {
+    pub ok: bool,
+    pub payload: Vec<u8>,
+}
+
+/// Squelette de transaction atomique (spec §4, §9 : contenu différé, plomberie seule). Suit
+/// EXACTEMENT le patron `admin_commands::execute` (server/src/admin_commands.rs:194-202) : PURE,
+/// synchrone, aucune I/O, aucun `.await` — la persistance et le log surviennent APRÈS, dans
+/// l'appelant (Task 5), jamais ici. `apply` reçoit une closure représentant LE contenu réel de la
+/// transaction (débit/stock/inventaire — inconnu de ce module, injecté par l'appelant) ; ce
+/// squelette ne fait que garantir l'ordre (vérifier `interaction_allowed` D'ABORD, exécuter
+/// ENSUITE, jamais l'inverse) — la seule garantie d'atomicité que ce plan peut honnêtement offrir
+/// sans connaître le contenu réel (spec §9 : l'économie est un gros sous-système séparé, différé).
+pub fn execute_transaction(
+    target_behavior: EntityBehavior,
+    apply: impl FnOnce() -> TransactionOutcome,
+) -> TransactionOutcome {
+    if !interaction_allowed(target_behavior) {
+        return TransactionOutcome {
+            ok: false,
+            payload: Vec::new(),
+        };
+    }
+    apply()
+}
+
+#[cfg(test)]
+mod interaction_fsm_tests {
+    use super::*;
+
+    #[test]
+    fn calme_flane_and_alerte_allow_interaction() {
+        assert!(interaction_allowed(EntityBehavior::Calme));
+        assert!(interaction_allowed(EntityBehavior::Flane));
+        assert!(interaction_allowed(EntityBehavior::Alerte { menace: 1 }));
+    }
+
+    #[test]
+    fn fuite_hostile_and_aterre_refuse_interaction() {
+        assert!(!interaction_allowed(EntityBehavior::Fuite { menace: 1 }));
+        assert!(!interaction_allowed(EntityBehavior::Hostile { cible: 1 }));
+        assert!(!interaction_allowed(EntityBehavior::ATerre));
+    }
+
+    #[test]
+    fn execute_transaction_calls_apply_when_the_target_is_interactible() {
+        let outcome = execute_transaction(EntityBehavior::Calme, || TransactionOutcome {
+            ok: true,
+            payload: vec![1, 2, 3],
+        });
+        assert_eq!(
+            outcome,
+            TransactionOutcome {
+                ok: true,
+                payload: vec![1, 2, 3]
+            }
+        );
+    }
+
+    #[test]
+    fn execute_transaction_never_calls_apply_when_the_target_refuses() {
+        // La closure ne doit JAMAIS s'exécuter si la cible refuse — vérifié en la faisant paniquer
+        // si elle est appelée : un test qui passerait silencieusement sans cette assertion ne
+        // prouverait rien sur l'ORDRE des opérations.
+        let outcome = execute_transaction(EntityBehavior::ATerre, || {
+            panic!("apply ne doit jamais être appelée si interaction_allowed est faux")
+        });
+        assert_eq!(outcome.ok, false);
+        assert!(outcome.payload.is_empty());
+    }
+}
+
 /// Encodage `EntityBehavior` -> `NpcState.behavior:ubyte` (protocol.fbs, doc comment sur `NpcState` :
 /// 0=Calme 1=Flane 2=Alerte 3=Fuite 4=Hostile 5=ATerre). `EntityBehavior` porte des données sur
 /// certains variants (`ClientId` pour Alerte/Fuite/Hostile) et n'a pas de `#[repr(u8)]` — un `as u8`
