@@ -58,10 +58,12 @@ impl Server {
                                 y: p.y(),
                                 z: p.z(),
                                 yaw: pu.yaw(),
-                                ..Default::default()
+                                ..self.world.pose_of(from).unwrap_or_default()
                             },
                         );
                     }
+                    self.world
+                        .set_locomotion(from, pu.locomotion(), pu.move_dir(), pu.flags());
                 }
             }
             _ => {}
@@ -81,10 +83,10 @@ impl Server {
                         id,
                         position: Some(&pos),
                         yaw: pose.yaw,
-                        locomotion: 0,
-                        move_dir: 0,
-                        flags: 0,
-                        sustained: 0,
+                        locomotion: pose.locomotion,
+                        move_dir: pose.move_dir,
+                        flags: pose.flags,
+                        sustained: pose.sustained,
                     },
                 )
             })
@@ -172,6 +174,109 @@ mod tests {
         let players1 = snap1.players().unwrap();
         assert_eq!(players1.len(), 1);
         assert_eq!(players1.get(0).id(), 2); // client 1 voit client 2
+    }
+
+    fn encode_position_with_locomotion(
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+        locomotion: u8,
+        move_dir: u8,
+    ) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let pos = Vec3::new(x, y, z);
+        let pu = PositionUpdate::create(
+            &mut b,
+            &PositionUpdateArgs {
+                position: Some(&pos),
+                yaw,
+                locomotion,
+                move_dir,
+                flags: 0,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::PositionUpdate,
+                msg: Some(pu.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    #[test]
+    fn position_update_carries_locomotion_into_snapshot() {
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position_with_locomotion(5.0, 0.0, 0.0, 0.0, 3, 42),
+        });
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2[0]).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let p = snap.players().unwrap().get(0);
+        assert_eq!(p.locomotion(), 3);
+        assert_eq!(p.move_dir(), 42);
+    }
+
+    #[test]
+    fn repeated_position_updates_do_not_reset_locomotion_to_idle() {
+        // Piège identifié en Task 2 : set_pose remplace toute la Pose. Un deuxième PositionUpdate
+        // (même sans nouveau champ de locomotion explicite envoyé par le client, qui renvoie
+        // toujours son état courant à chaque update selon la spec §8.1) ne doit jamais faire
+        // disparaître la valeur précédente si le client continue de la reporter correctement —
+        // ce test vérifie surtout que l'ordre d'application (set_pose puis set_locomotion, ou une
+        // fusion) ne perd pas le champ dans le MÊME message.
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position_with_locomotion(5.0, 0.0, 0.0, 0.0, 2, 5),
+        });
+        server.tick(&mut t);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position_with_locomotion(6.0, 0.0, 0.0, 0.0, 2, 5),
+        });
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let p = snap.players().unwrap().get(0);
+        assert_eq!(p.position().unwrap().x(), 6.0);
+        assert_eq!(p.locomotion(), 2);
+    }
+
+    #[test]
+    fn position_update_never_touches_sustained() {
+        // Le canal cosmétique continu (locomotion) et la pose tenue (sustained, pilotée par
+        // EmoteReport UNIQUEMENT) doivent rester complètement indépendants — un PositionUpdate ne
+        // doit jamais remettre sustained à 0 s'il était déjà posé.
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        // (Task 4 posera sustained via EmoteReport ; ici on vérifie juste qu'un PositionUpdate seul
+        // sur un joueur au sustained par défaut à 0 le laisse à 0 - non-régression basique, le test
+        // complet d'indépendance vraie est en Task 4 une fois EmoteReport câblé.)
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position_with_locomotion(5.0, 0.0, 0.0, 0.0, 1, 0),
+        });
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2[0]).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert_eq!(snap.players().unwrap().get(0).sustained(), 0);
     }
 
     #[test]
