@@ -65,6 +65,7 @@ fn two_shards(addr_a: &str, addr_b: &str) -> ShardTopology {
     ShardTopology {
         shards: vec![
             ShardZone {
+                id: addr_a.to_string(),
                 addr: addr_a.to_string(),
                 cells: vec![(
                     CellZone {
@@ -80,6 +81,7 @@ fn two_shards(addr_a: &str, addr_b: &str) -> ShardTopology {
                 )],
             },
             ShardZone {
+                id: addr_b.to_string(),
                 addr: addr_b.to_string(),
                 cells: vec![(
                     CellZone {
