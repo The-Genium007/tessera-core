@@ -1,10 +1,12 @@
 //! Boucle serveur : draine les events transport, met à jour le World, diffuse les snapshots.
 //! Générique sur `Transport` → testable avec `InMemoryTransport`, branché sur GNS en prod.
 
+use crate::metrics::Metrics;
 use crate::transport::{ClientId, Transport, TransportEvent};
 use crate::world::{Pose, World};
 use flatbuffers::FlatBufferBuilder;
 use protocol::*;
+use std::sync::Arc;
 
 pub struct Server {
     world: World,
@@ -12,6 +14,11 @@ pub struct Server {
     /// File d'événements one-shot du tick courant (actor, kind, action, param) — accumulée par
     /// `apply_client_message`, drainée et relayée aux voisins AoI en fin de `tick()`.
     pending_events: Vec<(ClientId, u8, u8, u32)>,
+    /// Métriques partagées (buckets de durée de tick, overruns) — `None` pour tous les appels de
+    /// test existants (`Server::new`), qui ne veulent pas dépendre de `Metrics`. `Some(..)`
+    /// uniquement pour les `Server` construits via `Server::new_with_metrics` (câblage
+    /// `shard_main`, Task 6 observabilité).
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl Server {
@@ -20,6 +27,21 @@ impl Server {
             world: World::new(),
             aoi_radius,
             pending_events: Vec::new(),
+            metrics: None,
+        }
+    }
+
+    /// Identique à `Server::new`, avec en plus l'enregistrement de la durée de chaque tick dans
+    /// `metrics` (buckets d'histogramme + compteur d'overruns, cf. `metrics.rs`). Nouvelle
+    /// méthode plutôt qu'un changement de signature de `Server::new` : ce dernier est déjà
+    /// appelé par de nombreux tests existants (`server_loop.rs`, `gateway.rs`, `shard.rs`) qui ne
+    /// doivent pas être modifiés pour cette tâche.
+    pub fn new_with_metrics(aoi_radius: f32, metrics: Arc<Metrics>) -> Self {
+        Self {
+            world: World::new(),
+            aoi_radius,
+            pending_events: Vec::new(),
+            metrics: Some(metrics),
         }
     }
 
@@ -30,6 +52,7 @@ impl Server {
 
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
     pub fn tick<T: Transport>(&mut self, transport: &mut T) {
+        let tick_start = std::time::Instant::now();
         for ev in transport.poll() {
             match ev {
                 TransportEvent::Connected(id) => self.world.add_player(id),
@@ -68,6 +91,9 @@ impl Server {
                 b.finish(env, None);
                 transport.send(neighbor_id, b.finished_data());
             }
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.record_tick_duration_micros(tick_start.elapsed().as_micros() as u64);
         }
     }
 

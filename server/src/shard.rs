@@ -35,7 +35,11 @@ pub async fn shard_main(addr: &str, aoi_radius: f32, metrics_addr: &str) -> std:
             }
         };
         tracing::info!("Gateway connecté depuis {peer}");
-        let mut server = Server::new(aoi_radius);
+        // `new_with_metrics` (Task 6, observabilité) : `Server::tick` enregistre lui-même la durée
+        // de chaque tick dans l'histogramme `tessera_tick_duration`/le compteur `overruns_total` —
+        // en plus (pas à la place) de `last_tick_micros` ci-dessous, qui reste la gauge "dernier
+        // tick" existante consommée par le dashboard/l'alerte ShardFrozen.
+        let mut server = Server::new_with_metrics(aoi_radius, metrics.clone());
         let mut transport = InternalTransport::new();
         let mut buf = [0u8; 8192];
         let mut ticker = tokio::time::interval(TICK);

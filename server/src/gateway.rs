@@ -1897,6 +1897,9 @@ pub async fn gateway_main(
         // Stall : une itération complète (poll + routage + merge + envois) au-delà de 100 ms
         // (2× le budget de tick 50 ms) mérite une trace — c'est le « gel » vécu par les joueurs.
         let iter_micros = iter_start.elapsed().as_micros() as u64;
+        // Task 6 (observabilité) : exposée en gauge Prometheus, même valeur que le calcul de
+        // stall ci-dessous — un seul chronomètre pour les deux, pas de mesure dupliquée.
+        metrics.record_gateway_loop_duration_micros(iter_micros as i64);
         if iter_micros > 100_000 {
             if let Some(sl) = slog.as_mut() {
                 sl.write(&crate::session_log::SessionEvent::TickStall {

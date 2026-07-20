@@ -1,0 +1,33 @@
+# Règles d'alerte Prometheus — sous-projet C (robustesse opérationnelle), Task 6 observabilité.
+# Monté en lecture seule dans le conteneur `prometheus` (/etc/prometheus/alert-rules.yml),
+# référencé par `rule_files` dans prometheus.yml voisin.
+#
+# Métriques consommées, toutes exposées par tessera-core/server/src/metrics.rs (render()) :
+# - tessera_tick_duration_bucket{le="..."} : histogramme cumulatif (secondes) — TickP99High.
+# - tessera_last_tick_micros : gauge, horodatage implicite via l'absence de mise à jour — ShardFrozen
+#   compare `time()` (secondes Unix courantes) à cette valeur convertie en secondes ; ce calcul n'a
+#   de sens QUE si `tessera_last_tick_micros` était lui-même une estimation d'époque Unix, ce qu'il
+#   N'EST PAS ici (c'est une durée de tick, pas un timestamp) — règle reprise telle quelle du brief
+#   de tâche ; à corriger dans une itération future (ex. exposer un vrai `tessera_last_tick_unix_ts`)
+#   avant de compter dessus en prod. Documenté plutôt que "corrigé en silence" : le brief demandait
+#   cette expression precise, un changement de sémantique mérite sa propre décision/tâche.
+# - tessera_players : gauge — NoPlayersDuringPeakHours.
+groups:
+  - name: tessera
+    rules:
+      - alert: TickP99High
+        expr: histogram_quantile(0.99, tessera_tick_duration_bucket) > 0.040
+        for: 1m
+        annotations:
+          summary: "p99 tick > 40ms depuis 1 minute"
+
+      - alert: ShardFrozen
+        expr: time() - tessera_last_tick_micros / 1e6 > 30
+        annotations:
+          summary: "Shard gelé — dernier tick il y a plus de 30s"
+
+      - alert: NoPlayersDuringPeakHours
+        expr: tessera_players == 0
+        for: 5m
+        annotations:
+          summary: "Zéro joueur connecté"

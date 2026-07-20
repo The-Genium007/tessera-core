@@ -1,0 +1,26 @@
+# Config Prometheus — sous-projet C (robustesse opérationnelle), Task 6 observabilité.
+# Monté en lecture seule dans le conteneur `prometheus` du docker-compose.yml voisin
+# (/etc/prometheus/prometheus.yml). Scrape le Gateway sur le port 9100 (texte Prometheus,
+# cf. tessera-core/server/src/metrics.rs) — même port que celui laissé volontairement NON publié
+# via `ports:` sur l'hôte (accessible seulement à l'intérieur du réseau Docker interne).
+#
+# ⚠️ Cible actuelle : 'gateway:9100' uniquement. Les 10 shards exposent aussi un endpoint métriques
+# (--metrics-addr 0.0.0.0:9101, cf. docker-compose.yml) mais ne sont PAS encore scrapés ici — portée
+# volontairement limitée à la boucle Gateway pour cette tâche (buckets de tick, overruns, durée de
+# boucle Gateway). Ajouter un job 'tessera-shard' avec les 10 cibles (shard-a:9101 … shard-j:9101)
+# est une extension naturelle, pas incluse ici pour ne pas dépasser le périmètre de Task 6.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'tessera-gateway'
+    static_configs:
+      - targets: ['gateway:9100']
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - '/etc/prometheus/alert-rules.yml'
