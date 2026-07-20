@@ -9,6 +9,9 @@ use protocol::*;
 pub struct Server {
     world: World,
     aoi_radius: f32,
+    /// File d'événements one-shot du tick courant (actor, kind, action, param) — accumulée par
+    /// `apply_client_message`, drainée et relayée aux voisins AoI en fin de `tick()`.
+    pending_events: Vec<(ClientId, u8, u8, u32)>,
 }
 
 impl Server {
@@ -16,6 +19,7 @@ impl Server {
         Self {
             world: World::new(),
             aoi_radius,
+            pending_events: Vec::new(),
         }
     }
 
@@ -39,6 +43,31 @@ impl Server {
             b.reset();
             let bytes = self.encode_snapshot_for(id, &mut b);
             transport.send(id, &bytes);
+        }
+        // Relais des événements one-shot du tick, filtré par le même AoI que les snapshots.
+        for (actor, kind, action, param) in self.pending_events.drain(..) {
+            let neighbors = self.world.snapshot_for(actor, self.aoi_radius);
+            for (neighbor_id, _) in neighbors {
+                b.reset();
+                let ev = PlayerEvent::create(
+                    &mut b,
+                    &PlayerEventArgs {
+                        actor,
+                        kind,
+                        action,
+                        param,
+                    },
+                );
+                let env = ServerEnvelope::create(
+                    &mut b,
+                    &ServerEnvelopeArgs {
+                        msg_type: ServerMsg::PlayerEvent,
+                        msg: Some(ev.as_union_value()),
+                    },
+                );
+                b.finish(env, None);
+                transport.send(neighbor_id, b.finished_data());
+            }
         }
     }
 
@@ -70,6 +99,14 @@ impl Server {
                 if let Some(er) = env.msg_as_emote_report() {
                     let emote = if er.start() { er.emote() } else { 0 };
                     self.world.set_sustained(from, emote);
+                }
+            }
+            ClientMsg::PlayerActionReport => {
+                if let Some(ar) = env.msg_as_player_action_report() {
+                    // kind=0=Action (seul type existant pour l'instant, cf. schéma). Relayé en fin
+                    // de tick, filtré par AoI — jamais appliqué à la position/locomotion (canal
+                    // cosmétique one-shot).
+                    self.pending_events.push((from, 0, ar.action(), ar.param()));
                 }
             }
             _ => {}
@@ -366,6 +403,114 @@ mod tests {
             "la pose tenue doit survivre au PositionUpdate suivant"
         );
         assert_eq!(p.position().unwrap().x(), 1.0);
+    }
+
+    fn encode_player_action(action: u8, param: u32) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let ar = PlayerActionReport::create(&mut b, &PlayerActionReportArgs { action, param });
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::PlayerActionReport,
+                msg: Some(ar.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    fn decode_player_event(bytes: &[u8]) -> Option<(u64, u8, u8, u32)> {
+        let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+        if env.msg_type() != ServerMsg::PlayerEvent {
+            return None;
+        }
+        let pe = env.msg_as_player_event()?;
+        Some((pe.actor(), pe.kind(), pe.action(), pe.param()))
+    }
+
+    #[test]
+    fn player_action_report_relays_player_event_to_aoi_neighbor() {
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_player_action(5, 99),
+        });
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        // sent_to_2 contient le Snapshot ET le PlayerEvent — filtrer par type.
+        let event = sent_to_2.iter().find_map(|b| decode_player_event(b));
+        let (actor, kind, action, param) = event.expect("le voisin doit recevoir le PlayerEvent");
+        assert_eq!(actor, 1);
+        assert_eq!(kind, 0);
+        assert_eq!(action, 5);
+        assert_eq!(param, 99);
+    }
+
+    #[test]
+    fn player_action_report_not_relayed_outside_aoi_radius() {
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position_with_locomotion(500.0, 0.0, 0.0, 0.0, 0, 0),
+        });
+        server.tick(&mut t);
+        t.take_sent(2); // vider le snapshot du premier tick
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_player_action(5, 99),
+        });
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let event = sent_to_2.iter().find_map(|b| decode_player_event(b));
+        assert!(
+            event.is_none(),
+            "le joueur 2 est hors AoI (500 > 50), ne doit rien recevoir"
+        );
+    }
+
+    #[test]
+    fn player_action_report_never_touches_position_or_locomotion() {
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position_with_locomotion(3.0, 0.0, 0.0, 0.0, 2, 0),
+        });
+        server.tick(&mut t);
+        t.take_sent(2);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_player_action(1, 0),
+        }); // ex. Jump
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let env = flatbuffers::root::<ServerEnvelope>(
+            sent_to_2
+                .iter()
+                .find(|b| {
+                    flatbuffers::root::<ServerEnvelope>(b)
+                        .map(|e| e.msg_type() == ServerMsg::Snapshot)
+                        .unwrap_or(false)
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let p = snap.players().unwrap().get(0);
+        assert_eq!(
+            p.position().unwrap().x(),
+            3.0,
+            "un PlayerActionReport ne doit jamais déplacer le joueur"
+        );
+        assert_eq!(p.locomotion(), 2, "ni changer sa locomotion continue");
     }
 
     #[test]
