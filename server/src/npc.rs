@@ -90,6 +90,12 @@ impl NpcRecord {
 /// dans le moteur de briques »). `Calme`/`Flane`/`Alerte` restent interactibles : `Alerte` n'est
 /// qu'une vigilance accrue, pas un refus de contact (un PNJ qui a repéré une menace au loin peut
 /// encore répondre à un client qui l'aborde calmement).
+///
+/// Note : contrairement à `behavior_to_u8` (match exhaustif, sans bras `_`, qui casse
+/// volontairement à la compilation si `EntityBehavior` gagne un variant), cette fonction utilise
+/// `matches!` sur une liste de refus — un futur variant non listé ici serait AUTORISÉ par défaut,
+/// pas refusé. Si un futur plan ajoute un état FSM qui doit refuser l'interaction, l'ajouter
+/// explicitement à ce `matches!`, ne pas compter sur une erreur de compilation pour le rappeler.
 pub fn interaction_allowed(behavior: EntityBehavior) -> bool {
     !matches!(
         behavior,
@@ -98,7 +104,7 @@ pub fn interaction_allowed(behavior: EntityBehavior) -> bool {
 }
 
 /// Résultat d'une transaction d'interaction (spec §4 : « transaction atomique »). `ok=false` porte
-/// une raison IN-FICTION (spec §2 : jamais « erreur 409 »load) — le CONTENU de cette raison est
+/// une raison IN-FICTION (spec §2 : jamais « erreur 409 ») — le CONTENU de cette raison est
 /// hors périmètre ici (aucune string réelle n'est décidée par ce squelette), seul le TRANSPORT
 /// (succès/échec + payload opaque) est fondé.
 #[derive(Debug, Clone, PartialEq)]
