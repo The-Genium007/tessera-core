@@ -147,6 +147,108 @@ pub fn extract_admin_command(client_payload: &[u8]) -> Option<String> {
     cmd.text().map(|s| s.to_string())
 }
 
+// ── Flux d'arrivée : dispatch personnage (palier 2, tranche A serveur) ────────────────────────
+// Même patron que `extract_admin_command`/`encode_command_result` : décodage/encodage pur, sans
+// connaissance du `CharacterStore` ni de la machine à états (celle-ci vit dans `gateway_main`).
+
+/// Décode un `ClientEnvelope` client ; si c'est un `CreateCharacter`, renvoie le pseudonyme demandé.
+pub fn extract_create_character(client_payload: &[u8]) -> Option<String> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::CreateCharacter {
+        return None;
+    }
+    let cmd = env.msg_as_create_character()?;
+    cmd.pseudonym().map(|s| s.to_string())
+}
+
+/// Décode un `ClientEnvelope` client ; si c'est un `SelectCharacter`, renvoie l'id du personnage
+/// que le client souhaite incarner.
+pub fn extract_select_character(client_payload: &[u8]) -> Option<u64> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::SelectCharacter {
+        return None;
+    }
+    env.msg_as_select_character().map(|c| c.id())
+}
+
+/// Décode un `ClientEnvelope` client ; si c'est un `DeleteCharacter`, renvoie l'id du personnage
+/// à supprimer.
+pub fn extract_delete_character(client_payload: &[u8]) -> Option<u64> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::DeleteCharacter {
+        return None;
+    }
+    env.msg_as_delete_character().map(|c| c.id())
+}
+
+/// Construit le payload serveur d'un `CharacterResult` — réponse à un `CreateCharacter`/
+/// `SelectCharacter`/`DeleteCharacter`. `reason` porte un code d'erreur stable (`pseudonym_taken`,
+/// `slot_full`, `not_found`, `not_owner`, `database_error`) quand `success` est faux, chaîne vide
+/// en cas de succès.
+pub fn encode_character_result(success: bool, reason: &str) -> Vec<u8> {
+    use protocol::{
+        CharacterResult, CharacterResultArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
+    };
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let reason_off = b.create_string(reason);
+    let res = CharacterResult::create(
+        &mut b,
+        &CharacterResultArgs {
+            success,
+            reason: Some(reason_off),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::CharacterResult,
+            msg: Some(res.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Construit le payload serveur d'un `CharacterList` — envoyé automatiquement à l'entrée en
+/// `AwaitingSelection` (liste des personnages du compte). `characters` est une liste de
+/// `(id, pseudonym)` déjà résolue par l'appelant depuis le `CharacterStore`.
+pub fn encode_character_list(characters: &[(u64, String)]) -> Vec<u8> {
+    use protocol::{
+        CharacterList, CharacterListArgs, CharacterSummary, CharacterSummaryArgs, ServerEnvelope,
+        ServerEnvelopeArgs, ServerMsg,
+    };
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let summaries: Vec<_> = characters
+        .iter()
+        .map(|(id, pseudonym)| {
+            let p = b.create_string(pseudonym);
+            CharacterSummary::create(
+                &mut b,
+                &CharacterSummaryArgs {
+                    id: *id,
+                    pseudonym: Some(p),
+                },
+            )
+        })
+        .collect();
+    let vec_off = b.create_vector(&summaries);
+    let list = CharacterList::create(
+        &mut b,
+        &CharacterListArgs {
+            characters: Some(vec_off),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::CharacterList,
+            msg: Some(list.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
 use crate::internal_net::event_to_client_event_frame;
 use crate::transport::{ClientId, TransportEvent};
 use std::collections::HashMap;
@@ -595,6 +697,85 @@ mod tests {
         );
         assert_eq!(extract_admin_command(&client_join()), None); // pas un AdminCommand
         assert_eq!(extract_admin_command(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
+    fn extract_create_character_reads_the_pseudonym() {
+        let mut b = FlatBufferBuilder::new();
+        let p = b.create_string("Nyx");
+        let cmd = CreateCharacter::create(&mut b, &CreateCharacterArgs { pseudonym: Some(p) });
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::CreateCharacter,
+                msg: Some(cmd.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        assert_eq!(
+            extract_create_character(b.finished_data()),
+            Some("Nyx".to_string())
+        );
+        assert_eq!(extract_create_character(&client_join()), None); // pas un CreateCharacter
+        assert_eq!(extract_create_character(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
+    fn extract_select_character_reads_the_id() {
+        let mut b = FlatBufferBuilder::new();
+        let cmd = SelectCharacter::create(&mut b, &SelectCharacterArgs { id: 42 });
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::SelectCharacter,
+                msg: Some(cmd.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        assert_eq!(extract_select_character(b.finished_data()), Some(42));
+        assert_eq!(extract_select_character(&client_join()), None); // pas un SelectCharacter
+        assert_eq!(extract_select_character(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
+    fn extract_delete_character_reads_the_id() {
+        let mut b = FlatBufferBuilder::new();
+        let cmd = DeleteCharacter::create(&mut b, &DeleteCharacterArgs { id: 7 });
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::DeleteCharacter,
+                msg: Some(cmd.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        assert_eq!(extract_delete_character(b.finished_data()), Some(7));
+        assert_eq!(extract_delete_character(&client_join()), None); // pas un DeleteCharacter
+        assert_eq!(extract_delete_character(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
+    fn encode_character_result_roundtrips() {
+        let bytes = encode_character_result(false, "pseudonym_taken");
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::CharacterResult);
+        let res = env.msg_as_character_result().unwrap();
+        assert!(!res.success());
+        assert_eq!(res.reason(), Some("pseudonym_taken"));
+    }
+
+    #[test]
+    fn encode_character_list_roundtrips_multiple_summaries() {
+        let bytes = encode_character_list(&[(1, "Nyx".to_string()), (2, "Vex".to_string())]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::CharacterList);
+        let list = env.msg_as_character_list().unwrap();
+        let chars = list.characters().unwrap();
+        assert_eq!(chars.len(), 2);
+        assert_eq!(chars.get(0).id(), 1);
+        assert_eq!(chars.get(0).pseudonym(), Some("Nyx"));
+        assert_eq!(chars.get(1).id(), 2);
+        assert_eq!(chars.get(1).pseudonym(), Some("Vex"));
     }
 
     #[test]

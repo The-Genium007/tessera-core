@@ -39,7 +39,11 @@ impl PriorityQueue {
             .unwrap_or(self.entries.len());
         self.entries.insert(
             pos,
-            QueueEntry { client_id, priority, joined_at: Instant::now() },
+            QueueEntry {
+                client_id,
+                priority,
+                joined_at: Instant::now(),
+            },
         );
     }
 
@@ -92,7 +96,11 @@ mod tests {
         q.enqueue(1, Priority::Public);
         q.enqueue(2, Priority::Staff);
         q.enqueue(3, Priority::Premium);
-        assert_eq!(q.dequeue_next(), Some(2), "staff en tête malgré l'ordre d'arrivée");
+        assert_eq!(
+            q.dequeue_next(),
+            Some(2),
+            "staff en tête malgré l'ordre d'arrivée"
+        );
         assert_eq!(q.dequeue_next(), Some(3));
         assert_eq!(q.dequeue_next(), Some(1));
     }
@@ -111,7 +119,11 @@ mod tests {
         let mut q = PriorityQueue::new();
         q.enqueue(1, Priority::Public);
         q.enqueue(2, Priority::Staff);
-        assert_eq!(q.position_of(2), Some(1), "le staff arrivé après doit être en position 1");
+        assert_eq!(
+            q.position_of(2),
+            Some(1),
+            "le staff arrivé après doit être en position 1"
+        );
         assert_eq!(q.position_of(1), Some(2));
     }
 

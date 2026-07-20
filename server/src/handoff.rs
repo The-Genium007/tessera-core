@@ -73,12 +73,24 @@ impl CellZone {
 
 /// Un shard (ou "groupe" de cellules Voronoï simulées par un même process, décision 3 de la
 /// spec câblage runtime tessellation d'autorité) et les cellules d'autorité dont il est
-/// responsable. `addr` sert aussi d'identifiant. Chaque élément de `cells` porte sa géométrie
-/// (`CellZone`) et son rayon de tampon déjà résolu en amont (artefact ou override manuel par
-/// cellule, décision 5 de la même spec) — pas de rayon uniforme par shard : une cellule dense et
-/// une cellule périphérique du même groupe ont des tampons différents.
+/// responsable. Chaque élément de `cells` porte sa géométrie (`CellZone`) et son rayon de tampon
+/// déjà résolu en amont (artefact ou override manuel par cellule, décision 5 de la même spec) —
+/// pas de rayon uniforme par shard : une cellule dense et une cellule périphérique du même groupe
+/// ont des tampons différents.
+///
+/// **`id` et `addr` sont deux choses distinctes, ne pas les confondre** (séparation faite le
+/// 2026-07-20, quand `addr` est devenue une vraie adresse réseau) :
+/// - `id` — identifiant LOGIQUE (`"group-0"`…), le seul qui sorte du serveur : il part au client
+///   dans `ShardAssignment` et il est publié dans `shard_map.json` via le directory. Stable,
+///   indépendant du déploiement, sans valeur pour un attaquant.
+/// - `addr` — `host:port` INTERNE, uniquement pour que le Gateway ouvre son lien TCP vers le
+///   shard (`write_to_shard`). Ne doit jamais fuiter vers un client ni vers un artefact public.
+///
+/// `locate()` et tout ce qui en découle (`Placement`, `LoadAction`) manipulent des **id**.
+/// La résolution id→addr se fait au seul moment de l'écriture, via `ShardTopology::addr_for`.
 #[derive(Debug, Clone)]
 pub struct ShardZone {
+    pub id: String,
     pub addr: String,
     pub cells: Vec<(CellZone, f32)>,
 }
@@ -87,6 +99,18 @@ pub struct ShardZone {
 #[derive(Debug, Clone)]
 pub struct ShardTopology {
     pub shards: Vec<ShardZone>,
+}
+
+impl ShardTopology {
+    /// Adresse réseau interne du shard d'id logique `id`, pour ouvrir le lien Gateway→Shard.
+    /// `None` si l'id est inconnu — l'appelant doit alors le signaler bruyamment plutôt que de
+    /// laisser le client disparaître du monde en silence.
+    pub fn addr_for(&self, id: &str) -> Option<&str> {
+        self.shards
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.addr.as_str())
+    }
 }
 
 /// Résultat du placement d'un joueur : un autoritaire + 0..n shards en zone tampon.
@@ -116,42 +140,42 @@ impl ShardTopology {
     /// non remplacé) ; il est combiné en interne avec le rayon de tampon déjà résolu (artefact ou
     /// override) de la cellule où se trouve le joueur.
     pub fn locate(&self, x: f32, y: f32, rank_bonus: f32) -> Placement {
-        // Autoritaire : parmi les shards ayant une cellule contenant le point, l'adresse
-        // minimale. On retient aussi le rayon de tampon de LA CELLULE QUI CONTIENT LE POINT
+        // Autoritaire : parmi les shards ayant une cellule contenant le point, l'id minimal.
+        // On retient aussi le rayon de tampon de LA CELLULE QUI CONTIENT LE POINT
         // (pas d'une autre cellule du même shard) — c'est ce rayon, pas celui d'un voisin, qui
         // sert de seuil de zone tampon ci-dessous.
-        let containing_addr = self
+        let containing_id = self
             .shards
             .iter()
             .filter(|s| s.cells.iter().any(|(cell, _)| cell.contains(x, y)))
-            .map(|s| s.addr.clone())
+            .map(|s| s.id.clone())
             .min();
 
-        let (authoritative, own_cell_buffer) = match containing_addr {
-            Some(addr) => {
+        let (authoritative, own_cell_buffer) = match containing_id {
+            Some(id) => {
                 let shard = self
                     .shards
                     .iter()
-                    .find(|s| s.addr == addr)
-                    .expect("adresse retenue ci-dessus provient de self.shards");
+                    .find(|s| s.id == id)
+                    .expect("id retenu ci-dessus provient de self.shards");
                 let buffer = shard
                     .cells
                     .iter()
                     .find(|(cell, _)| cell.contains(x, y))
                     .map(|(_, b)| *b)
                     .unwrap_or(0.0);
-                (addr, buffer)
+                (id, buffer)
             }
             None => {
                 // Hors couverture (aucune cellule ne contient le point — ne devrait pas arriver
                 // avec la couverture raster réelle de l'artefact v3) : fallback au shard le plus
-                // proche (min sur toutes ses cellules), tie-break adresse minimale — comportement
+                // proche (min sur toutes ses cellules), tie-break id minimal — comportement
                 // de fallback préservé fidèlement de l'ancienne implémentation `Aabb`. Le rayon de
                 // tampon retenu est alors celui de la cellule la plus proche de ce shard.
                 match self.shards.iter().min_by(|a, b| {
                     shard_dist(a, x, y)
                         .total_cmp(&shard_dist(b, x, y))
-                        .then(a.addr.cmp(&b.addr))
+                        .then(a.id.cmp(&b.id))
                 }) {
                     Some(shard) => {
                         let buffer = shard
@@ -160,7 +184,7 @@ impl ShardTopology {
                             .min_by(|(ca, _), (cb, _)| ca.dist(x, y).total_cmp(&cb.dist(x, y)))
                             .map(|(_, b)| *b)
                             .unwrap_or(0.0);
-                        (shard.addr.clone(), buffer)
+                        (shard.id.clone(), buffer)
                     }
                     None => (String::new(), 0.0),
                 }
@@ -180,9 +204,9 @@ impl ShardTopology {
         let mut overlaps: Vec<String> = self
             .shards
             .iter()
-            .filter(|s| s.addr != authoritative)
+            .filter(|s| s.id != authoritative)
             .filter(|s| shard_dist(s, x, y) <= threshold)
-            .map(|s| s.addr.clone())
+            .map(|s| s.id.clone())
             .collect();
         overlaps.sort();
         Placement {
@@ -690,6 +714,7 @@ mod tests {
         ShardTopology {
             shards: vec![
                 ShardZone {
+                    id: "A".into(),
                     addr: "A".into(),
                     cells: vec![(
                         CellZone {
@@ -699,6 +724,7 @@ mod tests {
                     )],
                 },
                 ShardZone {
+                    id: "B".into(),
                     addr: "B".into(),
                     cells: vec![(
                         CellZone {
@@ -717,6 +743,7 @@ mod tests {
         ShardTopology {
             shards: vec![
                 ShardZone {
+                    id: "SW".into(),
                     addr: "SW".into(),
                     cells: vec![(
                         CellZone {
@@ -726,6 +753,7 @@ mod tests {
                     )],
                 },
                 ShardZone {
+                    id: "SE".into(),
                     addr: "SE".into(),
                     cells: vec![(
                         CellZone {
@@ -735,6 +763,7 @@ mod tests {
                     )],
                 },
                 ShardZone {
+                    id: "NW".into(),
                     addr: "NW".into(),
                     cells: vec![(
                         CellZone {
@@ -744,6 +773,7 @@ mod tests {
                     )],
                 },
                 ShardZone {
+                    id: "NE".into(),
                     addr: "NE".into(),
                     cells: vec![(
                         CellZone {
@@ -804,6 +834,7 @@ mod tests {
             boundary_rings: vec![square(100.0, 100.0, 10.0)],
         };
         let shard = ShardZone {
+            id: "shard-group-1".into(),
             addr: "shard-group-1".into(),
             cells: vec![(zone_a, 25.0), (zone_b, 25.0)],
         };
@@ -823,6 +854,7 @@ mod tests {
         // candidat. Deux ShardZone adjacentes à x=1000 : A (dense, buffer=25.0) et B (périphérie,
         // buffer=600.0).
         let a = ShardZone {
+            id: "A".into(),
             addr: "A".into(),
             cells: vec![(
                 CellZone {
@@ -832,6 +864,7 @@ mod tests {
             )],
         };
         let b = ShardZone {
+            id: "B".into(),
             addr: "B".into(),
             cells: vec![(
                 CellZone {

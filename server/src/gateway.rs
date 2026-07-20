@@ -34,9 +34,16 @@ pub struct ShardLink {
     reader: FrameReader,
 }
 
-/// Écrit `frames` vers le shard à `shard_addr`, en connectant si besoin. Une connexion déjà
-/// présente dans `shards` mais dont l'écriture échoue est évacuée avant de renvoyer l'erreur —
-/// une entrée morte ne doit jamais bloquer une reconnexion au prochain appel.
+/// Écrit `frames` vers le shard d'id logique `shard_id`, en se connectant à `shard_addr` si
+/// besoin. Une connexion déjà présente dans `shards` mais dont l'écriture échoue est évacuée avant
+/// de renvoyer l'erreur — une entrée morte ne doit jamais bloquer une reconnexion au prochain
+/// appel.
+///
+/// **`shards` est indexée par id logique, pas par adresse.** C'est le même vocabulaire que
+/// `ShardLoader` (`loaded_shards`) et que les clés internes de `latest` : sans ça, l'élagage
+/// `per_shard.retain(|s, _| loaded.contains(s))` comparerait des adresses à des ids et jetterait
+/// TOUS les snapshots — un monde vide, à nouveau, et toujours en silence. `shard_addr` ne sert
+/// qu'au `TcpStream::connect` et ne doit jamais servir de clé.
 ///
 /// Renvoie `true` si cet appel vient de créer la connexion (1re connexion, ou reconnexion après
 /// une entrée morte évacuée) — signal utilisé par l'appelant pour re-semer l'état des clients
@@ -44,13 +51,14 @@ pub struct ShardLink {
 /// vient d'accepter une nouvelle connexion a perdu tout son état précédent.
 pub async fn write_to_shard(
     shards: &mut HashMap<String, ShardLink>,
+    shard_id: &str,
     shard_addr: &str,
     frames: &[Vec<u8>],
 ) -> std::io::Result<bool> {
-    let created = if !shards.contains_key(shard_addr) {
+    let created = if !shards.contains_key(shard_id) {
         let sock = TcpStream::connect(shard_addr).await?;
         shards.insert(
-            shard_addr.to_string(),
+            shard_id.to_string(),
             ShardLink {
                 sock,
                 reader: FrameReader::new(),
@@ -61,7 +69,7 @@ pub async fn write_to_shard(
         false
     };
     let result: std::io::Result<()> = async {
-        let link = shards.get_mut(shard_addr).unwrap();
+        let link = shards.get_mut(shard_id).unwrap();
         for f in frames {
             link.sock.write_all(f).await?;
         }
@@ -69,7 +77,7 @@ pub async fn write_to_shard(
     }
     .await;
     if let Err(e) = result {
-        shards.remove(shard_addr);
+        shards.remove(shard_id);
         return Err(e);
     }
     Ok(created)
@@ -531,6 +539,17 @@ pub fn resolve_whitelist(
     }
 }
 
+/// Phase de connexion d'un client dans le flux d'arrivée (palier 2). Après un Join réussi sur un
+/// serveur à store personnage, le client est en `AwaitingSelection` (choix/creation de personnage,
+/// ses `PositionUpdate` sont ignorés) jusqu'à un `SelectCharacter` valide qui le fait passer en
+/// `Playing(character_id)`. Défini au niveau module (et non local à `gateway_main`) pour pouvoir
+/// être nommé dans la signature de `cleanup_client_state`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConnectionPhase {
+    AwaitingSelection,
+    Playing(i64), // character_id sélectionné
+}
+
 /// Nettoie tout l'état par-client (`cid`) que le Gateway maintient en mémoire, et sauvegarde sa
 /// dernière position connue avant de l'oublier — chemin PARTAGÉ entre une déconnexion (crash/coupure
 /// réseau, `TransportEvent::Disconnected`) et un départ volontaire (`Leave`, Task C3) : les deux
@@ -555,6 +574,7 @@ pub fn cleanup_client_state(
     loader: &mut crate::handoff::ShardLoader,
     latest: &mut HashMap<u64, HashMap<String, Vec<u8>>>,
     prev_placements: &mut HashMap<u64, crate::handoff::Placement>,
+    connection_phase: &mut HashMap<u64, ConnectionPhase>,
 ) {
     if let Some(name) = keys.remove(&cid) {
         if let Some(pos) = last_pos.get(&cid).copied() {
@@ -579,6 +599,7 @@ pub fn cleanup_client_state(
     loader.forget(cid);
     latest.remove(&cid);
     prev_placements.remove(&cid);
+    connection_phase.remove(&cid);
 }
 
 /// Reconstruit, pour chaque client que le Gateway sait chargé sur `shard_addr`, les frames à
@@ -787,11 +808,19 @@ pub async fn gateway_main(
     // la persistance `ban`/`unban` sont alors des no-op — comportement inchangé pour ce cas.
     // `Some((store, bans_actifs_charges_au_boot))` sur serveur public.
     mut ban_store: Option<(crate::ban_store::BanStore, Vec<crate::ban_store::BanRecord>)>,
+    // Store personnage (flux d'arrivée, palier 2). `None` sur un serveur privé (FileStore,
+    // pas de Postgres) — le flux personnage est alors inerte : aucun `CharacterList` n'est
+    // envoyé et les messages `CreateCharacter`/`SelectCharacter`/`DeleteCharacter` restent sans
+    // effet (comportement historique préservé pour les serveurs privés qui n'ont jamais eu de
+    // sélection de personnage). `Some(..)` uniquement quand `identity_public` (même Postgres que
+    // `PostgresStore`), cf. `bin/gateway.rs`.
+    mut character_store: Option<crate::character_store::CharacterStore>,
 ) -> std::io::Result<()> {
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
-        extract_admin_command, extract_join_fields, extract_leave, extract_position,
-        extract_position_yaw, extract_time_report,
+        encode_character_list, encode_character_result, extract_admin_command,
+        extract_create_character, extract_delete_character, extract_join_fields, extract_leave,
+        extract_position, extract_position_yaw, extract_select_character, extract_time_report,
     };
     use crate::gns_transport::GnsTransport;
     use crate::handoff::{LoadAction, Rank, ShardLoader};
@@ -871,6 +900,20 @@ pub async fn gateway_main(
     // vrai toggle, ex. `maintenance::MaintenanceSchedule::should_drain_now`).
     #[allow(unused_mut)]
     let mut drain_mode = false;
+
+    // Machine à états d'arrivée (flux d'arrivée, palier 2). Un client passe en `AwaitingSelection`
+    // dès son Join réussi (on lui envoie alors la liste de ses personnages) et n'entre en jeu
+    // (`Playing`) qu'après un `SelectCharacter` valide. Tant qu'il est en `AwaitingSelection`, ses
+    // `PositionUpdate` sont ignorés (il n'incarne encore aucun personnage) — cf. spec character
+    // creation 2026-07-06. Un client sans entrée dans cette map (serveur privé sans store
+    // personnage, ou instant avant que le Join ne l'y insère) est traité comme non-en-jeu pour la
+    // garde `PositionUpdate` : le comportement historique d'un serveur privé n'a PAS de sélection
+    // de personnage, mais dans ce cas `character_store` est `None` et aucune entrée n'est jamais
+    // insérée — la garde `AwaitingSelection` ne s'applique donc qu'aux serveurs à store personnage
+    // (voir la garde dans la branche `extract_position`). Le type `ConnectionPhase` est défini au
+    // niveau module (pas local à cette fonction) pour être nommable dans la signature de
+    // `cleanup_client_state`, qui nettoie cette map comme les 14 autres.
+    let mut connection_phase: HashMap<u64, ConnectionPhase> = HashMap::new();
 
     let sock: SocketAddr = listen_addr.parse().expect("adresse GNS invalide");
     let mut client =
@@ -1091,6 +1134,7 @@ pub async fn gateway_main(
                         &mut loader,
                         &mut latest,
                         &mut prev_placements,
+                        &mut connection_phase,
                     );
                 }
                 if consumed {
@@ -1270,8 +1314,42 @@ pub async fn gateway_main(
                         }
                         keys.insert(cid, effective_key);
                         display_names.insert(cid, disp_name);
+
+                        // Flux d'arrivée (palier 2) : au lieu d'admettre directement le client
+                        // « en jeu », on le place en `AwaitingSelection` et on lui envoie la
+                        // liste de ses personnages. Il n'entrera en `Playing` qu'après un
+                        // `SelectCharacter` valide (voir la branche dédiée plus bas). Inerte sur
+                        // un serveur privé (`character_store` = None) : aucune entrée n'est posée,
+                        // aucun `CharacterList` envoyé, et le client se comporte comme avant cette
+                        // tâche (ses `PositionUpdate` passent directement — cf. garde dans la
+                        // branche `extract_position`).
+                        if let Some(store) = character_store.as_ref() {
+                            connection_phase.insert(cid, ConnectionPhase::AwaitingSelection);
+                            let owner = keys.get(&cid).cloned().unwrap_or_default();
+                            let characters =
+                                store.list_by_owner_async(&owner).await.unwrap_or_default();
+                            let summaries: Vec<(u64, String)> = characters
+                                .iter()
+                                .map(|c| (c.id as u64, c.pseudonym.clone()))
+                                .collect();
+                            client.send(cid, &encode_character_list(&summaries));
+                        }
                     }
                 } else if let Some((x, y, z)) = extract_position(data) {
+                    // Garde flux d'arrivée : un client encore en sélection de personnage
+                    // (`AwaitingSelection`) n'incarne aucun personnage — ses `PositionUpdate` sont
+                    // ignorés silencieusement jusqu'à un `SelectCharacter` valide (spec character
+                    // creation 2026-07-06). NB : on ne teste QUE `AwaitingSelection`, pas l'absence
+                    // d'entrée : sur un serveur privé (`character_store` = None) aucune entrée n'est
+                    // jamais posée, et le flux personnage est inerte — la position doit y passer
+                    // comme avant. Ne jamais transformer ce `matches!` en « ... | None » : ça
+                    // gèlerait tous les joueurs des serveurs privés.
+                    if matches!(
+                        connection_phase.get(&cid),
+                        Some(ConnectionPhase::AwaitingSelection)
+                    ) {
+                        continue;
+                    }
                     let now = std::time::Instant::now();
                     let rank = ranks.get(&cid).copied().unwrap_or(Rank::Player);
                     let bypassed = rank == Rank::GameMaster;
@@ -1620,13 +1698,108 @@ pub async fn gateway_main(
                         &mut loader,
                         &mut latest,
                         &mut prev_placements,
+                        &mut connection_phase,
                     );
                     continue;
+                } else if let Some(pseudonym) = extract_create_character(data) {
+                    // Création d'un personnage (flux d'arrivée). Le cap est gaté par le nœud de
+                    // permission `character.slots.N` déjà RÉSOLU au Join et mis en cache dans
+                    // `permissions` — on ne re-résout PAS l'autorité ici (pas de duplication de la
+                    // logique admin de `resolve_permissions`), on lit le résultat mémorisé. Défaut
+                    // 1 personnage (max_character_slots).
+                    if let Some(store) = character_store.as_mut() {
+                        let owner = keys.get(&cid).cloned().unwrap_or_default();
+                        let resolved = permissions.get(&cid).cloned().unwrap_or_default();
+                        let max_slots = crate::permissions::max_character_slots(&resolved);
+                        let current = store.list_by_owner_async(&owner).await.unwrap_or_default();
+                        if current.len() >= max_slots as usize {
+                            client.send(cid, &encode_character_result(false, "slot_full"));
+                        } else {
+                            match store.create_async(&owner, &pseudonym, b"").await {
+                                Ok(_) => client.send(cid, &encode_character_result(true, "")),
+                                Err(
+                                    crate::character_store::CharacterStoreError::PseudonymTaken,
+                                ) => {
+                                    client.send(
+                                        cid,
+                                        &encode_character_result(false, "pseudonym_taken"),
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(client = cid, error = %e, "création de personnage échouée");
+                                    client.send(
+                                        cid,
+                                        &encode_character_result(false, "database_error"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(character_id) = extract_select_character(data) {
+                    // Sélection d'un personnage : n'admet en `Playing` que si l'id appartient bien
+                    // au compte (liste par owner). Un id inconnu/volé renvoie `not_found` et laisse
+                    // le client en `AwaitingSelection`.
+                    if let Some(store) = character_store.as_ref() {
+                        let owner = keys.get(&cid).cloned().unwrap_or_default();
+                        let characters =
+                            store.list_by_owner_async(&owner).await.unwrap_or_default();
+                        if characters.iter().any(|c| c.id as u64 == character_id) {
+                            connection_phase
+                                .insert(cid, ConnectionPhase::Playing(character_id as i64));
+                            client.send(cid, &encode_character_result(true, ""));
+                        } else {
+                            client.send(cid, &encode_character_result(false, "not_found"));
+                        }
+                    }
+                } else if let Some(character_id) = extract_delete_character(data) {
+                    // Suppression d'un personnage : le store refuse proprement si le personnage
+                    // n'appartient pas au compte (`not_owner`) ou n'existe pas (`not_found`).
+                    if let Some(store) = character_store.as_mut() {
+                        let owner = keys.get(&cid).cloned().unwrap_or_default();
+                        match store.delete_async(&owner, character_id as i64).await {
+                            Ok(()) => client.send(cid, &encode_character_result(true, "")),
+                            Err(crate::character_store::CharacterStoreError::NotOwner) => {
+                                client.send(cid, &encode_character_result(false, "not_owner"));
+                            }
+                            Err(crate::character_store::CharacterStoreError::NotFound) => {
+                                client.send(cid, &encode_character_result(false, "not_found"));
+                            }
+                            Err(e) => {
+                                tracing::warn!(client = cid, error = %e, "suppression de personnage échouée");
+                                client.send(cid, &encode_character_result(false, "database_error"));
+                            }
+                        }
+                    }
                 }
             }
 
             for LoadAction::Forward { shard, frames } in loader.feed(ev, placement) {
-                if let Ok(true) = write_to_shard(&mut shards, &shard, &frames).await {
+                // `shard` est un id LOGIQUE ("group-N") ; la connexion TCP veut l'adresse réseau.
+                let Some(shard_addr) = topology.addr_for(&shard).map(str::to_string) else {
+                    tracing::error!(
+                        shard = %shard,
+                        client = cid,
+                        "aucune adresse connue pour ce shard — vérifier \
+                         runtime.topology.shard_addrs dans le manifeste"
+                    );
+                    continue;
+                };
+                // `Err` était auparavant avalé par un `if let Ok(true)` muet : quand aucune écriture
+                // shard ne passait, `latest` restait vide, plus aucun `Snapshot`/`WorldState`
+                // n'était renvoyé, et RIEN ne le disait — le monde paraissait simplement vide
+                // (incident du 2026-07-20, adresses `group-N` non résolvables). Un échec d'écriture
+                // shard est toujours grave : il doit laisser une trace.
+                let write = write_to_shard(&mut shards, &shard, &shard_addr, &frames).await;
+                if let Err(e) = &write {
+                    tracing::warn!(
+                        shard = %shard,
+                        addr = %shard_addr,
+                        client = cid,
+                        "écriture vers le shard impossible : {e} — ce client ne sera visible pour \
+                         personne tant que le lien n'est pas rétabli"
+                    );
+                }
+                if let Ok(true) = write {
                     // Le shard vient de (re)connecter : côté Shard, `Server::new()` est recréé à
                     // chaque connexion acceptée (cf. `shard_main`) — tout son état précédent est
                     // perdu. Re-semer le préambule + dernière position connue de chaque client que
@@ -1643,7 +1816,8 @@ pub async fn gateway_main(
                         );
                     }
                     for (_, seed_frames) in reseed_frames {
-                        let _ = write_to_shard(&mut shards, &shard, &seed_frames).await;
+                        let _ =
+                            write_to_shard(&mut shards, &shard, &shard_addr, &seed_frames).await;
                     }
                 }
             }
@@ -1674,6 +1848,7 @@ pub async fn gateway_main(
                 latest.remove(&cid);
                 snapshot_ticks.remove(&cid);
                 prev_placements.remove(&cid);
+                connection_phase.remove(&cid);
             } else if let Some(per_shard) = latest.get_mut(&cid) {
                 // Élaguer les snapshots des shards qui ne sont plus chargés pour ce client.
                 let loaded = loader.loaded_shards(cid);
@@ -2132,12 +2307,12 @@ mod tests {
 
         let mut shards: HashMap<String, ShardLink> = HashMap::new();
 
-        let created_first = write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+        let created_first = write_to_shard(&mut shards, &addr, &addr, &[b"a".to_vec()])
             .await
             .expect("1re écriture doit réussir");
         assert!(created_first, "la 1re écriture crée forcément la connexion");
 
-        let created_second = write_to_shard(&mut shards, &addr, &[b"b".to_vec()])
+        let created_second = write_to_shard(&mut shards, &addr, &addr, &[b"b".to_vec()])
             .await
             .expect("2e écriture doit réussir");
         assert!(
@@ -2175,7 +2350,9 @@ mod tests {
         });
 
         let mut shards: HashMap<String, ShardLink> = HashMap::new();
-        write_to_shard(&mut shards, &addr, &[]).await.unwrap();
+        write_to_shard(&mut shards, &addr, &addr, &[])
+            .await
+            .unwrap();
 
         // Laisse le temps aux 300 frames d'atterrir dans le buffer kernel du socket Gateway
         // AVANT le premier (et unique) appel à read_from_shards.
@@ -2205,7 +2382,7 @@ mod tests {
         });
 
         let mut shards: HashMap<String, ShardLink> = HashMap::new();
-        write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+        write_to_shard(&mut shards, &addr, &addr, &[b"a".to_vec()])
             .await
             .unwrap();
 
@@ -2286,7 +2463,9 @@ mod tests {
                 overlaps: vec![],
             }),
         ) {
-            write_to_shard(&mut shards, &shard, &frames).await.unwrap();
+            write_to_shard(&mut shards, &shard, &shard, &frames)
+                .await
+                .unwrap();
         }
         accept1.await.unwrap();
 
@@ -2343,12 +2522,14 @@ mod tests {
                 overlaps: vec![],
             }),
         ) {
-            let reconnected = write_to_shard(&mut shards, &shard, &frames).await.unwrap();
+            let reconnected = write_to_shard(&mut shards, &shard, &shard, &frames)
+                .await
+                .unwrap();
             if reconnected {
                 for (_, seed_frames) in
                     reseed_frames_for_reconnected_shard(&loader, &shard, &last_pos)
                 {
-                    write_to_shard(&mut shards, &shard, &seed_frames)
+                    write_to_shard(&mut shards, &shard, &shard, &seed_frames)
                         .await
                         .unwrap();
                 }
@@ -2385,7 +2566,7 @@ mod tests {
         let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
         let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
 
-        write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+        write_to_shard(&mut shards, &addr, &addr, &[b"a".to_vec()])
             .await
             .expect("1re connexion doit réussir");
         assert!(shards.contains_key(&addr));
@@ -2407,7 +2588,7 @@ mod tests {
         });
 
         // La prochaine écriture doit reconnecter automatiquement, sans intervention.
-        write_to_shard(&mut shards, &addr, &[b"b".to_vec()])
+        write_to_shard(&mut shards, &addr, &addr, &[b"b".to_vec()])
             .await
             .expect("la reconnexion automatique doit réussir");
         assert!(shards.contains_key(&addr));
@@ -2911,6 +3092,8 @@ mod tests {
                 overlaps: vec![],
             },
         );
+        let mut connection_phase = HashMap::new();
+        connection_phase.insert(cid, ConnectionPhase::AwaitingSelection);
 
         cleanup_client_state(
             cid,
@@ -2928,6 +3111,7 @@ mod tests {
             &mut loader,
             &mut latest,
             &mut prev_placements,
+            &mut connection_phase,
         );
 
         assert!(keys.is_empty(), "keys doit être nettoyé immédiatement");
@@ -2941,6 +3125,7 @@ mod tests {
         assert!(rate_states.is_empty());
         assert!(latest.is_empty());
         assert!(prev_placements.is_empty());
+        assert!(connection_phase.is_empty());
         assert_eq!(
             store.load("Alice"),
             Some(PlayerRecord {
@@ -3442,7 +3627,9 @@ mod tests {
         let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
 
         // Tick 0 : lire le snapshot initial
-        write_to_shard(&mut shards, &addr, &[]).await.unwrap();
+        write_to_shard(&mut shards, &addr, &addr, &[])
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
 

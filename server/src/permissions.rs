@@ -2,6 +2,14 @@
 //! `admin.fly`, un wildcard comme `admin.*` couvre tout son sous-arbre, `*` couvre tout. Pur —
 //! aucune IO ; le chargement/la sauvegarde vivent dans `admin_store.rs`.
 
+// Convention `character.slots.<N>` (2026-07-20, sous-projet flux d'arrivée) : PREMIER nœud à
+// valeur du projet. Tous les autres nœuds (admin.*, server.queue_bypass) sont présence/absence
+// pure — un ensemble de chaînes résolu, jamais de valeur associée. Plutôt que d'étendre
+// Group/AdminRecord avec un nouveau champ typé (changement de modèle de données plus intrusif),
+// la valeur est encodée dans le SUFFIXE du nœud lui-même, lu par max_character_slots(). Un
+// groupe "staff" attribuerait par exemple le nœud "character.slots.5" comme n'importe quel autre
+// nœud de permission (via /groupgrant staff character.slots.5).
+
 use crate::handoff::Rank;
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +97,21 @@ pub fn derive_rank(resolved: &[String]) -> Rank {
     } else {
         Rank::Player
     }
+}
+
+/// Résout le cap de personnages depuis l'ensemble de nœuds déjà résolu (`resolve_permissions`).
+/// Convention `character.slots.<N>` : le SUFFIXE numérique porte la valeur (premier nœud à
+/// valeur du projet — tous les autres nœuds sont présence/absence pure). Renvoie le MAXIMUM
+/// trouvé parmi tous les nœuds `character.slots.*` correspondants (un compte peut cumuler
+/// plusieurs sources), ou 1 par défaut (comportement actuel implicite : un joueur normal a un
+/// seul personnage).
+pub fn max_character_slots(resolved: &[String]) -> u32 {
+    resolved
+        .iter()
+        .filter_map(|node| node.strip_prefix("character.slots."))
+        .filter_map(|suffix| suffix.parse::<u32>().ok())
+        .max()
+        .unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -194,6 +217,45 @@ mod tests {
         assert_eq!(
             derive_rank(&["server.queue_bypass".to_string()]),
             Rank::Player
+        );
+    }
+
+    #[test]
+    fn defaults_to_one_slot_when_no_node_is_present() {
+        assert_eq!(max_character_slots(&[]), 1);
+    }
+
+    #[test]
+    fn reads_the_slot_count_from_a_matching_node() {
+        assert_eq!(max_character_slots(&["character.slots.5".to_string()]), 5);
+    }
+
+    #[test]
+    fn ignores_unrelated_nodes() {
+        assert_eq!(
+            max_character_slots(&["admin.fly".to_string(), "character.slots.3".to_string()]),
+            3
+        );
+    }
+
+    #[test]
+    fn takes_the_maximum_across_multiple_matching_nodes() {
+        assert_eq!(
+            max_character_slots(&[
+                "character.slots.3".to_string(),
+                "character.slots.5".to_string()
+            ]),
+            5,
+            "un compte cumulant plusieurs sources garde le plafond le plus généreux"
+        );
+    }
+
+    #[test]
+    fn ignores_a_malformed_suffix_that_does_not_parse_as_a_number() {
+        assert_eq!(
+            max_character_slots(&["character.slots.beaucoup".to_string()]),
+            1,
+            "un suffixe non numérique est ignoré, pas une erreur silencieuse dangereuse"
         );
     }
 }

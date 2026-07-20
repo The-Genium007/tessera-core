@@ -121,6 +121,25 @@ pub struct TopologyConfig {
     pub server_count: usize,
     #[serde(default)]
     pub radius_overrides: HashMap<String, f32>,
+    /// Adresses `host:port` des shards, **dans l'ordre des groupes** de
+    /// `assignment_patterns[server_count]` : `shard_addrs[i]` est le shard qui sert le groupe `i`
+    /// (= le `--group-id i` passé au binaire `tessera-shard`). Consommées telles quelles par
+    /// `write_to_shard` (`TcpStream::connect`), donc ce doivent être des adresses réellement
+    /// joignables depuis le Gateway.
+    ///
+    /// ⚠️ En prod Docker Swarm, mettre le **nom de service** (`shard-a:27030`), jamais une IP :
+    /// l'IP des tâches change à chaque redéploiement, seul le nom résout vers la VIP stable
+    /// (cf. CLAUDE.md, incident cloudflared 2026-07-16).
+    ///
+    /// Champ AJOUTÉ le 2026-07-20 (incident « deux joueurs au même endroit ne se voient pas ») :
+    /// jusque-là `load_authority_topology_from_artifact` fabriquait `format!("group-{i}")` en
+    /// placeholder — une chaîne sans port, que `TcpStream::connect` rejette en `InvalidInput` à
+    /// tous les coups. Le Gateway n'ouvrait donc JAMAIS de lien shard, `latest` restait vide,
+    /// aucun `Snapshot` ni `WorldState` n'était renvoyé, et l'erreur était avalée par un
+    /// `if let Ok(true)` sans log. Symptôme : tout marche (connexion, Join, IDs distincts) sauf
+    /// que chaque joueur est seul dans un monde vide.
+    #[serde(default)]
+    pub shard_addrs: Vec<String>,
 }
 
 /// Un shard nommé avec son adresse d'écoute et ses spawn points. Conservé pour compatibilité
@@ -165,6 +184,13 @@ pub enum ManifestError {
     AuthorityArtifactUnreadable(std::path::PathBuf, String),
     /// Le fichier a été lu mais son contenu n'est pas un `Artifact` JSON valide.
     AuthorityArtifactInvalid(String),
+    /// `runtime.topology.shard_addrs` n'a pas exactement une adresse par groupe d'autorité.
+    /// Vaut aussi pour la liste vide : sans adresse, le Gateway ne peut joindre aucun shard et
+    /// le monde reste vide en silence — on refuse de démarrer plutôt que de tourner à blanc.
+    ShardAddrCountMismatch {
+        expected: usize,
+        got: usize,
+    },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -204,6 +230,13 @@ impl std::fmt::Display for ManifestError {
             Self::AuthorityArtifactInvalid(msg) => {
                 write!(f, "artefact d'autorité invalide: {msg}")
             }
+            Self::ShardAddrCountMismatch { expected, got } => {
+                write!(
+                    f,
+                    "runtime.topology.shard_addrs doit contenir exactement {expected} adresses \
+                     (une par groupe d'autorité, dans l'ordre des --group-id), {got} fournie(s)"
+                )
+            }
         }
     }
 }
@@ -236,6 +269,16 @@ pub fn load_authority_topology_from_artifact(
         .get(&config.server_count)
         .ok_or(ManifestError::UnknownServerCount(config.server_count))?;
 
+    // Une adresse joignable par groupe, sinon on refuse de démarrer : un Gateway sans adresse de
+    // shard valide tourne à blanc (aucun snapshot renvoyé) sans jamais rien dire — c'est
+    // exactement ce que le placeholder `format!("group-{i}")` produisait avant le 2026-07-20.
+    if config.shard_addrs.len() != groups.len() {
+        return Err(ManifestError::ShardAddrCountMismatch {
+            expected: groups.len(),
+            got: config.shard_addrs.len(),
+        });
+    }
+
     Ok(groups
         .iter()
         .enumerate()
@@ -258,7 +301,11 @@ pub fn load_authority_topology_from_artifact(
                 })
                 .collect();
             crate::handoff::ShardZone {
-                addr: format!("group-{group_idx}"), // adresse réelle assignée en Task G4
+                // Id logique stable, inchangé depuis toujours : c'est lui qui part au client
+                // (`ShardAssignment`) et dans `shard_map.json`. L'adresse réseau, elle, reste
+                // interne au Gateway.
+                id: format!("group-{group_idx}"),
+                addr: config.shard_addrs[group_idx].clone(),
                 cells,
             }
         })
@@ -358,6 +405,12 @@ fn validate(m: &Manifest) -> Result<(), ManifestError> {
         "runtime.gateway.advertise_addr",
         &m.runtime.gateway.advertise_addr,
     )?;
+    // Format des adresses de shards validé ici (le CARDINAL, lui, dépend de l'artefact et est
+    // vérifié dans `load_authority_topology_from_artifact`). Attrape au boot le placeholder sans
+    // port du type "group-0", qui échouait sinon en silence à chaque `TcpStream::connect`.
+    for (i, addr) in m.runtime.topology.shard_addrs.iter().enumerate() {
+        validate_addr(&format!("runtime.topology.shard_addrs[{i}]"), addr)?;
+    }
     Ok(())
 }
 
@@ -493,6 +546,7 @@ mod tests {
         [runtime.topology]
         authority_artifact = "authority.json"
         server_count = 1
+        shard_addrs = ["shard-a:27030"]
 
         [runtime.radius]
         base = 25.0
@@ -810,11 +864,66 @@ mod tests {
             authority_artifact: "unused".into(),
             server_count: 2,
             radius_overrides: HashMap::new(),
+            shard_addrs: vec!["shard-a:27030".into(), "shard-b:27031".into()],
         };
 
         let zones = load_authority_topology_from_artifact(&config, &artifact).unwrap();
         assert_eq!(zones.len(), 2); // server_count=2 → chaque cellule seule dans son groupe
         assert_eq!(zones.iter().map(|z| z.cells.len()).sum::<usize>(), 2);
+    }
+
+    /// Régression de l'incident du 2026-07-20 : les zones portaient `format!("group-{i}")`, une
+    /// chaîne sans port que `TcpStream::connect` rejette toujours. Le Gateway n'ouvrait donc aucun
+    /// lien shard et ne renvoyait aucun Snapshot — deux joueurs au même endroit ne se voyaient
+    /// pas, en silence. L'adresse d'une zone doit venir du manifeste, telle quelle.
+    #[test]
+    fn shard_zone_addr_comes_from_manifest_not_a_group_placeholder() {
+        let artifact = minimal_two_cell_artifact();
+        let config = TopologyConfig {
+            authority_artifact: "unused".into(),
+            server_count: 2,
+            radius_overrides: HashMap::new(),
+            shard_addrs: vec!["shard-a:27030".into(), "shard-b:27031".into()],
+        };
+
+        let zones = load_authority_topology_from_artifact(&config, &artifact).unwrap();
+        let addrs: Vec<&str> = zones.iter().map(|z| z.addr.as_str()).collect();
+        assert_eq!(addrs, vec!["shard-a:27030", "shard-b:27031"]);
+        assert!(
+            !addrs.iter().any(|a| a.starts_with("group-")),
+            "le placeholder `group-N` ne doit plus jamais servir d'adresse de connexion"
+        );
+    }
+
+    /// Sans adresses (ou avec un cardinal faux), le Gateway tournerait à blanc sans le dire.
+    /// On refuse de démarrer : un boot qui échoue bruyamment vaut mieux qu'un monde vide muet.
+    #[test]
+    fn load_authority_topology_errors_when_shard_addrs_count_mismatches() {
+        let artifact = minimal_two_cell_artifact();
+        for (addrs, got) in [(vec![], 0), (vec!["shard-a:27030".to_string()], 1)] {
+            let config = TopologyConfig {
+                authority_artifact: "unused".into(),
+                server_count: 2,
+                radius_overrides: HashMap::new(),
+                shard_addrs: addrs,
+            };
+            assert_eq!(
+                load_authority_topology_from_artifact(&config, &artifact).unwrap_err(),
+                ManifestError::ShardAddrCountMismatch { expected: 2, got }
+            );
+        }
+    }
+
+    /// Le format est validé au boot : `group-0` (sans port) doit être rejeté explicitement, pas
+    /// accepté puis échoué en silence à chaque `TcpStream::connect`.
+    #[test]
+    fn rejects_shard_addr_without_port() {
+        let toml_str = MINIMAL_TOML.replace(
+            r#"shard_addrs = ["shard-a:27030"]"#,
+            r#"shard_addrs = ["group-0"]"#,
+        );
+        let err = parse_and_validate(&toml_str).unwrap_err();
+        assert!(err.contains("shard_addrs"), "message inattendu: {err}");
     }
 
     #[test]
@@ -824,6 +933,7 @@ mod tests {
             authority_artifact: "unused".into(),
             server_count: 99,
             radius_overrides: HashMap::new(),
+            shard_addrs: vec!["shard-a:27030".into()],
         };
 
         assert_eq!(
@@ -841,6 +951,7 @@ mod tests {
             authority_artifact: "unused".into(),
             server_count: 2,
             radius_overrides: overrides,
+            shard_addrs: vec!["shard-a:27030".into(), "shard-b:27031".into()],
         };
 
         let zones = load_authority_topology_from_artifact(&config, &artifact).unwrap();
@@ -884,6 +995,7 @@ mod tests {
             authority_artifact: "authority.json".into(),
             server_count: 4,
             radius_overrides: HashMap::new(),
+            shard_addrs: (0..4).map(|i| format!("shard-{i}:2703{i}")).collect(),
         };
         let zones = load_authority_topology(&config, &manifest_dir).unwrap();
         assert!(!zones.is_empty());

@@ -27,6 +27,7 @@ fn gateway_routes_to_correct_shard_group_using_real_v3_artifact() {
         authority_artifact: "authority.json".into(),
         server_count: 4,
         radius_overrides: HashMap::new(),
+        shard_addrs: (0..4).map(|i| format!("shard-{i}:2703{i}")).collect(),
     };
 
     // Étape 1 (Task G3, déjà testée isolément dans manifest.rs) : charger les zones depuis le

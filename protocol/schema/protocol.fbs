@@ -40,6 +40,16 @@ table EmoteReport { emote:uint; start:bool; }
 // n'est PAS un PlayerEvent (elle vit dans PlayerState.sustained, auto-cicatrisant).
 table PlayerEvent { actor:ulong; kind:ubyte; action:ubyte; param:uint; }
 
+// --- flux d'arrivée : personnages (modèle multi, owner+character_id) ---
+table CharacterSummary { id:ulong; pseudonym:string; }
+table CharacterList     { characters:[CharacterSummary]; }
+table CreateCharacter   { pseudonym:string; }
+table SelectCharacter   { id:ulong; }
+table DeleteCharacter   { id:ulong; }
+// reason: pseudonym_taken/slot_full/not_found/not_owner (chaîne stable, pas un enum — cohérent
+// avec CommandResult.message, lisible directement par le client sans table de correspondance).
+table CharacterResult   { success:bool; reason:string; }
+
 // Envoyé juste avant de fermer la connexion, avec un motif lisible — serveur plein, flood
 // soutenu, etc. (audit prod 2026-07-03 §5.4 : avant, un client rejeté ne recevait aucune
 // explication, juste une coupure muette).
@@ -94,8 +104,8 @@ table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
 // inter-joueurs au franchissement). Reste en FIN d'union, après PositionCorrection.
 table ShardAssignment { authoritative:string; overlaps:[string]; }
 
-union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, QueueStatus }
+union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, QueueStatus, CharacterList, CharacterResult }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }

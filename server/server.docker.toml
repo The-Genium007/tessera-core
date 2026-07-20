@@ -42,6 +42,30 @@ advertise_addr = "51.38.189.234:27020"
 [runtime.topology]
 authority_artifact = "authority.json"
 server_count = 10
+# Une adresse par groupe, DANS L'ORDRE des --group-id 0-9 de docker-compose.yml : shard_addrs[i]
+# doit être le service lancé avec `--group-id i`. Ces chaînes partent telles quelles dans
+# `TcpStream::connect` côté Gateway.
+#
+# Noms de SERVICE, jamais d'IP : en Swarm le nom résout vers la VIP stable, alors que l'IP des
+# tâches change à chaque redéploiement (cf. CLAUDE.md, incident cloudflared 2026-07-16).
+#
+# Avant le 2026-07-20 ce champ n'existait pas et le code fabriquait `format!("group-{i}")` — une
+# chaîne sans port, rejetée par `TcpStream::connect` à tous les coups. Le Gateway n'ouvrait donc
+# aucun lien shard et ne renvoyait aucun Snapshot : deux joueurs au même endroit ne se voyaient
+# pas, sans un seul log. Si cette liste ne fait pas exactement `server_count` entrées, le Gateway
+# refuse maintenant de démarrer.
+shard_addrs = [
+  "shard-a:27030",
+  "shard-b:27031",
+  "shard-c:27032",
+  "shard-d:27033",
+  "shard-e:27034",
+  "shard-f:27035",
+  "shard-g:27036",
+  "shard-h:27037",
+  "shard-i:27038",
+  "shard-j:27039",
+]
 
 [runtime.radius]
 base = 25.0
