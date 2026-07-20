@@ -26,6 +26,7 @@ pub mod metrics;
 pub mod npc;
 pub mod npc_catalog;
 pub mod permissions;
+pub mod population_director;
 pub mod persistence;
 pub mod player_store_impl;
 pub mod postgres_store;
