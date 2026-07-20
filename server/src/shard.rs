@@ -2,6 +2,8 @@
 //! Une seule connexion Gateway en v1 (M0-M1). Tick 20 Hz.
 
 use crate::internal_net::InternalTransport;
+use crate::npc_catalog::NpcCatalog;
+use crate::population_director::PopulationDirector;
 use crate::server_loop::Server;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9,7 +11,12 @@ use tokio::net::TcpListener;
 
 const TICK: Duration = Duration::from_millis(50); // 20 Hz
 
-pub async fn shard_main(addr: &str, aoi_radius: f32, metrics_addr: &str) -> std::io::Result<()> {
+pub async fn shard_main(
+    addr: &str,
+    aoi_radius: f32,
+    metrics_addr: &str,
+    population: Option<(NpcCatalog, PopulationDirector)>,
+) -> std::io::Result<()> {
     let metrics = crate::metrics::Metrics::new();
     {
         let metrics = metrics.clone();
@@ -39,7 +46,19 @@ pub async fn shard_main(addr: &str, aoi_radius: f32, metrics_addr: &str) -> std:
         // de chaque tick dans l'histogramme `tessera_tick_duration`/le compteur `overruns_total` —
         // en plus (pas à la place) de `last_tick_micros` ci-dessous, qui reste la gauge "dernier
         // tick" existante consommée par le dashboard/l'alerte ShardFrozen.
-        let mut server = Server::new_with_metrics(aoi_radius, metrics.clone());
+        //
+        // `new_with_npcs` (Task 7, câblage boot PNJ) n'accepte pas encore `metrics` (limitation de
+        // Task 6, déjà revue — pas rouverte ici) : un Shard avec `[runtime.population]` configuré
+        // perd donc l'histogramme `tessera_tick_duration`/`overruns_total` interne à `Server::tick`
+        // tant que cette fondation n'a pas de constructeur combinant les deux. Les gauges
+        // `last_tick_micros`/`players` ci-dessous restent actives dans tous les cas (mesurées ici,
+        // hors de `Server`).
+        let mut server = match &population {
+            None => Server::new_with_metrics(aoi_radius, metrics.clone()),
+            Some((catalog, director)) => {
+                Server::new_with_npcs(aoi_radius, catalog.clone(), director.clone())
+            }
+        };
         let mut transport = InternalTransport::new();
         let mut buf = [0u8; 8192];
         let mut ticker = tokio::time::interval(TICK);
@@ -116,7 +135,7 @@ mod tests {
         // tout — la course doit gagner dès la boucle d'accept externe).
         let addr = "127.0.0.1:27131";
         let handle =
-            tokio::spawn(async move { super::shard_main(addr, 1000.0, "127.0.0.1:0").await });
+            tokio::spawn(async move { super::shard_main(addr, 1000.0, "127.0.0.1:0", None).await });
 
         // Laisse le shard se binder et enregistrer son ShutdownSignal avant d'envoyer le signal.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -146,7 +165,7 @@ mod tests {
         // tests exécutés en parallèle.
         let addr = "127.0.0.1:27132";
         let handle =
-            tokio::spawn(async move { super::shard_main(addr, 1000.0, "127.0.0.1:0").await });
+            tokio::spawn(async move { super::shard_main(addr, 1000.0, "127.0.0.1:0", None).await });
 
         // Laisse le shard se binder et enregistrer son ShutdownSignal avant de se connecter.
         tokio::time::sleep(Duration::from_millis(200)).await;

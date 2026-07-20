@@ -54,3 +54,16 @@ game_master = 75.0
 
 [runtime.aoi]
 visibility_radius = 100.0
+
+# --- Population PNJ (fondation nav-indépendante, sous-projet PNJ, palier 2) ---
+# Densité PNJ cible par district (clé = code de district, même convention que
+# runtime.topology.radius_overrides). ABSENT ou vide = aucun PNJ simulé sur ce serveur (défaut sûr,
+# comportement historique préservé pour tout manifeste existant). Un district sans joueur présent
+# ne spawn JAMAIS de PNJ même sous sa cible (cf. population_director.rs) — ce n'est donc pas un
+# "nombre garanti" mais un plafond atteint uniquement là où au moins un joueur observe la zone.
+# NOTE fondation (Task 6) : le câblage réel ne raisonne encore que sur un district logique unique
+# nommé "default" (pas la vraie topologie multi-district/authority.json) — seule une clé "default"
+# a un effet aujourd'hui ; toute autre clé de district est acceptée par le parseur mais ignorée par
+# le director tant que le câblage multi-district n'existe pas (plan de navigation, à venir).
+[runtime.population.target_density]
+# default = 20

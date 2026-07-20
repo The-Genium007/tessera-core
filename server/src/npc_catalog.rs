@@ -24,7 +24,11 @@ pub struct NpcArchetypeConfig {
     pub briques: Vec<String>,
 }
 
-#[derive(Debug, Default)]
+/// `Clone` : `shard_main` (Task 7) reconstruit un `Server::new_with_npcs` frais à chaque
+/// connexion Gateway acceptée (même patron que `Server::new`/`new_with_metrics`) — il lui faut
+/// donc pouvoir cloner le catalogue chargé une seule fois au boot plutôt que de le recharger
+/// depuis disque à chaque reconnexion.
+#[derive(Debug, Clone, Default)]
 pub struct NpcCatalog {
     archetypes: std::collections::HashMap<u32, NpcArchetypeConfig>,
 }

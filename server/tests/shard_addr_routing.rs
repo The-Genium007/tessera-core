@@ -54,7 +54,7 @@ fn client_position(x: f32, y: f32) -> Vec<u8> {
 async fn two_players_at_the_same_spot_see_each_other_through_the_real_shard_addr() {
     let shard_addr = "127.0.0.1:27131";
     tokio::spawn(async move {
-        server::shard_main(shard_addr, 1000.0, "127.0.0.1:0")
+        server::shard_main(shard_addr, 1000.0, "127.0.0.1:0", None)
             .await
             .unwrap()
     });

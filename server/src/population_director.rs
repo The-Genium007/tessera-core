@@ -15,6 +15,11 @@ pub enum DirectorAction {
     Despawn { district: String, excess: u32 },
 }
 
+/// `Clone` : `shard_main` (Task 7) reconstruit un `Server::new_with_npcs` frais à chaque
+/// connexion Gateway acceptée (même patron que `Server::new`/`new_with_metrics`) — il lui faut
+/// donc pouvoir cloner le director construit une seule fois au boot plutôt que de le reconstruire
+/// depuis le manifeste à chaque reconnexion.
+#[derive(Clone)]
 pub struct PopulationDirector {
     /// Densité cible par code de district (config manifeste, cf. Task 7 — `[runtime.population]`).
     target_density: HashMap<String, u32>,

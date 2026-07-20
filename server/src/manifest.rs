@@ -94,6 +94,11 @@ pub struct Runtime {
     pub topology: TopologyConfig,
     pub radius: RadiusConfig,
     pub aoi: AoiConfig,
+    /// Densité PNJ cible par district (fondation nav-indépendante, sous-projet PNJ, palier 2) —
+    /// absente ou vide = aucune simulation PNJ sur ce Shard (comportement historique préservé,
+    /// cf. `Server::new_with_npcs` vs `Server::new`/`new_with_metrics` dans `server_loop.rs`).
+    #[serde(default)]
+    pub population: PopulationConfig,
 }
 
 /// Valeur par défaut de `Runtime::redis_url` quand absente du TOML — Redis local, cohérent avec
@@ -166,6 +171,18 @@ pub struct RadiusConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AoiConfig {
     pub visibility_radius: f32,
+}
+
+/// Config PNJ du Shard (fondation nav-indépendante, sous-projet PNJ, palier 2). Suit la même
+/// convention que `TopologyConfig::radius_overrides` : une `HashMap<String, _>` par code de
+/// district, optionnelle et vide par défaut.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PopulationConfig {
+    /// Densité PNJ cible par code de district (même clé `code` que `districts.json`/
+    /// `radius_overrides`). Absent ou vide = aucune simulation PNJ sur ce serveur (comportement
+    /// historique préservé, cf. `Server::new_with_npcs` vs `Server::new` dans `server_loop.rs`).
+    #[serde(default)]
+    pub target_density: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -803,6 +820,24 @@ mod tests {
             config.radius_overrides.get("CC-CP-DOW-GLE-WEL"),
             Some(&150.0)
         );
+    }
+
+    // --- PopulationConfig : densité PNJ cible par district (fondation nav-indépendante) ---
+
+    #[test]
+    fn population_target_density_defaults_to_empty_when_absent() {
+        let m = parse_and_validate(MINIMAL_TOML).unwrap();
+        assert!(m.runtime.population.target_density.is_empty());
+    }
+
+    #[test]
+    fn population_target_density_parses_declared_districts() {
+        let toml = format!(
+            "{MINIMAL_TOML}\n[runtime.population.target_density]\ncentre = 20\nperiph = 5\n"
+        );
+        let m = parse_and_validate(&toml).unwrap();
+        assert_eq!(m.runtime.population.target_density.get("centre"), Some(&20));
+        assert_eq!(m.runtime.population.target_density.get("periph"), Some(&5));
     }
 
     // --- load_authority_topology[_from_artifact] : fixture minimale en mémoire ---
