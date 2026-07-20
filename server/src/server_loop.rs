@@ -538,4 +538,89 @@ mod tests {
             "client 1 est à 500 unités, hors du rayon de 50 — ne doit pas apparaître"
         );
     }
+
+    #[test]
+    fn cosmetic_channel_events_never_change_player_count_or_connectivity() {
+        // Aucun message du canal d'état (PositionUpdate enrichi, EmoteReport, PlayerActionReport)
+        // ne doit jamais connecter/déconnecter un joueur ni modifier player_count.
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        assert_eq!(server.player_count(), 2);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_emote_report(1, true),
+        });
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_player_action(1, 0),
+        });
+        server.tick(&mut t);
+        assert_eq!(
+            server.player_count(),
+            2,
+            "le canal cosmétique ne doit jamais affecter la connectivité"
+        );
+    }
+
+    #[test]
+    fn late_aoi_joiner_learns_sustained_pose_from_snapshot_not_from_missed_event() {
+        // Le test clé §5 de la spec, version bout-en-bout via Server (pas juste World, déjà couvert
+        // en Task 4) : un joueur qui rejoint l'AoI APRÈS le début d'une pose tenue doit quand même
+        // la voir dans son PREMIER snapshot (auto-cicatrisant), sans avoir reçu l'EmoteReport lui-même.
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_emote_report(3, true),
+        });
+        server.tick(&mut t);
+        // Le joueur 2 arrive APRÈS le début de la pose.
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let env = flatbuffers::root::<ServerEnvelope>(
+            sent_to_2
+                .iter()
+                .find(|b| {
+                    flatbuffers::root::<ServerEnvelope>(b)
+                        .map(|e| e.msg_type() == ServerMsg::Snapshot)
+                        .unwrap_or(false)
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert_eq!(
+            snap.players().unwrap().get(0).sustained(),
+            3,
+            "un arrivant tardif doit lire la pose depuis le snapshot"
+        );
+    }
+
+    #[test]
+    fn one_shot_event_not_resent_to_late_joiner() {
+        // Le contraste du test précédent : un ÉVÉNEMENT one-shot (PlayerActionReport→PlayerEvent)
+        // n'est PAS auto-cicatrisant — un arrivant tardif ne le reçoit pas rétroactivement, c'est
+        // le comportement voulu (rater un one-shot est inoffensif, cf. spec §5).
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_player_action(1, 0),
+        });
+        server.tick(&mut t); // aucun voisin au moment de l'action — rien relayé, personne pour le recevoir
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let event = sent_to_2.iter().find_map(|b| decode_player_event(b));
+        assert!(
+            event.is_none(),
+            "un one-shot manqué reste manqué, pas de rattrapage"
+        );
+    }
 }
