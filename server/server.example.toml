@@ -72,4 +72,9 @@ visibility_radius = 100.0
 # Chemin (relatif au dossier du manifeste) vers un manifeste TOML de PNJ nominatifs — voir
 # named-npc-catalog.example.toml pour le format. ABSENT = aucun PNJ nominatif sur ce serveur
 # (défaut sûr, comportement historique préservé).
+# ⚠️ MUTUELLEMENT EXCLUSIF avec [runtime.population] ci-dessus : Server::new_with_npcs (foule) et
+# Server::new_with_named_npcs (nominatifs) sont deux constructeurs distincts qui ne peuvent pas
+# cohabiter dans cette fondation — si les DEUX sont configurés, [runtime.population] est prioritaire
+# et named_npc_manifest_path est silencieusement ignoré (voir shard.rs). Ne configurer qu'un seul
+# des deux tant que le câblage combiné n'existe pas.
 # named_npc_manifest_path = "named-npc-catalog.toml"
