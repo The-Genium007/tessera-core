@@ -50,9 +50,8 @@ impl Metrics {
     }
 
     /// Enregistre la durée d'un tick (microsecondes) : incrémente chaque bucket cumulatif dont le
-    /// seuil est atteint ou dépassé... non — chaque bucket dont le seuil est SUPÉRIEUR OU ÉGAL à
-    /// la durée observée (sémantique standard `le` de Prometheus), plus `_count`/`_sum`, et
-    /// `overruns_total` si la durée dépasse `OVERRUN_THRESHOLD_MICROS`.
+    /// seuil est SUPÉRIEUR OU ÉGAL à la durée observée (sémantique standard `le` de Prometheus),
+    /// plus `_count`/`_sum`, et `overruns_total` si la durée dépasse `OVERRUN_THRESHOLD_MICROS`.
     pub fn record_tick_duration_micros(&self, micros: u64) {
         for (bucket, &threshold) in self
             .tick_duration_buckets
