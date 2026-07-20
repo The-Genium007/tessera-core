@@ -12,9 +12,15 @@ pub enum EntityBehavior {
     #[default]
     Calme,
     Flane,
-    Alerte { menace: ClientId },
-    Fuite { menace: ClientId },
-    Hostile { cible: ClientId },
+    Alerte {
+        menace: ClientId,
+    },
+    Fuite {
+        menace: ClientId,
+    },
+    Hostile {
+        cible: ClientId,
+    },
     ATerre,
 }
 
@@ -68,11 +74,7 @@ impl NpcRecord {
         if !matches!(self.behavior, EntityBehavior::Calme | EntityBehavior::Flane) {
             return;
         }
-        if archetype
-            .briques
-            .iter()
-            .any(|b| b == "flaner-sur-place")
-        {
+        if archetype.briques.iter().any(|b| b == "flaner-sur-place") {
             self.behavior = EntityBehavior::Flane;
         }
         // "rester-statique" : ne change jamais `behavior` (reste Calme) — c'est la définition même
@@ -83,9 +85,37 @@ impl NpcRecord {
     }
 }
 
+/// Encodage `EntityBehavior` -> `NpcState.behavior:ubyte` (protocol.fbs, doc comment sur `NpcState` :
+/// 0=Calme 1=Flane 2=Alerte 3=Fuite 4=Hostile 5=ATerre). `EntityBehavior` porte des données sur
+/// certains variants (`ClientId` pour Alerte/Fuite/Hostile) et n'a pas de `#[repr(u8)]` — un `as u8`
+/// nu ne compile pas dessus, d'où cette fonction dédiée. Match exhaustif SANS bras `_` : si un futur
+/// plan ajoute un variant à `EntityBehavior`, cette fonction cesse de compiler tant qu'elle n'est pas
+/// mise à jour — propriété délibérée, ne pas ajouter de bras générique pour "corriger" une erreur de
+/// compilation ici.
+pub fn behavior_to_u8(b: EntityBehavior) -> u8 {
+    match b {
+        EntityBehavior::Calme => 0,
+        EntityBehavior::Flane => 1,
+        EntityBehavior::Alerte { .. } => 2,
+        EntityBehavior::Fuite { .. } => 3,
+        EntityBehavior::Hostile { .. } => 4,
+        EntityBehavior::ATerre => 5,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn behavior_to_u8_matches_the_documented_protocol_encoding() {
+        assert_eq!(behavior_to_u8(EntityBehavior::Calme), 0);
+        assert_eq!(behavior_to_u8(EntityBehavior::Flane), 1);
+        assert_eq!(behavior_to_u8(EntityBehavior::Alerte { menace: 1 }), 2);
+        assert_eq!(behavior_to_u8(EntityBehavior::Fuite { menace: 1 }), 3);
+        assert_eq!(behavior_to_u8(EntityBehavior::Hostile { cible: 1 }), 4);
+        assert_eq!(behavior_to_u8(EntityBehavior::ATerre), 5);
+    }
 
     #[test]
     fn default_behavior_is_calme() {
@@ -155,7 +185,11 @@ mod brique_engine_tests {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        parse_and_validate(&toml).unwrap().archetype(1).unwrap().clone()
+        parse_and_validate(&toml)
+            .unwrap()
+            .archetype(1)
+            .unwrap()
+            .clone()
     }
 
     #[test]

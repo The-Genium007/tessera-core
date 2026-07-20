@@ -26,6 +26,18 @@ type CellCoord = (i64, i64);
 /// qu'une recherche n'a jamais besoin de scanner plus d'un anneau de cellules voisines.
 const CELL_SIZE: f32 = 32.0;
 
+/// Plage d'ids réservée aux PNJ, disjointe de tout id de connexion réelle. Les connexions réelles
+/// utilisent des ids attribués par le Gateway (compteur croissant depuis une connexion réseau
+/// réelle, jamais aussi élevé que ceci en pratique — mais la garde `is_npc_id` reste la source de
+/// vérité, jamais une hypothèse sur "les vrais ids restent petits"). Choix : réutiliser
+/// `players: BTreeMap<ClientId, Pose>` tel quel pour les PNJ (même snapshot_for, même grille) plutôt
+/// que dupliquer une collection parallèle — cf. Global Constraints de ce plan.
+pub const NPC_ID_RANGE_START: ClientId = 1 << 48;
+
+pub fn is_npc_id(id: ClientId) -> bool {
+    id >= NPC_ID_RANGE_START
+}
+
 fn cell_of(x: f32, y: f32) -> CellCoord {
     (
         (x / CELL_SIZE).floor() as i64,
@@ -165,6 +177,36 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_npc_id_distinguishes_the_reserved_range_from_real_connection_ids() {
+        assert!(!is_npc_id(1));
+        assert!(!is_npc_id(1_000_000));
+        assert!(is_npc_id(NPC_ID_RANGE_START));
+        assert!(is_npc_id(NPC_ID_RANGE_START + 1));
+    }
+
+    #[test]
+    fn a_npc_id_inserted_via_add_player_appears_in_snapshot_for_like_any_other_entity() {
+        // World ne distingue pas les PNJ des joueurs au niveau du stockage (Global Constraints) — un
+        // id de la plage réservée, inséré via add_player, doit apparaître dans snapshot_for exactement
+        // comme un joueur. C'est le test qui verrouille cette décision architecturale.
+        let mut w = World::new();
+        let npc_id = NPC_ID_RANGE_START + 1;
+        w.add_player(npc_id);
+        w.add_player(1); // viewer réel
+        w.set_pose(
+            npc_id,
+            Pose {
+                x: 1.0,
+                y: 1.0,
+                z: 0.0,
+                ..Default::default()
+            },
+        );
+        let seen = w.snapshot_for(1, 50.0);
+        assert!(seen.iter().any(|(id, _)| *id == npc_id));
+    }
 
     #[test]
     fn snapshot_excludes_the_viewer_and_includes_others() {

@@ -2,6 +2,9 @@
 //! Générique sur `Transport` → testable avec `InMemoryTransport`, branché sur GNS en prod.
 
 use crate::metrics::Metrics;
+use crate::npc::{behavior_to_u8, NpcRecord};
+use crate::npc_catalog::NpcCatalog;
+use crate::population_director::PopulationDirector;
 use crate::transport::{ClientId, Transport, TransportEvent};
 use crate::world::{Pose, World};
 use flatbuffers::FlatBufferBuilder;
@@ -19,6 +22,19 @@ pub struct Server {
     /// uniquement pour les `Server` construits via `Server::new_with_metrics` (câblage
     /// `shard_main`, Task 6 observabilité).
     metrics: Option<Arc<Metrics>>,
+    /// `None` = aucune simulation PNJ sur ce Shard (comportement historique préservé — tous les
+    /// appels `Server::new`/`Server::new_with_metrics` existants restent inchangés et n'activent
+    /// jamais les PNJ). `Some(..)` uniquement via `Server::new_with_npcs`.
+    npc_registry: Option<NpcRegistry>,
+}
+
+/// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
+/// (config immuable), et les enregistrements PNJ actifs (mutables à chaque tick).
+struct NpcRegistry {
+    catalog: NpcCatalog,
+    director: PopulationDirector,
+    records: std::collections::HashMap<ClientId, NpcRecord>,
+    next_npc_id: ClientId,
 }
 
 impl Server {
@@ -28,6 +44,7 @@ impl Server {
             aoi_radius,
             pending_events: Vec::new(),
             metrics: None,
+            npc_registry: None,
         }
     }
 
@@ -42,12 +59,96 @@ impl Server {
             aoi_radius,
             pending_events: Vec::new(),
             metrics: Some(metrics),
+            npc_registry: None,
+        }
+    }
+
+    /// Identique à `Server::new`, avec en plus un registre PNJ actif (catalogue + director). Le
+    /// director raisonne sur un unique district logique "default" dans cette fondation — le
+    /// multi-district réel (topologie de shards) est un raffinement différé, pas câblé ici.
+    /// Nouvelle méthode plutôt qu'un changement de signature de `Server::new`/`new_with_metrics` :
+    /// ces deux constructeurs sont déjà appelés par de nombreux tests existants qui ne doivent pas
+    /// changer pour cette tâche (même raisonnement que `new_with_metrics` lui-même).
+    pub fn new_with_npcs(
+        aoi_radius: f32,
+        catalog: NpcCatalog,
+        director: PopulationDirector,
+    ) -> Self {
+        Self {
+            world: World::new(),
+            aoi_radius,
+            pending_events: Vec::new(),
+            metrics: None,
+            npc_registry: Some(NpcRegistry {
+                catalog,
+                director,
+                records: std::collections::HashMap::new(),
+                next_npc_id: crate::world::NPC_ID_RANGE_START,
+            }),
         }
     }
 
     /// Nombre de joueurs actuellement dans le monde de ce Shard — pour l'endpoint métriques.
     pub fn player_count(&self) -> usize {
         self.world.player_ids().len()
+    }
+
+    /// Un pas du director de population + du moteur de briques PNJ (spec fondation PNJ) — no-op si
+    /// ce `Server` n'a pas de registre PNJ (`Server::new`/`new_with_metrics`).
+    ///
+    /// Simplification assumée pour cette fondation (voir Step 7 du plan Task 6) : le director ne
+    /// raisonne PAS sur la vraie topologie multi-district (`authority.json`/`tools/district-topology`,
+    /// câblée côté Gateway/`handoff.rs`, hors périmètre ici). Tous les joueurs connus de CE `Server`
+    /// comptent comme présents dans un unique district logique `"default"`. Le câblage réel
+    /// multi-district est un raffinement explicitement différé, pas un oubli.
+    fn tick_npcs(&mut self) {
+        let Some(registry) = &mut self.npc_registry else {
+            return;
+        };
+        let player_count = self.world.player_ids().len() as u32;
+        let players_by_district =
+            std::collections::HashMap::from([("default".to_string(), player_count)]);
+        let existing_by_district = std::collections::HashMap::from([(
+            "default".to_string(),
+            registry.records.len() as u32,
+        )]);
+        let actions = registry.director.reconcile(
+            &registry.catalog,
+            &players_by_district,
+            &existing_by_district,
+        );
+        for action in actions {
+            match action {
+                crate::population_director::DirectorAction::Spawn { archetype_id, .. } => {
+                    let id = registry.next_npc_id;
+                    registry.next_npc_id += 1;
+                    registry
+                        .records
+                        .insert(id, NpcRecord::new(id, archetype_id));
+                    self.world.add_player(id);
+                }
+                crate::population_director::DirectorAction::Despawn { excess, .. } => {
+                    let to_remove: Vec<ClientId> = registry
+                        .records
+                        .keys()
+                        .take(excess as usize)
+                        .copied()
+                        .collect();
+                    for id in to_remove {
+                        registry.records.remove(&id);
+                        self.world.remove_player(id);
+                    }
+                }
+            }
+        }
+        for (id, record) in registry.records.iter_mut() {
+            if let Some(archetype) = registry.catalog.archetype(record.archetype) {
+                record.apply_brique_tick(archetype);
+            }
+            let _ = id; // le pose (locomotion/mouvement réel) n'est PAS mis à jour ici — aucune
+                        // brique nav-indépendante ne bouge le PNJ (Global Constraints) ; sa Pose
+                        // reste celle par défaut (immobile) jusqu'au plan de navigation suivant.
+        }
     }
 
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
@@ -61,6 +162,7 @@ impl Server {
             }
         }
         self.world.advance_tick();
+        self.tick_npcs();
         let mut b = FlatBufferBuilder::new();
         for id in self.world.player_ids() {
             b.reset();
@@ -135,6 +237,15 @@ impl Server {
                     self.pending_events.push((from, 0, ar.action(), ar.param()));
                 }
             }
+            ClientMsg::EntityInteraction => {
+                if let Some(ei) = env.msg_as_entity_interaction() {
+                    if let Some(registry) = &mut self.npc_registry {
+                        if let Some(record) = registry.records.get_mut(&ei.target()) {
+                            record.apply_interaction(from, ei.kind());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -160,15 +271,36 @@ impl Server {
                 )
             })
             .collect();
+        let npc_states: Vec<_> = self
+            .npc_registry
+            .iter()
+            .flat_map(|r| r.records.values())
+            .filter_map(|record| {
+                let pose = self.world.pose_of(record.id)?;
+                Some(NpcState::create(
+                    b,
+                    &NpcStateArgs {
+                        id: record.id,
+                        archetype: record.archetype,
+                        position: Some(&Vec3::new(pose.x, pose.y, pose.z)),
+                        yaw: pose.yaw,
+                        locomotion: pose.locomotion,
+                        move_dir: pose.move_dir,
+                        flags: pose.flags,
+                        sustained: pose.sustained,
+                        behavior: behavior_to_u8(record.behavior),
+                    },
+                ))
+            })
+            .collect();
         let players = b.create_vector(&states);
+        let npcs = b.create_vector(&npc_states);
         let snap = Snapshot::create(
             b,
             &SnapshotArgs {
                 tick: self.world.tick(),
                 players: Some(players),
-                // PNJ pas encore peuplés dans cette boucle (fondation protocole, Task 5) —
-                // câblage réel (PopulationDirector -> NpcState) à Task 6.
-                npcs: None,
+                npcs: Some(npcs),
             },
         );
         let env = ServerEnvelope::create(
@@ -187,6 +319,62 @@ impl Server {
 mod tests {
     use super::*;
     use crate::transport::InMemoryTransport;
+
+    #[test]
+    fn a_server_without_npcs_never_adds_any_npc_state_to_the_snapshot() {
+        // Comportement historique préservé : Server::new (sans PNJ) ne doit jamais faire apparaître
+        // de NpcState dans un Snapshot, même après plusieurs ticks.
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert!(
+            snap.npcs().map(|v| v.len()).unwrap_or(0) == 0,
+            "sans registre PNJ, npcs doit rester vide"
+        );
+    }
+
+    #[test]
+    fn a_server_with_npcs_configured_spawns_and_reports_npcs_in_the_snapshot() {
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur-de-rue"
+            briques = ["flaner-sur-place"]
+            "#,
+        )
+        .unwrap();
+        // NOTE : le district est nommé "default" et non "centre" — cette fondation ne raisonne
+        // que sur un unique district logique "default" regroupant tous les joueurs connus de ce
+        // `Server` (simplification assumée, cf. commentaire sur `Server::tick_npcs` : la vraie
+        // topologie multi-district est un raffinement différé, hors périmètre ici).
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        // Tout joueur connu de ce `Server` compte comme présent dans le district "default" —
+        // Server::tick_npcs résout ainsi la présence (cf. Step 7 du plan Task 6).
+        server.tick(&mut t);
+        server.tick(&mut t); // un 2e tick pour laisser le director réagir à la présence du joueur
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert!(
+            snap.npcs().map(|v| v.len()).unwrap_or(0) > 0,
+            "un director configuré avec un joueur présent doit finir par faire apparaître au moins un PNJ"
+        );
+    }
 
     fn encode_position(x: f32, y: f32, z: f32, yaw: f32) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
