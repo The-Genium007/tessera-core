@@ -565,6 +565,7 @@ pub fn cleanup_client_state(
     display_names: &mut HashMap<u64, String>,
     last_pos: &mut HashMap<u64, [f32; 3]>,
     last_pos_at: &mut HashMap<u64, std::time::Instant>,
+    last_hot_state_write: &mut HashMap<u64, std::time::Instant>,
     bypass_warned_at: &mut HashMap<u64, std::time::Instant>,
     anomaly_trackers: &mut HashMap<u64, AnomalyTracker>,
     ranks: &mut HashMap<u64, crate::handoff::Rank>,
@@ -590,6 +591,7 @@ pub fn cleanup_client_state(
     display_names.remove(&cid);
     last_pos.remove(&cid);
     last_pos_at.remove(&cid);
+    last_hot_state_write.remove(&cid);
     bypass_warned_at.remove(&cid);
     anomaly_trackers.remove(&cid);
     ranks.remove(&cid);
@@ -880,6 +882,12 @@ pub async fn gateway_main(
     // Horodatage de la dernière PositionUpdate ACCEPTÉE par client (absent tant qu'aucune
     // position n'a encore été acceptée depuis le Join — sert de garde anti-triche).
     let mut last_pos_at: HashMap<u64, std::time::Instant> = HashMap::new();
+    // Horodatage de la dernière écriture HotStateCache par client (throttle, Task 7 robustesse
+    // opérationnelle) : sans ça, chaque PositionUpdate acceptée déclenche une écriture Redis —
+    // à la fréquence d'un tick client, ça martèle le Redis Gateway-central partagé pour rien
+    // (le TTL de reprise, 120s, tolère largement un rafraîchissement bien moins fréquent).
+    let mut last_hot_state_write: HashMap<u64, std::time::Instant> = HashMap::new();
+    const HOT_STATE_WRITE_INTERVAL: Duration = Duration::from_secs(2);
     // Dernière fois qu'on a loggé le contournement anti-triche GameMaster pour ce client (2026-07-07,
     // rapporté en playtest) : sans throttle, un GameMaster en mouvement spamme un WARN à chaque
     // PositionUpdate (plusieurs par seconde) — noie le reste des logs, y compris les Handoff qu'on
@@ -1125,6 +1133,7 @@ pub async fn gateway_main(
                         &mut display_names,
                         &mut last_pos,
                         &mut last_pos_at,
+                        &mut last_hot_state_write,
                         &mut bypass_warned_at,
                         &mut anomaly_trackers,
                         &mut ranks,
@@ -1422,13 +1431,24 @@ pub async fn gateway_main(
                     // Écriture hot-state (Décision 3, design stockage 2026-07-09) : à chaque
                     // PositionUpdate ACCEPTÉ, taguée par la clé effective (jamais display_name).
                     // Un client sans clé effective connue (ne devrait pas arriver après un Join
-                    // réussi) est silencieusement ignoré plutôt que de paniquer.
+                    // réussi) est silencieusement ignoré plutôt que de paniquer. Throttlée à
+                    // HOT_STATE_WRITE_INTERVAL (Task 7 robustesse opérationnelle) : le Redis
+                    // Gateway-central est partagé entre tous les clients, pas la peine de
+                    // l'écrire à chaque tick quand le TTL de reprise tolère un rafraîchissement
+                    // bien moins fréquent.
                     if let Some(effective_key) = keys.get(&cid) {
-                        if let Err(e) = hot_state.write(effective_key, [x, y, z]).await {
-                            tracing::warn!(
-                                client = cid,
-                                "HotStateCache::write échoué (subject={effective_key}): {e:?}"
-                            );
+                        let last_write = last_hot_state_write.get(&cid).copied();
+                        if crate::hot_state_cache::should_write_now(
+                            last_write,
+                            HOT_STATE_WRITE_INTERVAL,
+                        ) {
+                            if let Err(e) = hot_state.write(effective_key, [x, y, z]).await {
+                                tracing::warn!(
+                                    client = cid,
+                                    "HotStateCache::write échoué (subject={effective_key}): {e:?}"
+                                );
+                            }
+                            last_hot_state_write.insert(cid, std::time::Instant::now());
                         }
                     }
                     let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
@@ -1689,6 +1709,7 @@ pub async fn gateway_main(
                         &mut display_names,
                         &mut last_pos,
                         &mut last_pos_at,
+                        &mut last_hot_state_write,
                         &mut bypass_warned_at,
                         &mut anomaly_trackers,
                         &mut ranks,
@@ -1839,6 +1860,7 @@ pub async fn gateway_main(
                 display_names.remove(&cid);
                 last_pos.remove(&cid);
                 last_pos_at.remove(&cid);
+                last_hot_state_write.remove(&cid);
                 bypass_warned_at.remove(&cid);
                 ranks.remove(&cid);
                 permissions.remove(&cid);
@@ -3071,6 +3093,8 @@ mod tests {
         last_pos.insert(cid, [1.0, 2.0, 3.0]);
         let mut last_pos_at = HashMap::new();
         last_pos_at.insert(cid, std::time::Instant::now());
+        let mut last_hot_state_write = HashMap::new();
+        last_hot_state_write.insert(cid, std::time::Instant::now());
         let mut bypass_warned_at = HashMap::new();
         bypass_warned_at.insert(cid, std::time::Instant::now());
         let mut anomaly_trackers = HashMap::new();
@@ -3105,6 +3129,7 @@ mod tests {
             &mut display_names,
             &mut last_pos,
             &mut last_pos_at,
+            &mut last_hot_state_write,
             &mut bypass_warned_at,
             &mut anomaly_trackers,
             &mut ranks,
@@ -3121,6 +3146,7 @@ mod tests {
         assert!(display_names.is_empty());
         assert!(last_pos.is_empty());
         assert!(last_pos_at.is_empty());
+        assert!(last_hot_state_write.is_empty());
         assert!(bypass_warned_at.is_empty());
         assert!(ranks.is_empty());
         assert!(permissions.is_empty());
