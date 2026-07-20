@@ -52,6 +52,16 @@ pub fn format_event(ts_ms: u64, ev: &SessionEvent) -> String {
             "TimeDrift · client {client} : serveur={server_seconds}s client={client_seconds}s delta={delta_seconds}s"
         ),
         SessionEvent::AdminAction { actor, action } => format!("AdminAction · {actor} : {action}"),
+        SessionEvent::InteractionResolved {
+            session_id,
+            actor,
+            target,
+            ok,
+            payload_len,
+        } => format!(
+            "InteractionResolved · session {session_id} : acteur {actor} → cible {target} = {} (payload {payload_len} octets)",
+            if *ok { "ok" } else { "refus" }
+        ),
     };
     format!("{time} — {body}")
 }

@@ -1,8 +1,13 @@
 //! Boucle serveur : draine les events transport, met à jour le World, diffuse les snapshots.
 //! Générique sur `Transport` → testable avec `InMemoryTransport`, branché sur GNS en prod.
 
+use crate::interaction_session::{SessionError, SessionRegistry};
 use crate::metrics::Metrics;
-use crate::npc::{behavior_to_u8, NpcRecord};
+use crate::named_npc_catalog::NamedNpcCatalog;
+use crate::named_npc_registry::NamedNpcRegistry;
+use crate::npc::{
+    behavior_to_u8, execute_transaction, EntityBehavior, NpcRecord, TransactionOutcome,
+};
 use crate::npc_catalog::NpcCatalog;
 use crate::population_director::PopulationDirector;
 use crate::transport::{ClientId, Transport, TransportEvent};
@@ -26,6 +31,16 @@ pub struct Server {
     /// appels `Server::new`/`Server::new_with_metrics` existants restent inchangés et n'activent
     /// jamais les PNJ). `Some(..)` uniquement via `Server::new_with_npcs`.
     npc_registry: Option<NpcRegistry>,
+    /// `None` = aucun PNJ nominatif sur ce Shard (comportement historique préservé). `Some(..)`
+    /// uniquement via `Server::new_with_named_npcs`.
+    named_npc_registry: Option<NamedNpcRegistry>,
+    session_registry: SessionRegistry,
+    /// File one-shot (actor, target) des `EntityInteraction(kind=2)` sur un PNJ nominatif à
+    /// arbitrer en session — accumulée par `apply_client_message`, drainée en début de `tick()`.
+    pending_interaction_opens: Vec<(ClientId, ClientId)>,
+    /// File one-shot (actor, session_id, outcome, target) des sessions résolues à notifier au
+    /// client — accumulée par `apply_client_message`, drainée en fin de `tick()`.
+    pending_interaction_results: Vec<(ClientId, u64, TransactionOutcome, ClientId)>,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -45,6 +60,10 @@ impl Server {
             pending_events: Vec::new(),
             metrics: None,
             npc_registry: None,
+            named_npc_registry: None,
+            session_registry: SessionRegistry::new(),
+            pending_interaction_opens: Vec::new(),
+            pending_interaction_results: Vec::new(),
         }
     }
 
@@ -60,6 +79,10 @@ impl Server {
             pending_events: Vec::new(),
             metrics: Some(metrics),
             npc_registry: None,
+            named_npc_registry: None,
+            session_registry: SessionRegistry::new(),
+            pending_interaction_opens: Vec::new(),
+            pending_interaction_results: Vec::new(),
         }
     }
 
@@ -85,6 +108,56 @@ impl Server {
                 records: std::collections::HashMap::new(),
                 next_npc_id: crate::world::NPC_ID_RANGE_START,
             }),
+            named_npc_registry: None,
+            session_registry: SessionRegistry::new(),
+            pending_interaction_opens: Vec::new(),
+            pending_interaction_results: Vec::new(),
+        }
+    }
+
+    /// Identique à `Server::new`, avec en plus un registre de PNJ nominatifs actif — SPAWNÉS dans
+    /// `World` dès la construction (position/pose initiale tirée de `catalog`), donc immédiatement
+    /// visibles dans un snapshot de joueur proche. Prend `catalog` ET `named_npc_registry` (pas
+    /// seulement le registre d'ids) précisément pour pouvoir faire ce spawn ici, en un seul
+    /// endroit — Task 7 (câblage boot) n'aura donc RIEN à ajouter au-delà de charger le catalogue
+    /// et appeler ce constructeur ; cette signature est définitive dès cette tâche, ne change pas
+    /// dans les tâches suivantes. Nouvelle méthode plutôt qu'un changement de signature de
+    /// `Server::new`/`new_with_metrics`/`new_with_npcs` : ces trois constructeurs sont déjà
+    /// appelés par de nombreux tests existants qui ne doivent pas changer pour cette tâche.
+    pub fn new_with_named_npcs(
+        aoi_radius: f32,
+        catalog: &NamedNpcCatalog,
+        named_npc_registry: NamedNpcRegistry,
+    ) -> Self {
+        let mut world = World::new();
+        for runtime_id in named_npc_registry.runtime_ids() {
+            let Some(manifest_id) = named_npc_registry.manifest_id_of(runtime_id) else {
+                continue;
+            };
+            let Some(config) = catalog.get(manifest_id) else {
+                continue;
+            };
+            world.add_player(runtime_id);
+            world.set_pose(
+                runtime_id,
+                Pose {
+                    x: config.position[0],
+                    y: config.position[1],
+                    z: config.position[2],
+                    ..Default::default()
+                },
+            );
+        }
+        Self {
+            world,
+            aoi_radius,
+            pending_events: Vec::new(),
+            metrics: None,
+            npc_registry: None,
+            named_npc_registry: Some(named_npc_registry),
+            session_registry: SessionRegistry::new(),
+            pending_interaction_opens: Vec::new(),
+            pending_interaction_results: Vec::new(),
         }
     }
 
@@ -163,6 +236,27 @@ impl Server {
         }
         self.world.advance_tick();
         self.tick_npcs();
+        for (actor, target) in self.pending_interaction_opens.drain(..) {
+            let session_id = self.session_registry.open(actor, target, 0);
+            let bytes = crate::gateway_routing::encode_interaction_open(session_id, target, 0, &[]);
+            transport.send(actor, &bytes);
+        }
+        for (actor, session_id, outcome, target) in self.pending_interaction_results.drain(..) {
+            let bytes = crate::gateway_routing::encode_interaction_result(
+                session_id,
+                outcome.ok,
+                &outcome.payload,
+            );
+            transport.send(actor, &bytes);
+            // Règle du log RP (spec §2/§7) : toute résolution, succès ou refus, est journalisée. Le
+            // log lui-même vit dans gateway.rs (SessionLog est possédé par le Gateway, pas par
+            // Server) — Server expose l'événement via un canal que Task 7/gateway.rs consomme ;
+            // pour cette tâche, l'événement SessionEvent::InteractionResolved existe (session_log.rs)
+            // mais n'est PAS encore écrit depuis ici (Server n'a et ne doit pas avoir de dépendance
+            // sur session_log.rs, qui vit au niveau Gateway) — limitation assumée, cf. rapport de
+            // tâche.
+            let _ = target;
+        }
         let mut b = FlatBufferBuilder::new();
         for id in self.world.player_ids() {
             b.reset();
@@ -239,9 +333,54 @@ impl Server {
             }
             ClientMsg::EntityInteraction => {
                 if let Some(ei) = env.msg_as_entity_interaction() {
+                    // Comportement existant (fondation PNJ) : transition FSM sur la foule anonyme —
+                    // INCHANGÉ, ne pas toucher cette branche.
                     if let Some(registry) = &mut self.npc_registry {
                         if let Some(record) = registry.records.get_mut(&ei.target()) {
                             record.apply_interaction(from, ei.kind());
+                        }
+                    }
+                    // Nouveau (fondation d'interaction) : kind=2=Interagit sur un PNJ NOMINATIF
+                    // ouvre une session. Un PNJ nominatif n'a pas de NpcRecord (pas de FSM propre
+                    // dans cette fondation — Calme par défaut, cf. Task 7) donc
+                    // interaction_allowed(Calme) est toujours vrai ici ; le refus FSM réel (spec
+                    // §2, "un vendeur fuite/à terre refuse") attend que les PNJ nominatifs aient
+                    // leur propre NpcRecord, hors périmètre de cette tâche.
+                    if ei.kind() == 2 {
+                        if let Some(named) = &self.named_npc_registry {
+                            if named.manifest_id_of(ei.target()).is_some() {
+                                self.pending_interaction_opens.push((from, ei.target()));
+                            }
+                        }
+                    }
+                }
+            }
+            ClientMsg::InteractionChoice => {
+                if let Some(ic) = env.msg_as_interaction_choice() {
+                    match self.session_registry.resolve(ic.session_id(), from) {
+                        Ok(session) => {
+                            let outcome =
+                                execute_transaction(EntityBehavior::Calme, || TransactionOutcome {
+                                    ok: true,
+                                    payload: Vec::new(),
+                                });
+                            self.pending_interaction_results.push((
+                                from,
+                                ic.session_id(),
+                                outcome,
+                                session.target,
+                            ));
+                        }
+                        Err(SessionError::NotFound) | Err(SessionError::NotOwner) => {
+                            self.pending_interaction_results.push((
+                                from,
+                                ic.session_id(),
+                                TransactionOutcome {
+                                    ok: false,
+                                    payload: Vec::new(),
+                                },
+                                0,
+                            ));
                         }
                     }
                 }
@@ -839,5 +978,156 @@ mod tests {
             event.is_none(),
             "un one-shot manqué reste manqué, pas de rattrapage"
         );
+    }
+
+    fn encode_entity_interaction(target: u64, kind: u8, param: u32) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let ei = EntityInteraction::create(
+            &mut b,
+            &EntityInteractionArgs {
+                target,
+                kind,
+                param,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::EntityInteraction,
+                msg: Some(ei.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    fn encode_interaction_choice(session_id: u64, choice: u8, param: u32) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let ic = InteractionChoice::create(
+            &mut b,
+            &InteractionChoiceArgs {
+                session_id,
+                choice,
+                param,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::InteractionChoice,
+                msg: Some(ic.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    #[test]
+    fn a_server_without_named_npcs_never_opens_a_session_on_interagit() {
+        // Comportement historique préservé : sans NamedNpcRegistry configuré, un EntityInteraction
+        // kind=2 (Interagit) ne doit jamais produire d'InteractionOpen — juste rien (comme avant ce
+        // plan, où kind=2 était déjà silencieusement ignoré par apply_interaction).
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1); // purge le premier snapshot
+
+        let interaction = encode_entity_interaction(999, 2, 0); // target=999 (aucun PNJ n'existe)
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: interaction,
+        });
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        let has_open = sent.iter().any(|bytes| {
+            flatbuffers::root::<ServerEnvelope>(bytes)
+                .map(|env| env.msg_type() == ServerMsg::InteractionOpen)
+                .unwrap_or(false)
+        });
+        assert!(
+            !has_open,
+            "sans registre nominatif, aucune InteractionOpen ne doit être envoyée"
+        );
+    }
+
+    #[test]
+    fn interacting_with_a_named_npc_opens_a_session_and_a_choice_resolves_it() {
+        use crate::named_npc_catalog::parse_and_validate;
+        use crate::named_npc_registry::NamedNpcRegistry;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[pnj]]
+            id = "ripperdoc-watson-01"
+            archetype = "a"
+            position = [0.0, 0.0, 0.0]
+            briques = ["rester-statique"]
+            "#,
+        )
+        .unwrap();
+        let named_registry = NamedNpcRegistry::from_catalog(&catalog);
+        let npc_runtime_id = named_registry.runtime_ids()[0];
+        let mut server = Server::new_with_named_npcs(50.0, &catalog, named_registry);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        let first_snapshot = t.take_sent(1);
+        // Vérifie au passage que le spawn au constructeur (pas juste l'arbitrage de session) a bien
+        // eu lieu : le PNJ nominatif doit apparaître dans le tout premier snapshot du joueur, avant
+        // même toute interaction — preuve qu'il vit réellement dans World depuis new_with_named_npcs.
+        let npc_visible = first_snapshot.iter().any(|bytes| {
+            let Ok(env) = flatbuffers::root::<ServerEnvelope>(bytes) else {
+                return false;
+            };
+            let Some(snap) = env.msg_as_snapshot() else {
+                return false;
+            };
+            snap.players()
+                .map(|ps| ps.iter().any(|p| p.id() == npc_runtime_id))
+                .unwrap_or(false)
+        });
+        assert!(
+            npc_visible,
+            "le PNJ nominatif doit être visible dans World dès la construction"
+        );
+
+        // Étape 1 : le joueur interagit -> le serveur ouvre une session.
+        let interaction = encode_entity_interaction(npc_runtime_id, 2, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: interaction,
+        });
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        let session_id = sent
+            .iter()
+            .find_map(|bytes| {
+                let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+                if env.msg_type() != ServerMsg::InteractionOpen {
+                    return None;
+                }
+                env.msg_as_interaction_open().map(|o| o.session_id())
+            })
+            .expect("une InteractionOpen doit être envoyée pour un PNJ nominatif interactible");
+
+        // Étape 2 : le joueur répond -> le serveur résout et répond InteractionResult{ok=true}.
+        let choice = encode_interaction_choice(session_id, 0, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: choice,
+        });
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        let ok = sent.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            if env.msg_type() != ServerMsg::InteractionResult {
+                return None;
+            }
+            env.msg_as_interaction_result().map(|r| r.ok())
+        });
+        assert_eq!(ok, Some(true));
     }
 }
