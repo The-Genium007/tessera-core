@@ -16,18 +16,18 @@ pub fn shard_map_json(m: &Manifest, zones: &[ShardZone]) -> serde_json::Value {
             "gameMaster": m.runtime.radius.game_master,
         },
         "shards": zones.iter().map(|z| json!({
-            // `z.addr` n'est plus une adresse réseau : dans le modèle Voronoï,
-            // `load_authority_topology_from_artifact` lui assigne déjà un identifiant logique
-            // opaque (ex. "group-0"), pas de `listen_addr`. Il n'y a donc plus besoin de table
-            // de correspondance addr→id ni de garde anti-désynchronisation : `z.addr` est
-            // directement exposable.
-            "id": z.addr,
+            // `z.id` — identifiant LOGIQUE opaque (ex. "group-0"), jamais `z.addr`.
+            // Ce fichier est PUBLIC (servi au client / lu par le HUD) : y mettre `z.addr`
+            // publierait les adresses internes des shards. Les deux champs ont été séparés le
+            // 2026-07-20, quand `addr` est devenue une vraie adresse réseau — avant, ils se
+            // confondaient sans dommage parce que `addr` valait déjà "group-N".
+            "id": z.id,
             // Libellé humain affiché par le HUD (« Shard: <name> ») au lieu de l'id logique brut
             // (« group-0 »), exigence playtest 2026-07-17. Repli sur l'id tant qu'aucune table de
             // noms de quartiers réels n'est câblée : garantit un affichage non vide dès maintenant
             // (enrichissement district ultérieur, hors périmètre de ce lot). Le HUD Lua lit `name`
             // en priorité, avec repli sur `id`, donc un vieux shard-map.json sans `name` fonctionne.
-            "name": z.addr,
+            "name": z.id,
             "boundaryRings": z.cells.iter()
                 .flat_map(|(cell, _radius)| cell.boundary_rings.iter())
                 .collect::<Vec<_>>(),
@@ -91,7 +91,8 @@ mod tests {
                 .expect("server.example.toml doit être chargeable");
         let ring = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]];
         let zones = vec![ShardZone {
-            addr: "group-0".to_string(),
+            id: "group-0".to_string(),
+            addr: "shard-a:27030".to_string(),
             cells: vec![(
                 CellZone {
                     boundary_rings: vec![ring],
@@ -120,7 +121,8 @@ mod tests {
         let ring_a = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
         let ring_b = vec![[2.0, 2.0], [3.0, 2.0], [3.0, 3.0], [2.0, 3.0], [2.0, 2.0]];
         let zones = vec![ShardZone {
-            addr: "group-0".to_string(),
+            id: "group-0".to_string(),
+            addr: "shard-a:27030".to_string(),
             cells: vec![
                 (
                     CellZone {

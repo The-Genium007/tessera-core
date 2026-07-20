@@ -41,6 +41,11 @@ advertise_addr = "51.38.189.234:27020"
 [runtime.topology]
 authority_artifact = "authority.json"
 server_count = 2
+# Une adresse `host:port` joignable par groupe, dans l'ordre des `--group-id` passés aux binaires
+# `tessera-shard` : shard_addrs[i] sert le groupe i. Il en faut EXACTEMENT `server_count`, sinon
+# le Gateway refuse de démarrer (un Gateway sans lien shard tourne à blanc en silence — incident
+# du 2026-07-20). En Docker/Swarm : nom de service, jamais une IP de tâche.
+shard_addrs = ["shard-a:27030", "shard-b:27031"]
 
 [runtime.radius]
 base = 25.0

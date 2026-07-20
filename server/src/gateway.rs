@@ -34,9 +34,16 @@ pub struct ShardLink {
     reader: FrameReader,
 }
 
-/// Écrit `frames` vers le shard à `shard_addr`, en connectant si besoin. Une connexion déjà
-/// présente dans `shards` mais dont l'écriture échoue est évacuée avant de renvoyer l'erreur —
-/// une entrée morte ne doit jamais bloquer une reconnexion au prochain appel.
+/// Écrit `frames` vers le shard d'id logique `shard_id`, en se connectant à `shard_addr` si
+/// besoin. Une connexion déjà présente dans `shards` mais dont l'écriture échoue est évacuée avant
+/// de renvoyer l'erreur — une entrée morte ne doit jamais bloquer une reconnexion au prochain
+/// appel.
+///
+/// **`shards` est indexée par id logique, pas par adresse.** C'est le même vocabulaire que
+/// `ShardLoader` (`loaded_shards`) et que les clés internes de `latest` : sans ça, l'élagage
+/// `per_shard.retain(|s, _| loaded.contains(s))` comparerait des adresses à des ids et jetterait
+/// TOUS les snapshots — un monde vide, à nouveau, et toujours en silence. `shard_addr` ne sert
+/// qu'au `TcpStream::connect` et ne doit jamais servir de clé.
 ///
 /// Renvoie `true` si cet appel vient de créer la connexion (1re connexion, ou reconnexion après
 /// une entrée morte évacuée) — signal utilisé par l'appelant pour re-semer l'état des clients
@@ -44,13 +51,14 @@ pub struct ShardLink {
 /// vient d'accepter une nouvelle connexion a perdu tout son état précédent.
 pub async fn write_to_shard(
     shards: &mut HashMap<String, ShardLink>,
+    shard_id: &str,
     shard_addr: &str,
     frames: &[Vec<u8>],
 ) -> std::io::Result<bool> {
-    let created = if !shards.contains_key(shard_addr) {
+    let created = if !shards.contains_key(shard_id) {
         let sock = TcpStream::connect(shard_addr).await?;
         shards.insert(
-            shard_addr.to_string(),
+            shard_id.to_string(),
             ShardLink {
                 sock,
                 reader: FrameReader::new(),
@@ -61,7 +69,7 @@ pub async fn write_to_shard(
         false
     };
     let result: std::io::Result<()> = async {
-        let link = shards.get_mut(shard_addr).unwrap();
+        let link = shards.get_mut(shard_id).unwrap();
         for f in frames {
             link.sock.write_all(f).await?;
         }
@@ -69,7 +77,7 @@ pub async fn write_to_shard(
     }
     .await;
     if let Err(e) = result {
-        shards.remove(shard_addr);
+        shards.remove(shard_id);
         return Err(e);
     }
     Ok(created)
@@ -948,14 +956,14 @@ pub async fn gateway_main(
                 // hors Docker, où le défaut 127.0.0.1 est déjà correct). Piège vécu (2026-07-18) :
                 // sans ça, le boot annonçait "http://0.0.0.0:9103/", techniquement exact comme
                 // adresse de bind mais inutilisable tel quel dans un navigateur.
-                let display_addr = match std::env::var("TESSERA_GATEWAY_SESSIONLOG_HTML_PUBLIC_HOST")
-                {
-                    Ok(host) if !host.trim().is_empty() => {
-                        let port = addr.rsplit(':').next().unwrap_or("9103");
-                        format!("{host}:{port}")
-                    }
-                    _ => addr.clone(),
-                };
+                let display_addr =
+                    match std::env::var("TESSERA_GATEWAY_SESSIONLOG_HTML_PUBLIC_HOST") {
+                        Ok(host) if !host.trim().is_empty() => {
+                            let port = addr.rsplit(':').next().unwrap_or("9103");
+                            format!("{host}:{port}")
+                        }
+                        _ => addr.clone(),
+                    };
                 tracing::info!("logs de session en direct disponibles sur http://{display_addr}/");
                 tokio::spawn(async move {
                     if let Err(e) = crate::session_log_html::serve_live(listener, path).await {
@@ -1521,7 +1529,32 @@ pub async fn gateway_main(
             }
 
             for LoadAction::Forward { shard, frames } in loader.feed(ev, placement) {
-                if let Ok(true) = write_to_shard(&mut shards, &shard, &frames).await {
+                // `shard` est un id LOGIQUE ("group-N") ; la connexion TCP veut l'adresse réseau.
+                let Some(shard_addr) = topology.addr_for(&shard).map(str::to_string) else {
+                    tracing::error!(
+                        shard = %shard,
+                        client = cid,
+                        "aucune adresse connue pour ce shard — vérifier \
+                         runtime.topology.shard_addrs dans le manifeste"
+                    );
+                    continue;
+                };
+                // `Err` était auparavant avalé par un `if let Ok(true)` muet : quand aucune écriture
+                // shard ne passait, `latest` restait vide, plus aucun `Snapshot`/`WorldState`
+                // n'était renvoyé, et RIEN ne le disait — le monde paraissait simplement vide
+                // (incident du 2026-07-20, adresses `group-N` non résolvables). Un échec d'écriture
+                // shard est toujours grave : il doit laisser une trace.
+                let write = write_to_shard(&mut shards, &shard, &shard_addr, &frames).await;
+                if let Err(e) = &write {
+                    tracing::warn!(
+                        shard = %shard,
+                        addr = %shard_addr,
+                        client = cid,
+                        "écriture vers le shard impossible : {e} — ce client ne sera visible pour \
+                         personne tant que le lien n'est pas rétabli"
+                    );
+                }
+                if let Ok(true) = write {
                     // Le shard vient de (re)connecter : côté Shard, `Server::new()` est recréé à
                     // chaque connexion acceptée (cf. `shard_main`) — tout son état précédent est
                     // perdu. Re-semer le préambule + dernière position connue de chaque client que
@@ -1538,7 +1571,8 @@ pub async fn gateway_main(
                         );
                     }
                     for (_, seed_frames) in reseed_frames {
-                        let _ = write_to_shard(&mut shards, &shard, &seed_frames).await;
+                        let _ =
+                            write_to_shard(&mut shards, &shard, &shard_addr, &seed_frames).await;
                     }
                 }
             }
@@ -2025,12 +2059,12 @@ mod tests {
 
         let mut shards: HashMap<String, ShardLink> = HashMap::new();
 
-        let created_first = write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+        let created_first = write_to_shard(&mut shards, &addr, &addr, &[b"a".to_vec()])
             .await
             .expect("1re écriture doit réussir");
         assert!(created_first, "la 1re écriture crée forcément la connexion");
 
-        let created_second = write_to_shard(&mut shards, &addr, &[b"b".to_vec()])
+        let created_second = write_to_shard(&mut shards, &addr, &addr, &[b"b".to_vec()])
             .await
             .expect("2e écriture doit réussir");
         assert!(
@@ -2068,7 +2102,9 @@ mod tests {
         });
 
         let mut shards: HashMap<String, ShardLink> = HashMap::new();
-        write_to_shard(&mut shards, &addr, &[]).await.unwrap();
+        write_to_shard(&mut shards, &addr, &addr, &[])
+            .await
+            .unwrap();
 
         // Laisse le temps aux 300 frames d'atterrir dans le buffer kernel du socket Gateway
         // AVANT le premier (et unique) appel à read_from_shards.
@@ -2098,7 +2134,7 @@ mod tests {
         });
 
         let mut shards: HashMap<String, ShardLink> = HashMap::new();
-        write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+        write_to_shard(&mut shards, &addr, &addr, &[b"a".to_vec()])
             .await
             .unwrap();
 
@@ -2179,7 +2215,9 @@ mod tests {
                 overlaps: vec![],
             }),
         ) {
-            write_to_shard(&mut shards, &shard, &frames).await.unwrap();
+            write_to_shard(&mut shards, &shard, &shard, &frames)
+                .await
+                .unwrap();
         }
         accept1.await.unwrap();
 
@@ -2236,12 +2274,14 @@ mod tests {
                 overlaps: vec![],
             }),
         ) {
-            let reconnected = write_to_shard(&mut shards, &shard, &frames).await.unwrap();
+            let reconnected = write_to_shard(&mut shards, &shard, &shard, &frames)
+                .await
+                .unwrap();
             if reconnected {
                 for (_, seed_frames) in
                     reseed_frames_for_reconnected_shard(&loader, &shard, &last_pos)
                 {
-                    write_to_shard(&mut shards, &shard, &seed_frames)
+                    write_to_shard(&mut shards, &shard, &shard, &seed_frames)
                         .await
                         .unwrap();
                 }
@@ -2278,7 +2318,7 @@ mod tests {
         let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
         let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
 
-        write_to_shard(&mut shards, &addr, &[b"a".to_vec()])
+        write_to_shard(&mut shards, &addr, &addr, &[b"a".to_vec()])
             .await
             .expect("1re connexion doit réussir");
         assert!(shards.contains_key(&addr));
@@ -2300,7 +2340,7 @@ mod tests {
         });
 
         // La prochaine écriture doit reconnecter automatiquement, sans intervention.
-        write_to_shard(&mut shards, &addr, &[b"b".to_vec()])
+        write_to_shard(&mut shards, &addr, &addr, &[b"b".to_vec()])
             .await
             .expect("la reconnexion automatique doit réussir");
         assert!(shards.contains_key(&addr));
@@ -3008,7 +3048,10 @@ mod tests {
 
         let identity = resolve_join_key(true, "LucasWindows", &token, "launcher", &jwks_cache)
             .expect("token valide → join accepté");
-        assert_eq!(identity.key, "oidc-sub-xyz", "clé de persistance = sub vérifié");
+        assert_eq!(
+            identity.key, "oidc-sub-xyz",
+            "clé de persistance = sub vérifié"
+        );
         assert_eq!(
             identity.display, "Neo",
             "nom affiché = claim `name` du JWT, jamais le username Windows du client"
@@ -3323,7 +3366,9 @@ mod tests {
         let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
 
         // Tick 0 : lire le snapshot initial
-        write_to_shard(&mut shards, &addr, &[]).await.unwrap();
+        write_to_shard(&mut shards, &addr, &addr, &[])
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
 
