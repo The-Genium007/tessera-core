@@ -67,3 +67,9 @@ visibility_radius = 100.0
 # le director tant que le câblage multi-district n'existe pas (plan de navigation, à venir).
 [runtime.population.target_density]
 # default = 20
+
+# --- PNJ nominatifs (fondation d'interaction, sous-projet Phase 3.1, palier 2) ---
+# Chemin (relatif au dossier du manifeste) vers un manifeste TOML de PNJ nominatifs — voir
+# named-npc-catalog.example.toml pour le format. ABSENT = aucun PNJ nominatif sur ce serveur
+# (défaut sûr, comportement historique préservé).
+# named_npc_manifest_path = "named-npc-catalog.toml"

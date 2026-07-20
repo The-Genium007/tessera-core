@@ -2,6 +2,8 @@
 //! Une seule connexion Gateway en v1 (M0-M1). Tick 20 Hz.
 
 use crate::internal_net::InternalTransport;
+use crate::named_npc_catalog::NamedNpcCatalog;
+use crate::named_npc_registry::NamedNpcRegistry;
 use crate::npc_catalog::NpcCatalog;
 use crate::population_director::PopulationDirector;
 use crate::server_loop::Server;
@@ -16,6 +18,7 @@ pub async fn shard_main(
     aoi_radius: f32,
     metrics_addr: &str,
     population: Option<(NpcCatalog, PopulationDirector)>,
+    named_npc: Option<(NamedNpcCatalog, NamedNpcRegistry)>,
 ) -> std::io::Result<()> {
     let metrics = crate::metrics::Metrics::new();
     {
@@ -47,17 +50,28 @@ pub async fn shard_main(
         // en plus (pas à la place) de `last_tick_micros` ci-dessous, qui reste la gauge "dernier
         // tick" existante consommée par le dashboard/l'alerte ShardFrozen.
         //
-        // `new_with_npcs` (Task 7, câblage boot PNJ) n'accepte pas encore `metrics` (limitation de
-        // Task 6, déjà revue — pas rouverte ici) : un Shard avec `[runtime.population]` configuré
-        // perd donc l'histogramme `tessera_tick_duration`/`overruns_total` interne à `Server::tick`
-        // tant que cette fondation n'a pas de constructeur combinant les deux. Les gauges
+        // `new_with_npcs`/`new_with_named_npcs` n'acceptent pas encore `metrics` (limitation de
+        // Task 6, déjà revue — pas rouverte ici) : un Shard avec `[runtime.population]` et/ou
+        // `named_npc_manifest_path` configuré perd donc l'histogramme
+        // `tessera_tick_duration`/`overruns_total` interne à `Server::tick` tant que cette
+        // fondation n'a pas de constructeur combinant les trois. Les gauges
         // `last_tick_micros`/`players` ci-dessous restent actives dans tous les cas (mesurées ici,
         // hors de `Server`).
-        let mut server = match &population {
-            None => Server::new_with_metrics(aoi_radius, metrics.clone()),
-            Some((catalog, director)) => {
+        //
+        // PNJ de foule (`population`) et PNJ nominatifs (`named_npc`) sont deux registres distincts
+        // sur `Server` (`npc_registry`/`named_npc_registry`, cf. server_loop.rs) mais aucun
+        // constructeur ne les active tous les deux à la fois pour l'instant (limitation de cette
+        // fondation, pas un oubli — un Shard avec les deux configurés active seulement les PNJ de
+        // foule ; raffinement futur si le besoin apparaît). `named_npc` est vérifié en second pour
+        // que `population` garde la priorité, comme avant l'existence de cette fonctionnalité.
+        let mut server = match (&population, &named_npc) {
+            (Some((catalog, director)), _) => {
                 Server::new_with_npcs(aoi_radius, catalog.clone(), director.clone())
             }
+            (None, Some((catalog, registry))) => {
+                Server::new_with_named_npcs(aoi_radius, catalog, registry.clone())
+            }
+            (None, None) => Server::new_with_metrics(aoi_radius, metrics.clone()),
         };
         let mut transport = InternalTransport::new();
         let mut buf = [0u8; 8192];
@@ -134,8 +148,9 @@ mod tests {
         // sans laisser de connexion Gateway en attente indéfiniment (ici : aucune connexion du
         // tout — la course doit gagner dès la boucle d'accept externe).
         let addr = "127.0.0.1:27131";
-        let handle =
-            tokio::spawn(async move { super::shard_main(addr, 1000.0, "127.0.0.1:0", None).await });
+        let handle = tokio::spawn(async move {
+            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None).await
+        });
 
         // Laisse le shard se binder et enregistrer son ShutdownSignal avant d'envoyer le signal.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -164,8 +179,9 @@ mod tests {
         // 127.0.0.1:27131 (utilisé par le test ci-dessus) pour éviter toute collision entre
         // tests exécutés en parallèle.
         let addr = "127.0.0.1:27132";
-        let handle =
-            tokio::spawn(async move { super::shard_main(addr, 1000.0, "127.0.0.1:0", None).await });
+        let handle = tokio::spawn(async move {
+            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None).await
+        });
 
         // Laisse le shard se binder et enregistrer son ShutdownSignal avant de se connecter.
         tokio::time::sleep(Duration::from_millis(200)).await;

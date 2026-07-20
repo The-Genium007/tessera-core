@@ -74,6 +74,33 @@ async fn main() -> std::io::Result<()> {
         Some((catalog, director))
     };
 
+    // Comportement historique préservé : `named_npc_manifest_path` absent = aucun PNJ nominatif
+    // sur ce Shard (le défaut sûr, cf. manifest.rs), exactement comme avant l'existence de cette
+    // fonctionnalité (fondation d'interaction, sous-projet Phase 3.1, palier 2).
+    let named_npc = manifest
+        .runtime
+        .named_npc_manifest_path
+        .as_ref()
+        .map(|path| {
+            // Résolu depuis le répertoire du manifeste, même convention que le catalogue PNJ de foule
+            // ci-dessus / `TopologyConfig::authority_artifact` : un fichier local versionné à côté du
+            // manifeste, pas un chemin absolu codé en dur.
+            let manifest_dir = manifest_path_buf.parent().unwrap_or_else(|| {
+                eprintln!("manifeste invalide ({manifest_path}): chemin sans répertoire parent");
+                std::process::exit(1);
+            });
+            let catalog_path = manifest_dir.join(path);
+            let catalog = server::named_npc_catalog::load(&catalog_path).unwrap_or_else(|e| {
+                eprintln!(
+                    "manifeste PNJ nominatif invalide ({}): {e}",
+                    catalog_path.display()
+                );
+                std::process::exit(1);
+            });
+            let registry = server::named_npc_registry::NamedNpcRegistry::from_catalog(&catalog);
+            (catalog, registry)
+        });
+
     tracing::info!("Shard démarré pour le groupe {group_id} (écoute {addr})");
-    server::shard_main(&addr, aoi_radius, &metrics_addr, population).await
+    server::shard_main(&addr, aoi_radius, &metrics_addr, population, named_npc).await
 }

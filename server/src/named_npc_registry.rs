@@ -9,7 +9,7 @@
 use crate::named_npc_catalog::NamedNpcCatalog;
 use crate::transport::ClientId;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NamedNpcRegistry {
     manifest_to_runtime: std::collections::HashMap<String, ClientId>,
     runtime_to_manifest: std::collections::HashMap<ClientId, String>,

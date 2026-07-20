@@ -265,12 +265,12 @@ async fn run_test() {
     }
 
     tokio::spawn(async move {
-        server::shard_main(shard_a_addr, 1000.0, "127.0.0.1:0", None)
+        server::shard_main(shard_a_addr, 1000.0, "127.0.0.1:0", None, None)
             .await
             .expect("shard A ne devrait pas échouer");
     });
     tokio::spawn(async move {
-        server::shard_main(shard_b_addr, 1000.0, "127.0.0.1:0", None)
+        server::shard_main(shard_b_addr, 1000.0, "127.0.0.1:0", None, None)
             .await
             .expect("shard B ne devrait pas échouer");
     });

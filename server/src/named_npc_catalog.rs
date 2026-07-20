@@ -29,7 +29,7 @@ pub struct NamedNpcConfig {
     pub briques: Vec<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct NamedNpcCatalog {
     entries: std::collections::HashMap<String, NamedNpcConfig>,
 }

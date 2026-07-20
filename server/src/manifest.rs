@@ -99,6 +99,14 @@ pub struct Runtime {
     /// cf. `Server::new_with_npcs` vs `Server::new`/`new_with_metrics` dans `server_loop.rs`).
     #[serde(default)]
     pub population: PopulationConfig,
+    /// Chemin (relatif au répertoire du manifeste, même convention que
+    /// `TopologyConfig::authority_artifact`) vers un manifeste TOML de PNJ NOMINATIFS (fondation
+    /// d'interaction, sous-projet Phase 3.1, palier 2) — voir `named_npc_catalog.rs`. ABSENT =
+    /// aucun PNJ nominatif sur ce serveur (défaut sûr, comportement historique préservé, cf.
+    /// `Server::new_with_named_npcs` vs `Server::new`/`new_with_metrics`/`new_with_npcs` dans
+    /// `server_loop.rs`).
+    #[serde(default)]
+    pub named_npc_manifest_path: Option<String>,
 }
 
 /// Valeur par défaut de `Runtime::redis_url` quand absente du TOML — Redis local, cohérent avec
@@ -838,6 +846,30 @@ mod tests {
         let m = parse_and_validate(&toml).unwrap();
         assert_eq!(m.runtime.population.target_density.get("centre"), Some(&20));
         assert_eq!(m.runtime.population.target_density.get("periph"), Some(&5));
+    }
+
+    // --- named_npc_manifest_path : chemin du catalogue PNJ nominatif (fondation d'interaction) ---
+
+    #[test]
+    fn named_npc_manifest_path_defaults_to_none_when_absent() {
+        let m = parse_and_validate(MINIMAL_TOML).unwrap();
+        assert_eq!(m.runtime.named_npc_manifest_path, None);
+    }
+
+    #[test]
+    fn named_npc_manifest_path_parses_declared_path() {
+        // Insérée sous `[runtime]`, AVANT tout sous-tableau (`[runtime.gateway]`, etc.) — une
+        // clé nue placée après un sous-tableau `[runtime.xxx]` appartiendrait à ce sous-tableau
+        // en TOML, pas à `[runtime]` (piège vécu en écrivant ce test).
+        let toml = MINIMAL_TOML.replace(
+            "[runtime]\n        whitelist = false",
+            "[runtime]\n        named_npc_manifest_path = \"named-npc-catalog.toml\"\n        whitelist = false",
+        );
+        let m = parse_and_validate(&toml).unwrap();
+        assert_eq!(
+            m.runtime.named_npc_manifest_path,
+            Some("named-npc-catalog.toml".to_string())
+        );
     }
 
     // --- load_authority_topology[_from_artifact] : fixture minimale en mémoire ---

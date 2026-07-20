@@ -38,7 +38,7 @@ async fn shard_relays_snapshots_over_tcp() {
     // Lance le shard sur un port de test dans une tâche.
     let addr = "127.0.0.1:27130";
     tokio::spawn(async move {
-        server::shard_main(addr, 1000.0, "127.0.0.1:0", None)
+        server::shard_main(addr, 1000.0, "127.0.0.1:0", None, None)
             .await
             .unwrap()
     });
