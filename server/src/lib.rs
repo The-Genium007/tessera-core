@@ -8,6 +8,8 @@ pub mod admin_commands;
 pub mod admin_store;
 pub mod anticheat;
 pub mod attestation_display;
+pub mod character_migration;
+pub mod character_store;
 pub mod degradation;
 pub mod framing;
 pub mod gateway;

@@ -309,6 +309,7 @@ async fn run_test() {
             false,
             std::collections::HashSet::new(),
             hot_state,
+            None, // serveur privé : pas de store personnage (flux d'arrivée inerte)
         )
         .await
         .expect("gateway ne devrait pas échouer");
