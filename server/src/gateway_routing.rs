@@ -99,13 +99,16 @@ fn sanitize_display_name(raw: &str) -> String {
 }
 
 /// Décode un `ClientEnvelope` client ; si c'est un `Join`, renvoie `(display_name nettoyé, token,
-/// protocol_version)` (voir `sanitize_display_name` — le nom brut n'est jamais fiable, il vient du
-/// réseau). `token` est renvoyé tel quel, chaîne vide si absent (défaut FlatBuffers) — sa
-/// vérification (JWT ZITADEL, requise seulement si `identity.public = true`) vit dans
+/// protocol_version, hwid_hash)` (voir `sanitize_display_name` — le nom brut n'est jamais fiable,
+/// il vient du réseau). `token` est renvoyé tel quel, chaîne vide si absent (défaut FlatBuffers) —
+/// sa vérification (JWT ZITADEL, requise seulement si `identity.public = true`) vit dans
 /// `gateway::resolve_join_key`, pas ici : ce module reste pur décodage, sans connaissance du
 /// `JwksCache`. `protocol_version` vaut 0 si absent (client trop ancien pour connaître le champ) —
 /// sa comparaison à `CURRENT_PROTOCOL_VERSION` vit aussi côté `gateway.rs` (Task C3), pas ici.
-pub fn extract_join_fields(client_payload: &[u8]) -> Option<(String, String, u32)> {
+/// `hwid_hash` (Task 3, robustesse opérationnelle) vaut chaîne vide si absent (client qui ne le
+/// pose pas encore, ou schéma de travail non régénéré côté fork C++) — sa vérification contre les
+/// bans actifs vit aussi côté `gateway.rs`, pas ici.
+pub fn extract_join_fields(client_payload: &[u8]) -> Option<(String, String, u32, String)> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
     if env.msg_type() != ClientMsg::Join {
         return None;
@@ -116,7 +119,8 @@ pub fn extract_join_fields(client_payload: &[u8]) -> Option<(String, String, u32
         .map(sanitize_display_name)
         .unwrap_or_default();
     let token = join.token().unwrap_or_default().to_string();
-    Some((name, token, join.protocol_version()))
+    let hwid_hash = join.hwid_hash().unwrap_or_default().to_string();
+    Some((name, token, join.protocol_version(), hwid_hash))
 }
 
 /// Décode un `ClientEnvelope` client ; si c'est un `Leave` (départ volontaire, Task C3), renvoie
@@ -268,12 +272,14 @@ mod tests {
         let mut b = FlatBufferBuilder::new();
         let name = b.create_string(name);
         let token = token.map(|t| b.create_string(t));
+        let hwid_hash = b.create_string("");
         let join = Join::create(
             &mut b,
             &JoinArgs {
                 display_name: Some(name),
                 token,
                 protocol_version,
+                hwid_hash: Some(hwid_hash),
             },
         );
         let env = ClientEnvelope::create(
@@ -365,14 +371,20 @@ mod tests {
     fn extract_join_fields_reads_display_name_and_token() {
         assert_eq!(
             extract_join_fields(&client_join()),
-            Some(("v".to_string(), String::new(), CURRENT_PROTOCOL_VERSION))
+            Some((
+                "v".to_string(),
+                String::new(),
+                CURRENT_PROTOCOL_VERSION,
+                String::new()
+            ))
         );
         assert_eq!(
             extract_join_fields(&client_join_with_token("v", Some("jwt-abc"))),
             Some((
                 "v".to_string(),
                 "jwt-abc".to_string(),
-                CURRENT_PROTOCOL_VERSION
+                CURRENT_PROTOCOL_VERSION,
+                String::new()
             ))
         );
         assert_eq!(extract_join_fields(&client_position(1.0, 2.0, 3.0)), None); // pas un Join
@@ -383,8 +395,35 @@ mod tests {
     fn extract_join_fields_reads_the_protocol_version_field() {
         assert_eq!(
             extract_join_fields(&client_join_with_version("v", None, 999)),
-            Some(("v".to_string(), String::new(), 999))
+            Some(("v".to_string(), String::new(), 999, String::new()))
         );
+    }
+
+    #[test]
+    fn extract_join_fields_reads_hwid_hash() {
+        let mut b = flatbuffers::FlatBufferBuilder::new();
+        let name = b.create_string("Lucas");
+        let token = b.create_string("");
+        let hwid = b.create_string("hashed-value");
+        let join = Join::create(
+            &mut b,
+            &JoinArgs {
+                display_name: Some(name),
+                token: Some(token),
+                protocol_version: 1,
+                hwid_hash: Some(hwid),
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::Join,
+                msg: Some(join.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let (_, _, _, hwid_hash) = extract_join_fields(b.finished_data()).unwrap();
+        assert_eq!(hwid_hash, "hashed-value");
     }
 
     /// Octets d'un `Join` produits par le VRAI encodeur C++ du client (fork Cyberverse,
@@ -412,18 +451,22 @@ mod tests {
 
     #[test]
     fn server_decodes_a_join_encoded_by_the_real_cpp_client() {
-        let (name, token, version) =
+        let (name, token, version, hwid_hash) =
             extract_join_fields(CPP_CLIENT_JOIN_V1).expect("le Join du client C++ doit se décoder");
         assert_eq!(name, "Lucas");
         assert_eq!(token, ""); // pas encore câblé côté client (JWT ZITADEL à venir)
         assert_eq!(version, 1);
+        // `hwid_hash` n'existait pas dans le schéma au moment où ces octets ont été capturés
+        // (2026-07-15) — champ additif en fin de table, défaut FlatBuffers vide attendu tant que
+        // le fork C++ n'est pas régénéré pour le poser (Task 3, robustesse opérationnelle).
+        assert_eq!(hwid_hash, "");
     }
 
     #[test]
     fn the_cpp_client_join_is_accepted_by_the_version_check() {
         // Le test qui aurait attrapé le kick du 2026-07-15 avant qu'il n'atteigne un joueur :
         // ce sont les octets réels du client, passés à la fonction réelle qui kicke.
-        let (_, _, version) = extract_join_fields(CPP_CLIENT_JOIN_V1).unwrap();
+        let (_, _, version, _) = extract_join_fields(CPP_CLIENT_JOIN_V1).unwrap();
         assert_eq!(
             version, CURRENT_PROTOCOL_VERSION,
             "le client C++ publié doit parler la version courante — sinon le Gateway le kicke \

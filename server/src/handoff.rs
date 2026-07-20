@@ -405,12 +405,14 @@ mod tests {
     fn join_payload() -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
         let name = b.create_string("v");
+        let hwid_hash = b.create_string("");
         let join = Join::create(
             &mut b,
             &JoinArgs {
                 display_name: Some(name),
                 token: None,
                 protocol_version: 1,
+                hwid_hash: Some(hwid_hash),
             },
         );
         let env = ClientEnvelope::create(

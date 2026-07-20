@@ -10,7 +10,11 @@ struct Vec3 { x:float; y:float; z:float; }
 // plutôt qu'un comportement indéfini (désérialisation qui dérive silencieusement au fil des
 // évolutions du schéma). 0 par défaut FlatBuffers si absent (client trop ancien pour connaître le
 // champ) — mismatch avec la version courante dès qu'elle dépasse 0.
-table Join { display_name:string; token:string; protocol_version:uint; }
+// `hwid_hash` : identifiant matériel HACHÉ+salé côté launcher (jamais l'identifiant brut — voir
+// `ban_store.rs`), schéma de TRAVAIL (pas encore figé/régénéré côté fork C++, sous-projet C robustesse
+// opérationnelle palier 2). Chaîne vide par défaut FlatBuffers si absent (client qui ne le pose pas
+// encore) — vérifié contre le vecteur `hwid_hash` d'un `BanRecord` au Join, cf. `gateway.rs`.
+table Join { display_name:string; token:string; protocol_version:uint; hwid_hash:string; }
 
 // locomotion : enum EXTENSIBLE en ubyte (append-only) — 0=Idle 1=Walk 2=Run 3=Sprint
 //              4=CrouchIdle 5=CrouchMove 6=InAir/Jump (documenté, jamais re-gelé).

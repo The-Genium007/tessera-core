@@ -783,6 +783,10 @@ pub async fn gateway_main(
     whitelist_enabled: bool,
     whitelist_names: std::collections::HashSet<String>,
     hot_state: crate::hot_state_cache::HotStateCache,
+    // `None` sur serveur privé (pas de Postgres, cf. `bin/gateway.rs`) : le check ban au Join et
+    // la persistance `ban`/`unban` sont alors des no-op — comportement inchangé pour ce cas.
+    // `Some((store, bans_actifs_charges_au_boot))` sur serveur public.
+    mut ban_store: Option<(crate::ban_store::BanStore, Vec<crate::ban_store::BanRecord>)>,
 ) -> std::io::Result<()> {
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
@@ -803,6 +807,15 @@ pub async fn gateway_main(
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::time::Duration;
+
+    // Cache RAM des bans actifs, vérifié à chaque Join (voir plus bas) — peuplé une fois ici
+    // depuis ce que `bin/gateway.rs` a chargé au boot (`BanStore::load_all_active_async`), jamais
+    // relu depuis Postgres par connexion. Vide (donc aucun Join jamais refusé pour ban) si
+    // `ban_store` est `None` (serveur privé).
+    let mut bans: Vec<crate::ban_store::BanRecord> = ban_store
+        .as_mut()
+        .map(|(_, loaded)| std::mem::take(loaded))
+        .unwrap_or_default();
 
     let mut shards: HashMap<String, ShardLink> = HashMap::new();
     let mut loader = ShardLoader::new();
@@ -948,14 +961,14 @@ pub async fn gateway_main(
                 // hors Docker, où le défaut 127.0.0.1 est déjà correct). Piège vécu (2026-07-18) :
                 // sans ça, le boot annonçait "http://0.0.0.0:9103/", techniquement exact comme
                 // adresse de bind mais inutilisable tel quel dans un navigateur.
-                let display_addr = match std::env::var("TESSERA_GATEWAY_SESSIONLOG_HTML_PUBLIC_HOST")
-                {
-                    Ok(host) if !host.trim().is_empty() => {
-                        let port = addr.rsplit(':').next().unwrap_or("9103");
-                        format!("{host}:{port}")
-                    }
-                    _ => addr.clone(),
-                };
+                let display_addr =
+                    match std::env::var("TESSERA_GATEWAY_SESSIONLOG_HTML_PUBLIC_HOST") {
+                        Ok(host) if !host.trim().is_empty() => {
+                            let port = addr.rsplit(':').next().unwrap_or("9103");
+                            format!("{host}:{port}")
+                        }
+                        _ => addr.clone(),
+                    };
                 tracing::info!("logs de session en direct disponibles sur http://{display_addr}/");
                 tokio::spawn(async move {
                     if let Err(e) = crate::session_log_html::serve_live(listener, path).await {
@@ -1082,7 +1095,8 @@ pub async fn gateway_main(
             // PositionUpdate → placement (topologie + rang) et mémorisation de la dernière position.
             let mut placement = None;
             if let TransportEvent::Message { data, .. } = &ev {
-                if let Some((name, token, protocol_version)) = extract_join_fields(data) {
+                if let Some((name, token, protocol_version, hwid_hash)) = extract_join_fields(data)
+                {
                     if !name.is_empty() || !token.is_empty() {
                         if let Err(reason) = resolve_protocol_version(protocol_version) {
                             tracing::warn!(
@@ -1130,6 +1144,30 @@ pub async fn gateway_main(
                                 continue;
                             }
                         };
+                        // Check ban (Task 3, robustesse opérationnelle sous-projet C) : AVANT la
+                        // vérification de capacité — un compte/HWID banni ne doit pas consommer un
+                        // slot ni jamais atteindre `reject_join_if_server_full`. `sub_for_ban` est
+                        // `effective_key` (le `sub` OIDC vérifié sur serveur public, cf.
+                        // `resolve_join_key` ; `None` n'a pas de sens ici car `effective_key` est
+                        // toujours renseigné — display_name en repli sur serveur privé, où `bans`
+                        // est de toute façon vide). LIMITE ASSUMÉE : aucune corrélation IP au Join
+                        // dans cette tâche — le `Transport` actuel (`transport.rs`/`gns_transport.rs`,
+                        // trait `poll`/`send`/`disconnect`) n'expose aucune IP source par `ClientId`.
+                        // Le vecteur `ip` d'un `BanRecord` reste stocké et utilisable pour un futur
+                        // enforcement quand cette API existera, mais n'est PAS vérifié ici.
+                        let sub_for_ban: Option<&str> = Some(effective_key.as_str());
+                        let ban_match = bans.iter().find(|b| {
+                            (b.subject.is_some() && b.subject.as_deref() == sub_for_ban)
+                                || (b.hwid_hash.is_some()
+                                    && b.hwid_hash.as_deref() == Some(hwid_hash.as_str()))
+                        });
+                        if let Some(ban) = ban_match {
+                            tracing::warn!(client = cid, reason = %ban.reason, "kick : banni");
+                            client.send(cid, &encode_kicked(&format!("banni : {}", ban.reason)));
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
                         if reject_join_if_server_full(
                             keys.contains_key(&cid),
                             keys.len(),
@@ -1420,17 +1458,25 @@ pub async fn gateway_main(
                         }
                         _ => None,
                     };
+                    // Capturé AVANT le `match parsed` qui déplace `parsed` dans `execute_admin_command`
+                    // (`ParsedCommand::Ban`/`Unban` possèdent des `String`, non `Copy`) — sert juste
+                    // après à décider la persistance Postgres réelle sans re-matcher une valeur
+                    // déplacée. `Unban` ne porte que `target` : pas besoin de le cloner en entier.
+                    let unban_target: Option<String> = match &parsed {
+                        Ok(crate::admin_commands::ParsedCommand::Unban { target }) => {
+                            Some(target.clone())
+                        }
+                        _ => None,
+                    };
+                    let is_ban_cmd =
+                        matches!(parsed, Ok(crate::admin_commands::ParsedCommand::Ban { .. }));
                     let outcome = match parsed {
                         Ok(cmd) => execute_admin_command(
                             cmd,
                             is_root,
                             &mut admin_store.groups,
                             &mut admin_store.admins,
-                            // TODO(Task 3, robustesse opérationnelle sous-projet C) : brancher le
-                            // vrai `BanStore` Postgres ici (écriture réelle + check au Join) ;
-                            // pour l'instant `execute` reste pur, ce Vec jetable ne fait que
-                            // satisfaire la nouvelle signature sans persister quoi que ce soit.
-                            &mut Vec::new(),
+                            &mut bans,
                             now_ms,
                             &issuer,
                         ),
@@ -1443,6 +1489,31 @@ pub async fn gateway_main(
                     if outcome.success {
                         admin_store.save_groups();
                         admin_store.save_admins();
+                        // Persistance Postgres réelle de ban/unban (Task 3, robustesse
+                        // opérationnelle sous-projet C) : `execute_admin_command` ci-dessus ne
+                        // mute QUE `bans` en RAM (pur, testable sans IO — cf. admin_commands.rs) ;
+                        // c'est ici, symétriquement à `admin_store.save_groups()`/`save_admins()`
+                        // juste au-dessus, que l'effet devient durable. `None` (serveur privé, pas
+                        // de Postgres) : no-op, comportement inchangé.
+                        if is_ban_cmd {
+                            if let Some((ban_persist, _)) = ban_store.as_mut() {
+                                if let Some(new_ban) = bans.last() {
+                                    if let Err(e) = ban_persist.save_async(new_ban, &issuer).await {
+                                        tracing::warn!("persistance ban Postgres échouée: {e:?}");
+                                    }
+                                }
+                            }
+                        } else if let Some(target) = unban_target.as_ref() {
+                            if let Some((ban_persist, _)) = ban_store.as_mut() {
+                                if let Some(subject) = target.strip_prefix("account:") {
+                                    if let Err(e) =
+                                        ban_persist.delete_by_subject_async(subject).await
+                                    {
+                                        tracing::warn!("suppression ban Postgres échouée: {e:?}");
+                                    }
+                                }
+                            }
+                        }
                         if let Some(sl) = slog.as_mut() {
                             sl.write(&crate::session_log::SessionEvent::AdminAction {
                                 actor: issuer.clone(),
@@ -1933,12 +2004,14 @@ mod tests {
     fn join_payload() -> Vec<u8> {
         let mut b = flatbuffers::FlatBufferBuilder::new();
         let name = b.create_string("v");
+        let hwid_hash = b.create_string("");
         let join = protocol::Join::create(
             &mut b,
             &protocol::JoinArgs {
                 display_name: Some(name),
                 token: None,
                 protocol_version: 1,
+                hwid_hash: Some(hwid_hash),
             },
         );
         let env = protocol::ClientEnvelope::create(
@@ -3013,7 +3086,10 @@ mod tests {
 
         let identity = resolve_join_key(true, "LucasWindows", &token, "launcher", &jwks_cache)
             .expect("token valide → join accepté");
-        assert_eq!(identity.key, "oidc-sub-xyz", "clé de persistance = sub vérifié");
+        assert_eq!(
+            identity.key, "oidc-sub-xyz",
+            "clé de persistance = sub vérifié"
+        );
         assert_eq!(
             identity.display, "Neo",
             "nom affiché = claim `name` du JWT, jamais le username Windows du client"

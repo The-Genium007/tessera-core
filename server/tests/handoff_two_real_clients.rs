@@ -106,12 +106,14 @@ const BUFFER_RADIUS: f32 = 25.0;
 fn encode_join(name: &str) -> Vec<u8> {
     let mut b = FlatBufferBuilder::new();
     let n = b.create_string(name);
+    let hwid_hash = b.create_string("");
     let join = Join::create(
         &mut b,
         &JoinArgs {
             display_name: Some(n),
             token: None,
             protocol_version: server::gateway_routing::CURRENT_PROTOCOL_VERSION,
+            hwid_hash: Some(hwid_hash),
         },
     );
     let env = ClientEnvelope::create(
@@ -307,6 +309,7 @@ async fn run_test() {
             false,
             std::collections::HashSet::new(),
             hot_state,
+            None, // serveur privé : pas de BanStore Postgres (cf. bin/gateway.rs)
         )
         .await
         .expect("gateway ne devrait pas échouer");
