@@ -23,6 +23,7 @@ pub mod jwks;
 pub mod maintenance;
 pub mod manifest;
 pub mod metrics;
+pub mod npc;
 pub mod permissions;
 pub mod persistence;
 pub mod player_store_impl;
