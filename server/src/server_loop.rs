@@ -66,6 +66,12 @@ impl Server {
                         .set_locomotion(from, pu.locomotion(), pu.move_dir(), pu.flags());
                 }
             }
+            ClientMsg::EmoteReport => {
+                if let Some(er) = env.msg_as_emote_report() {
+                    let emote = if er.start() { er.emote() } else { 0 };
+                    self.world.set_sustained(from, emote);
+                }
+            }
             _ => {}
         }
     }
@@ -277,6 +283,89 @@ mod tests {
         let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2[0]).unwrap();
         let snap = env.msg_as_snapshot().unwrap();
         assert_eq!(snap.players().unwrap().get(0).sustained(), 0);
+    }
+
+    fn encode_emote_report(emote: u32, start: bool) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let er = EmoteReport::create(&mut b, &EmoteReportArgs { emote, start });
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::EmoteReport,
+                msg: Some(er.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    #[test]
+    fn emote_report_start_sets_sustained_in_snapshot() {
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_emote_report(7, true),
+        });
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2[0]).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert_eq!(snap.players().unwrap().get(0).sustained(), 7);
+    }
+
+    #[test]
+    fn emote_report_stop_clears_sustained() {
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_emote_report(7, true),
+        });
+        server.tick(&mut t);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_emote_report(7, false),
+        });
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert_eq!(snap.players().unwrap().get(0).sustained(), 0);
+    }
+
+    #[test]
+    fn sustained_emote_survives_a_subsequent_position_update() {
+        // LE test clé du raffinement §5 de la spec : l'état continu (sustained) doit survivre à un
+        // PositionUpdate qui suit — les deux canaux sont indépendants.
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_emote_report(9, true),
+        });
+        server.tick(&mut t);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position_with_locomotion(1.0, 0.0, 0.0, 0.0, 0, 0),
+        });
+        server.tick(&mut t);
+        let sent_to_2 = t.take_sent(2);
+        let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let p = snap.players().unwrap().get(0);
+        assert_eq!(
+            p.sustained(),
+            9,
+            "la pose tenue doit survivre au PositionUpdate suivant"
+        );
+        assert_eq!(p.position().unwrap().x(), 1.0);
     }
 
     #[test]
