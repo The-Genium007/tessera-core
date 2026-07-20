@@ -97,6 +97,12 @@ async fn main() -> std::io::Result<()> {
     let redis_url =
         server::manifest::resolve_redis_url(&manifest.runtime.redis_url, redis_url_env.as_deref());
 
+    // Store personnage (flux d'arrivée, palier 2) : construit UNIQUEMENT sur un serveur public,
+    // depuis le même pool Postgres que `PostgresStore`. `None` sur un serveur privé (FileStore) —
+    // le flux personnage y est alors inerte (voir `gateway_main`). Rempli dans la branche
+    // `identity.public` ci-dessous, avant que `PostgresStore::new(pool)` ne consomme le pool.
+    let mut character_store: Option<server::character_store::CharacterStore> = None;
+
     let store = if manifest.identity.public {
         // Dernier niveau de repli : composants séparés TESSERA_PG_* (voir docker-compose.yml,
         // service `postgres` colocalisé) — permet un déploiement standard sans jamais saisir
@@ -144,6 +150,10 @@ async fn main() -> std::io::Result<()> {
                 eprintln!("migrations Postgres échouées ({postgres_url}): {e}");
                 std::process::exit(1);
             });
+        // Même pool Postgres que le `PostgresStore` (le `PgPool` est un handle clonable, backé par
+        // un Arc — pas une nouvelle connexion). Alimente le flux d'arrivée : liste/creation/
+        // sélection/suppression de personnages, table `characters` (migrée juste au-dessus).
+        character_store = Some(server::character_store::CharacterStore::new(pool.clone()));
         server::player_store_impl::PlayerStoreImpl::Postgres {
             store: server::postgres_store::PostgresStore::new(pool),
             display_names: std::collections::HashMap::new(),
@@ -242,6 +252,7 @@ async fn main() -> std::io::Result<()> {
         whitelist_enabled,
         whitelist_names,
         hot_state,
+        character_store,
     )
     .await
 }
