@@ -60,9 +60,12 @@ pub struct Claims {
 }
 
 impl Claims {
-    /// Nom d'affichage **server-autoritaire** dérivé du JWT vérifié : `name` > `preferred_username`
-    /// > `sub`. Même ordre de priorité que le launcher (`session.rs`) → le nom montré en jeu est
-    /// identique à celui affiché dans le launcher. Sur un serveur public, ce nom REMPLACE le
+    /// Nom d'affichage **server-autoritaire** dérivé du JWT vérifié, par ordre de priorité
+    /// décroissante : `name`, puis `preferred_username`, puis `sub`. Même ordre que le launcher
+    /// (`session.rs`) → le nom montré en jeu est identique à celui affiché dans le launcher.
+    /// (Cette priorité était écrite `a > b > c` ; rendu sur deux lignes, le `>` en tête de la
+    /// seconde faisait lire une citation markdown à clippy — `doc_lazy_continuation`.)
+    /// Sur un serveur public, ce nom REMPLACE le
     /// `Join.display_name` fourni par le client (= username Windows via `GetUserNameA` côté netcode) :
     /// ce dernier n'est jamais fiable (usurpable), collisionne (deux « Lucas », « Admin », « User »…)
     /// et n'est pas une identité ZITADEL. Le `sub` (repli ultime) garantit un nom toujours non vide.

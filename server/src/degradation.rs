@@ -93,7 +93,7 @@ pub fn should_include_this_tick(
             if distance_from_viewer <= aoi_radius / 2.0 {
                 true
             } else {
-                tick_index % 2 == 0
+                tick_index.is_multiple_of(2)
             }
         }
     }
