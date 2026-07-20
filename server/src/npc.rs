@@ -5,7 +5,7 @@
 
 use crate::transport::ClientId;
 
-/// État comportemental FSM (spec fondation PNJ §3, modèle serveur §2). `AlerteMenace`/`Fuite`/
+/// État comportemental FSM (spec fondation PNJ §3, modèle serveur §2). `Alerte`/`Fuite`/
 /// `Hostile` portent une cible (id d'entité, joueur ou PNJ, dans le même espace `ClientId`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EntityBehavior {
