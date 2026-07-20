@@ -83,8 +83,9 @@ pub fn render_svg(_topo: &TopologyConfig, zones: &[ShardZone]) -> String {
         }
         let (cx, cy) = approximate_centroid(z);
         svg.push_str(&format!(
+            // Id logique, pas l'adresse réseau interne : ce SVG est un artefact publiable.
             "  <text x=\"{cx}\" y=\"{cy}\">{}</text>\n",
-            z.addr
+            z.id
         ));
     }
     svg.push_str("</svg>\n");
@@ -113,10 +114,13 @@ mod tests {
             authority_artifact: "authority.json".into(),
             server_count: 2,
             radius_overrides: HashMap::new(),
+            shard_addrs: vec!["shard-a:27030".into(), "shard-b:27031".into()],
         };
         let zones = vec![
             ShardZone {
-                addr: "group-0".into(),
+                // addr volontairement DIFFÉRENT de l'id : le rendu public doit montrer l'id.
+                id: "group-0".into(),
+                addr: "shard-a:27030".into(),
                 cells: vec![(
                     CellZone {
                         boundary_rings: vec![square(0.0, 0.0, 10.0)],
@@ -125,7 +129,8 @@ mod tests {
                 )],
             },
             ShardZone {
-                addr: "group-1".into(),
+                id: "group-1".into(),
+                addr: "shard-b:27031".into(),
                 cells: vec![(
                     CellZone {
                         boundary_rings: vec![square(1000.0, 0.0, 10.0)],
