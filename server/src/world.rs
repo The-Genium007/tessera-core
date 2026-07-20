@@ -9,6 +9,10 @@ pub struct Pose {
     pub y: f32,
     pub z: f32,
     pub yaw: f32,
+    pub locomotion: u8,
+    pub move_dir: u8,
+    pub flags: u8,
+    pub sustained: u32,
 }
 
 #[derive(Default)]
@@ -34,6 +38,30 @@ impl World {
         if let Some(p) = self.players.get_mut(&id) {
             *p = pose;
         }
+    }
+
+    /// Met à jour l'état de locomotion cosmétique sans toucher position/yaw — reste no-op si le
+    /// joueur n'est pas (encore/plus) connu du World (race déconnexion, cf. set_pose/snapshot_for).
+    pub fn set_locomotion(&mut self, id: ClientId, locomotion: u8, move_dir: u8, flags: u8) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.locomotion = locomotion;
+            p.move_dir = move_dir;
+            p.flags = flags;
+        }
+    }
+
+    /// Pose tenue (assis, adossé...) : id d'émote natif, 0 = aucune. Piloté par EmoteReport
+    /// (start=true pose l'id, start=false repasse à 0) — jamais par PositionUpdate.
+    pub fn set_sustained(&mut self, id: ClientId, emote: u32) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.sustained = emote;
+        }
+    }
+
+    /// Lecture seule de la pose courante d'un joueur — sert à préserver locomotion/sustained lors
+    /// d'un remplacement partiel de position (cf. server_loop::apply_client_message, Task 3).
+    pub fn pose_of(&self, id: ClientId) -> Option<Pose> {
+        self.players.get(&id).copied()
     }
 
     pub fn advance_tick(&mut self) {
@@ -83,6 +111,7 @@ mod tests {
                 y: 0.0,
                 z: 0.0,
                 yaw: 1.0,
+                ..Default::default()
             },
         );
 
@@ -114,6 +143,7 @@ mod tests {
                 y: 0.0,
                 z: 0.0,
                 yaw: 0.0,
+                ..Default::default()
             },
         );
         w.set_pose(
@@ -123,6 +153,7 @@ mod tests {
                 y: 0.0,
                 z: 0.0,
                 yaw: 0.0,
+                ..Default::default()
             },
         );
 
@@ -137,5 +168,72 @@ mod tests {
         w.add_player(2);
         // client 1 n'a jamais été ajouté (ex: race avec une déconnexion) — pas de panic attendu.
         assert!(w.snapshot_for(1, 1000.0).is_empty());
+    }
+
+    #[test]
+    fn set_locomotion_updates_pose_fields_without_touching_position() {
+        let mut w = World::new();
+        w.add_player(1);
+        w.add_player(2);
+        w.set_pose(1, Pose { x: 5.0, y: 0.0, z: 0.0, yaw: 1.0, ..Default::default() });
+        w.set_locomotion(1, 2, 10, 0);
+        let snap = w.snapshot_for(2, 1000.0);
+        assert_eq!(snap.len(), 1);
+        let (_, pose) = snap[0];
+        assert_eq!(pose.x, 5.0, "la position ne doit pas être affectée par set_locomotion");
+        assert_eq!(pose.locomotion, 2);
+        assert_eq!(pose.move_dir, 10);
+    }
+
+    #[test]
+    fn set_locomotion_on_unknown_player_does_not_panic() {
+        let mut w = World::new();
+        w.set_locomotion(999, 1, 0, 0); // joueur jamais ajouté (race déconnexion) — pas de panic.
+    }
+
+    #[test]
+    fn set_sustained_updates_pose_field() {
+        let mut w = World::new();
+        w.add_player(1);
+        w.add_player(2);
+        w.set_sustained(1, 42);
+        let snap = w.snapshot_for(2, 1000.0);
+        assert_eq!(snap[0].1.sustained, 42);
+    }
+
+    #[test]
+    fn set_sustained_zero_clears_the_pose() {
+        let mut w = World::new();
+        w.add_player(1);
+        w.add_player(2);
+        w.set_sustained(1, 42);
+        w.set_sustained(1, 0);
+        let snap = w.snapshot_for(2, 1000.0);
+        assert_eq!(snap[0].1.sustained, 0);
+    }
+
+    #[test]
+    fn default_pose_has_idle_locomotion_and_no_sustained_emote() {
+        let mut w = World::new();
+        w.add_player(1);
+        w.add_player(2);
+        let snap = w.snapshot_for(2, 1000.0);
+        assert_eq!(snap[0].1.locomotion, 0);
+        assert_eq!(snap[0].1.sustained, 0);
+    }
+
+    #[test]
+    fn pose_of_returns_current_pose_for_known_player() {
+        let mut w = World::new();
+        w.add_player(1);
+        w.set_sustained(1, 7);
+        let p = w.pose_of(1).expect("le joueur 1 est connu");
+        assert_eq!(p.sustained, 7);
+    }
+
+    #[test]
+    fn pose_of_returns_none_for_unknown_player() {
+        let w = World::new();
+        assert_eq!(w.pose_of(999), None);
     }
 }

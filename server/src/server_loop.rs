@@ -58,6 +58,7 @@ impl Server {
                                 y: p.y(),
                                 z: p.z(),
                                 yaw: pu.yaw(),
+                                ..Default::default()
                             },
                         );
                     }
