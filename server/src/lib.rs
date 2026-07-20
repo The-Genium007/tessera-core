@@ -17,6 +17,7 @@ pub mod hot_state_cache;
 pub mod internal_attestation_http;
 pub mod internal_net;
 pub mod jwks;
+pub mod maintenance;
 pub mod manifest;
 pub mod metrics;
 pub mod permissions;

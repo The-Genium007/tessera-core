@@ -864,6 +864,13 @@ pub async fn gateway_main(
     let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
     // Fenêtre de rate-limit par client (audit prod 2026-07-03 §5.4).
     let mut rate_states: HashMap<u64, RateLimitState> = HashMap::new();
+    // Mode drain (Task 5, robustesse opérationnelle sous-projet C) : refuse tout nouveau Join
+    // quand actif ; les clients déjà connectés ne sont pas déconnectés. Togglable manuellement
+    // pour ce plan (pas de commande admin `/drain` branchée ici — extension naturelle non
+    // couverte en détail dans cette tâche, qui retirera ce `#[allow(unused_mut)]` en câblant un
+    // vrai toggle, ex. `maintenance::MaintenanceSchedule::should_drain_now`).
+    #[allow(unused_mut)]
+    let mut drain_mode = false;
 
     let sock: SocketAddr = listen_addr.parse().expect("adresse GNS invalide");
     let mut client =
@@ -1098,6 +1105,19 @@ pub async fn gateway_main(
                 if let Some((name, token, protocol_version, hwid_hash)) = extract_join_fields(data)
                 {
                     if !name.is_empty() || !token.is_empty() {
+                        // Mode drain (Task 5, robustesse opérationnelle sous-projet C) : refuse
+                        // tout nouveau Join AVANT toute autre vérification — un serveur en
+                        // maintenance ne doit consommer ni slot ni cycle de résolution d'identité
+                        // pour une connexion qu'il va rejeter de toute façon.
+                        if drain_mode {
+                            client.send(
+                                cid,
+                                &encode_kicked("serveur en maintenance, réessayez plus tard"),
+                            );
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
                         if let Err(reason) = resolve_protocol_version(protocol_version) {
                             tracing::warn!(
                                 client = cid,
