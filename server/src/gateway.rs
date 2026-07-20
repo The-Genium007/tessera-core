@@ -1426,6 +1426,11 @@ pub async fn gateway_main(
                             is_root,
                             &mut admin_store.groups,
                             &mut admin_store.admins,
+                            // TODO(Task 3, robustesse opérationnelle sous-projet C) : brancher le
+                            // vrai `BanStore` Postgres ici (écriture réelle + check au Join) ;
+                            // pour l'instant `execute` reste pur, ce Vec jetable ne fait que
+                            // satisfaire la nouvelle signature sans persister quoi que ce soit.
+                            &mut Vec::new(),
                             now_ms,
                             &issuer,
                         ),
@@ -3159,8 +3164,17 @@ mod tests {
         // les logs/granted_by), comme au call site réel de `gateway.rs`.
         let mut groups = Vec::new();
         let mut admins = Vec::new();
+        let mut bans = Vec::new();
         let parsed = parse_admin_command("/creategroup moderators").expect("commande valide");
-        let outcome = execute_admin_command(parsed, is_root, &mut groups, &mut admins, 0, &issuer);
+        let outcome = execute_admin_command(
+            parsed,
+            is_root,
+            &mut groups,
+            &mut admins,
+            &mut bans,
+            0,
+            &issuer,
+        );
         assert!(
             outcome.success,
             "la commande admin doit réussir : sub reconnu root admin"
