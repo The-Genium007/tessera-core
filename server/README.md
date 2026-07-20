@@ -198,3 +198,21 @@ par version/canal signée sur `The-Genium007/tessera-core`, synchronisée avec l
   repoussé uniquement à la promotion `playtest→main`). **Reconfigurer Dokploy** pour tirer ce tag
   au lieu de `:latest` — Dokploy n'est pas piloté depuis ce dépôt, ce changement se fait dans son
   interface/état, hors CI.
+
+## Rebase 0.2.0 (2026-07-20)
+
+Le passage au format de version `-dev.N` / `-pts.N` (action `reset-to-new-format` de
+`release.yml`) a semé le ledger sur `0.2.0-dev.1` **sans publier d'artefacts**, et toutes les
+releases `client-v*` / `server-v*` ont été purgées dans la foulée. Les deux côtés étaient donc
+« inchangés » depuis le SHA du reset et partaient en *hollow re-tag*, qui va chercher une release
+de base désormais inexistante.
+
+Deux pièges vérifiés au passage, à ne pas réapprendre :
+
+- **`force: true` ne force pas un rebuild.** Il outrepasse le garde « aucun côté n'a changé, rien
+  à publier », pas la décision rebuild-vs-re-tag. Un run `force` sur deux côtés inchangés part
+  quand même en hollow re-tag, et meurt sur `manifeste client introuvable`.
+- **Après un reset ou une purge de releases, il faut que les DEUX côtés changent réellement**
+  (cf. CLAUDE.md). D'où ce paragraphe, pendant serveur de l'entrée équivalente dans
+  `distribution/modset.packages.toml` — `tessera-core/server` est dans `SERVER_PATHS`, donc y
+  toucher suffit à déclencher un vrai build.
