@@ -109,6 +109,19 @@ pub async fn shard_main(
                             return Ok(()); // Gateway parti
                         }
                     }
+                    // Pont Shard→Gateway générique (shard_boundary_bridge.rs, spec véhicules
+                    // autonomes §5) : un véhicule dont le chemin planifié entre dans le tampon
+                    // prédictif d'un shard voisin a poussé un rapport dans `tick_vehicles` ce
+                    // tick — on le draine et l'écrit sur la même socket TCP interne que les
+                    // frames `ServerSend` ci-dessus (multiplexé, `InternalEnvelope` distingue les
+                    // deux types côté lecteur). Même garde de déconnexion Gateway que ci-dessus.
+                    for (entity_id, x, y, z, speed) in server.take_pending_entity_reports() {
+                        let frame =
+                            crate::internal_net::encode_entity_position_report(entity_id, x, y, z, speed);
+                        if sock.write_all(&frame).await.is_err() {
+                            return Ok(()); // Gateway parti
+                        }
+                    }
                 }
                 // Arrêt propre : ne pas attendre la fin de la connexion Gateway pour répondre
                 // au signal (sinon un SIGTERM/SIGINT reste bloqué tant qu'un Gateway est connecté).

@@ -57,6 +57,15 @@ pub struct Server {
     /// `Server::new_with_vehicles`, registre VIDE au départ (spawn explicite via `spawn_vehicle`,
     /// cf. doc de ce constructeur).
     vehicle_registry: Option<VehicleRegistry>,
+    /// Rapports de position prédictifs (pont Shard→Gateway générique, `shard_boundary_bridge.rs`)
+    /// accumulés par `tick_vehicles` ce tick — (entity_id, x, y, z, speed). Drainé par
+    /// `take_pending_entity_reports`, appelé depuis `shard_main` (`Server`/`server_loop.rs` n'a pas
+    /// de connexion TCP directe au Gateway, seul `shard.rs` possède la socket). Même patron que
+    /// `pending_interaction_opens`/`pending_events`, mais PAS drainé dans `tick()` lui-même : ces
+    /// deux files existantes relaient au client via `transport` (que `tick()` a déjà en main),
+    /// alors qu'un rapport de position part vers le Gateway sur un canal totalement différent
+    /// (la socket TCP interne, hors de portée de `Server`) — d'où un drain externe dédié.
+    pending_entity_reports: Vec<(ClientId, f32, f32, f32, f32)>,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -97,6 +106,7 @@ impl Server {
             pending_interaction_results: Vec::new(),
             nav_graph: None,
             vehicle_registry: None,
+            pending_entity_reports: Vec::new(),
         }
     }
 
@@ -118,6 +128,7 @@ impl Server {
             pending_interaction_results: Vec::new(),
             nav_graph: None,
             vehicle_registry: None,
+            pending_entity_reports: Vec::new(),
         }
     }
 
@@ -150,6 +161,7 @@ impl Server {
             pending_interaction_results: Vec::new(),
             nav_graph: None,
             vehicle_registry: None,
+            pending_entity_reports: Vec::new(),
         }
     }
 
@@ -198,6 +210,7 @@ impl Server {
             pending_interaction_results: Vec::new(),
             nav_graph: None,
             vehicle_registry: None,
+            pending_entity_reports: Vec::new(),
         }
     }
 
@@ -226,6 +239,7 @@ impl Server {
                 nav_states: std::collections::HashMap::new(),
                 next_vehicle_id: crate::world::VEHICLE_ID_RANGE_START,
             }),
+            pending_entity_reports: Vec::new(),
         }
     }
 
@@ -423,6 +437,12 @@ impl Server {
         let Some(registry) = &mut self.vehicle_registry else {
             return;
         };
+        // Fenêtre prédictive du pont Shard→Gateway (spec véhicules autonomes §5 : "rank_bonus ≈
+        // vitesse × N secondes, N à régler"). Même valeur des deux côtés du pont — ici pour décider
+        // QUAND émettre un rapport (should_report_position), côté Gateway pour dimensionner le
+        // tampon de handoff (predictive_rank_bonus, cf. gateway.rs) — un désaccord entre les deux
+        // ferait émettre un rapport qui arrive trop tôt/tard par rapport au tampon réellement chargé.
+        const BOUNDARY_LOOKAHEAD_SECONDS: f32 = 2.0;
         let tick_dt = 1.0 / crate::default_tick_rate_hz() as f32;
         for (id, record) in registry.records.iter_mut() {
             let Some(nav_state) = registry.nav_states.get_mut(id) else {
@@ -449,7 +469,40 @@ impl Server {
             );
             let _ = &record.movement; // v1 : toujours EnRoute pendant le déplacement, Arrete est
                                       // posé/lu par un futur câblage hélage (spec §8, hors périmètre).
+
+            // Pont Shard→Gateway générique (shard_boundary_bridge.rs) : un véhicule dont le chemin
+            // planifié entre dans le tampon prédictif d'un shard voisin déclenche un rapport de
+            // position, drainé par `shard_main` et transmis au Gateway pour un vrai handoff — même
+            // mécanique qu'un `PositionUpdate` de client réel (cf. gateway.rs). `next_waypoint`
+            // absent (chemin arrivé/vide) => aucun rapport, cohérent avec `!nav_state.has_path()`
+            // ci-dessus qui a déjà fait `continue` dans ce cas.
+            if let Some(next_waypoint) = nav_state.next_waypoint() {
+                let current = NavVec3::new(new_pos.x, new_pos.y, new_pos.z);
+                if crate::shard_boundary_bridge::should_report_position(
+                    current,
+                    next_waypoint,
+                    record.speed_units_per_sec,
+                    BOUNDARY_LOOKAHEAD_SECONDS,
+                ) {
+                    self.pending_entity_reports.push((
+                        *id,
+                        new_pos.x,
+                        new_pos.y,
+                        new_pos.z,
+                        record.speed_units_per_sec,
+                    ));
+                }
+            }
         }
+    }
+
+    /// Rapports de position prédictifs à transmettre au Gateway ce tick (pont Shard→Gateway,
+    /// primitive générique — cf. `shard_boundary_bridge.rs`). Drainé par `shard_main`, qui les
+    /// encode (`internal_net::encode_entity_position_report`) et les écrit sur la socket TCP
+    /// interne existante vers le Gateway — `Server`/`server_loop.rs` n'a pas de connexion TCP
+    /// directe au Gateway, seul `shard.rs::shard_main` possède la socket.
+    pub fn take_pending_entity_reports(&mut self) -> Vec<(ClientId, f32, f32, f32, f32)> {
+        std::mem::take(&mut self.pending_entity_reports)
     }
 
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
@@ -1931,6 +1984,99 @@ mod tests {
             first, later,
             "le véhicule doit avoir progressé le long de sa route"
         );
+    }
+
+    #[test]
+    fn a_vehicle_close_to_its_next_waypoint_pushes_a_pending_entity_report() {
+        // Pont Shard→Gateway (Task 5) : un véhicule dont le prochain waypoint est à portée du
+        // tampon prédictif (vitesse 8.0 u/s * 2s lookahead = 16 unités, cf.
+        // shard_boundary_bridge::should_report_position) doit pousser un rapport de position dans
+        // `pending_entity_reports`, drainable via `take_pending_entity_reports`.
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(10.0, 0.0, 0.0)); // < 16 unités : dans le tampon dès le spawn
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(50.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(10.0, 0.0, 0.0));
+
+        let mut t = InMemoryTransport::new();
+        server.tick(&mut t);
+
+        let reports = server.take_pending_entity_reports();
+        assert!(
+            !reports.is_empty(),
+            "un véhicule à moins de 16 unités de son prochain waypoint doit émettre un rapport"
+        );
+        let (entity_id, _x, _y, _z, speed) = reports[0];
+        assert_eq!(entity_id, crate::world::VEHICLE_ID_RANGE_START);
+        assert_eq!(speed, 8.0);
+    }
+
+    #[test]
+    fn a_vehicle_far_from_its_next_waypoint_pushes_no_pending_entity_report() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(1000.0, 0.0, 0.0)); // très loin du tampon (16 unités)
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(50.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(
+            1,
+            NavVec3::new(0.0, 0.0, 0.0),
+            NavVec3::new(1000.0, 0.0, 0.0),
+        );
+
+        let mut t = InMemoryTransport::new();
+        server.tick(&mut t);
+
+        assert!(
+            server.take_pending_entity_reports().is_empty(),
+            "un véhicule loin de son prochain waypoint ne doit émettre aucun rapport"
+        );
+    }
+
+    #[test]
+    fn take_pending_entity_reports_drains_and_does_not_repeat_across_ticks() {
+        // std::mem::take doit vider la file : un 2e appel sans nouveau tick ne doit rien renvoyer.
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(10.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(50.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(10.0, 0.0, 0.0));
+
+        let mut t = InMemoryTransport::new();
+        server.tick(&mut t);
+
+        assert!(!server.take_pending_entity_reports().is_empty());
+        assert!(
+            server.take_pending_entity_reports().is_empty(),
+            "un 2e drain sans nouveau tick ne doit rien renvoyer (file déjà vidée)"
+        );
+    }
+
+    #[test]
+    fn a_server_without_vehicles_never_pushes_pending_entity_reports() {
+        // Server::new (sans registre véhicule) : tick_vehicles est un no-op, donc aucun rapport
+        // ne doit jamais apparaître, quel que soit le nombre de ticks.
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        for _ in 0..5 {
+            server.tick(&mut t);
+        }
+        assert!(server.take_pending_entity_reports().is_empty());
     }
 
     #[test]
