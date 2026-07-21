@@ -236,6 +236,15 @@ impl Server {
         }
         self.world.advance_tick();
         self.tick_npcs();
+        // Réclame les sessions d'interaction jamais résolues (client qui ouvre puis se déconnecte
+        // sans jamais répondre) — trouvé en revue finale de branche (fondation d'interaction) :
+        // SessionRegistry::expire_stale existait et était testé (Task 1) mais n'était jamais
+        // appelé, laissant les sessions abandonnées s'accumuler sans borne sur un Shard longue
+        // durée. 30s : généreux pour un joueur qui parcourt une offre avant de répondre, borné
+        // pour ne pas laisser une session fantôme vivre indéfiniment (spec fondation d'interaction
+        // §2 : « timeout serveur », aucune valeur numérique imposée par la spec).
+        const INTERACTION_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        self.session_registry.expire_stale(INTERACTION_SESSION_TIMEOUT);
         for (actor, target) in self.pending_interaction_opens.drain(..) {
             let session_id = self.session_registry.open(actor, target, 0);
             let bytes = crate::gateway_routing::encode_interaction_open(session_id, target, 0, &[]);
@@ -1129,5 +1138,83 @@ mod tests {
             env.msg_as_interaction_result().map(|r| r.ok())
         });
         assert_eq!(ok, Some(true));
+    }
+
+    #[test]
+    fn tick_reclaims_a_session_opened_but_never_resolved_after_it_goes_stale() {
+        // Trouvé en revue finale de branche : SessionRegistry::expire_stale (Task 1) était testé en
+        // isolation mais jamais appelé depuis Server::tick — une session ouverte par un client qui
+        // se déconnecte sans jamais répondre restait en mémoire indéfiniment. Ce test verrouille le
+        // câblage réel : après le délai d'expiration, un Choice tardif sur une session ouverte AVANT
+        // ce délai doit échouer comme si la session n'avait jamais existé (NotFound -> ok=false),
+        // pas juste que SessionRegistry::expire_stale fonctionne isolément (déjà couvert ailleurs).
+        use crate::named_npc_catalog::parse_and_validate;
+        use crate::named_npc_registry::NamedNpcRegistry;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[pnj]]
+            id = "ripperdoc-watson-01"
+            archetype = "a"
+            position = [0.0, 0.0, 0.0]
+            briques = ["rester-statique"]
+            "#,
+        )
+        .unwrap();
+        let named_registry = NamedNpcRegistry::from_catalog(&catalog);
+        let npc_runtime_id = named_registry.runtime_ids()[0];
+        let mut server = Server::new_with_named_npcs(50.0, &catalog, named_registry);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        let interaction = encode_entity_interaction(npc_runtime_id, 2, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: interaction,
+        });
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        let session_id = sent
+            .iter()
+            .find_map(|bytes| {
+                let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+                if env.msg_type() != ServerMsg::InteractionOpen {
+                    return None;
+                }
+                env.msg_as_interaction_open().map(|o| o.session_id())
+            })
+            .expect("une InteractionOpen doit être envoyée pour un PNJ nominatif interactible");
+
+        // Laisse le délai d'expiration (30s, cf. INTERACTION_SESSION_TIMEOUT dans tick()) s'écouler
+        // réellement — Instant ne se falsifie pas (même contrainte documentée dans
+        // interaction_session.rs pour son propre test d'expiration réelle).
+        std::thread::sleep(std::time::Duration::from_millis(30_100));
+        // Un tick sans nouveau message doit tout de même réclamer la session expirée.
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        let choice = encode_interaction_choice(session_id, 0, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: choice,
+        });
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        let ok = sent.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            if env.msg_type() != ServerMsg::InteractionResult {
+                return None;
+            }
+            env.msg_as_interaction_result().map(|r| r.ok())
+        });
+        assert_eq!(
+            ok,
+            Some(false),
+            "une session expirée doit refuser le Choice tardif comme NotFound (ok=false)"
+        );
     }
 }
