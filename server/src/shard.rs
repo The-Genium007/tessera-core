@@ -1,6 +1,7 @@
 //! Le Shard : simulation autoritaire d'une zone, pilotée par le Gateway via TCP interne.
 //! Une seule connexion Gateway en v1 (M0-M1). Tick 20 Hz.
 
+use crate::elevator_catalog::ElevatorCatalog;
 use crate::internal_net::InternalTransport;
 use crate::named_npc_catalog::NamedNpcCatalog;
 use crate::named_npc_registry::NamedNpcRegistry;
@@ -11,7 +12,13 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const TICK: Duration = Duration::from_millis(50); // 20 Hz
+/// Cadence réelle du Shard, en millisecondes — 20 Hz. Constante nommée (plutôt qu'un littéral
+/// dupliqué) car `Server::with_elevators`/`new_with_elevators` (Task 6) ont besoin de cette même
+/// valeur pour convertir leurs durées de trajet (`travel_time_ms`, `start_delay_ms`) en nombre de
+/// ticks — `TICK` (la version `Duration` utilisée par le ticker tokio) en dérive pour ne jamais
+/// diverger.
+pub(crate) const TICK_MS: u32 = 50;
+const TICK: Duration = Duration::from_millis(TICK_MS as u64); // 20 Hz
 
 pub async fn shard_main(
     addr: &str,
@@ -19,6 +26,7 @@ pub async fn shard_main(
     metrics_addr: &str,
     population: Option<(NpcCatalog, PopulationDirector)>,
     named_npc: Option<(NamedNpcCatalog, NamedNpcRegistry)>,
+    elevators: Option<ElevatorCatalog>,
 ) -> std::io::Result<()> {
     let metrics = crate::metrics::Metrics::new();
     {
@@ -73,6 +81,14 @@ pub async fn shard_main(
             }
             (None, None) => Server::new_with_metrics(aoi_radius, metrics.clone()),
         };
+        // Ascenseurs (Task 6) : orthogonaux aux PNJ (foule ou nominatifs), donc chaînés APRÈS le
+        // match ci-dessus plutôt qu'intégrés dedans — `Server::with_elevators` s'applique quel
+        // qu'ait été le constructeur choisi pour les PNJ, contrairement à la limitation
+        // population/named_npc documentée juste au-dessus (celle-là reste entière, elle ne
+        // concerne pas les ascenseurs).
+        if let Some(catalog) = &elevators {
+            server = server.with_elevators(catalog.clone(), TICK_MS);
+        }
         let mut transport = InternalTransport::new();
         let mut buf = [0u8; 8192];
         let mut ticker = tokio::time::interval(TICK);
@@ -149,7 +165,7 @@ mod tests {
         // tout — la course doit gagner dès la boucle d'accept externe).
         let addr = "127.0.0.1:27131";
         let handle = tokio::spawn(async move {
-            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None).await
+            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None, None).await
         });
 
         // Laisse le shard se binder et enregistrer son ShutdownSignal avant d'envoyer le signal.
@@ -180,7 +196,7 @@ mod tests {
         // tests exécutés en parallèle.
         let addr = "127.0.0.1:27132";
         let handle = tokio::spawn(async move {
-            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None).await
+            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None, None).await
         });
 
         // Laisse le shard se binder et enregistrer son ShutdownSignal avant de se connecter.

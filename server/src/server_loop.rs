@@ -187,14 +187,25 @@ impl Server {
     }
 
     /// Identique à `Server::new`, avec en plus un registre d'ascenseurs peuplé depuis le catalogue.
-    /// `tick_ms` = durée d'un tick serveur (voir Task 6 pour la valeur réelle au boot).
+    /// `tick_ms` = durée d'un tick serveur (voir Task 6 pour la valeur réelle au boot). Exprimé en
+    /// termes de `with_elevators` — conservé pour les tests existants qui le nomment directement.
     pub fn new_with_elevators(aoi_radius: f32, catalog: ElevatorCatalog, tick_ms: u32) -> Self {
-        let mut s = Self::new(aoi_radius);
-        s.elevator_registry = Some(ElevatorRegistry {
+        Self::new(aoi_radius).with_elevators(catalog, tick_ms)
+    }
+
+    /// Active le registre d'ascenseurs sur un `Server` déjà construit, quel qu'ait été son
+    /// constructeur (`new`, `new_with_metrics`, `new_with_npcs`, `new_with_named_npcs`) — les
+    /// ascenseurs sont orthogonaux aux PNJ (foule ou nominatifs) : un shard réel peut déclarer les
+    /// deux à la fois, contrairement à `population`/`named_npc_manifest_path` qui sont mutuellement
+    /// exclusifs entre eux dans cette fondation. Chaînable plutôt qu'un cinquième constructeur
+    /// combinatoire (`new_with_npcs_and_elevators`, etc.) qui exploserait avec chaque nouvelle
+    /// fondation orthogonale. `tick_ms` = durée d'un tick serveur (cf. `shard.rs::TICK_MS`).
+    pub fn with_elevators(mut self, catalog: ElevatorCatalog, tick_ms: u32) -> Self {
+        self.elevator_registry = Some(ElevatorRegistry {
             states: catalog.into_states(),
             tick_ms,
         });
-        s
+        self
     }
 
     /// Nombre de joueurs actuellement dans le monde de ce Shard — pour l'endpoint métriques.
@@ -387,7 +398,8 @@ impl Server {
         // pour ne pas laisser une session fantôme vivre indéfiniment (spec fondation d'interaction
         // §2 : « timeout serveur », aucune valeur numérique imposée par la spec).
         const INTERACTION_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        self.session_registry.expire_stale(INTERACTION_SESSION_TIMEOUT);
+        self.session_registry
+            .expire_stale(INTERACTION_SESSION_TIMEOUT);
         for (actor, target) in self.pending_interaction_opens.drain(..) {
             let session_id = self.session_registry.open(actor, target, 0);
             let bytes = crate::gateway_routing::encode_interaction_open(session_id, target, 0, &[]);
@@ -1486,10 +1498,87 @@ mod tests {
             1,
             "1 = MovingUp : le client qui rejoint doit apprendre que la cabine est DÉJÀ en mouvement"
         );
-        assert_eq!(
-            last.target_floor(),
-            1,
-            "et vers quel étage elle se dirige"
+        assert_eq!(last.target_floor(), 1, "et vers quel étage elle se dirige");
+    }
+
+    #[test]
+    fn a_server_can_have_both_npcs_and_elevators_active_at_once() {
+        // Preuve de la résolution de la limitation notée par shard.rs (aucun constructeur ne
+        // combinait PNJ et ascenseurs) : ascenseurs et PNJ de foule sont deux registres orthogonaux,
+        // un `Server` construit avec `new_with_npcs(...).with_elevators(...)` doit avoir les DEUX
+        // actifs simultanément — pas seulement l'un ou l'autre selon l'ordre de construction.
+        use crate::elevator_catalog::parse_and_validate as parse_elevator_catalog;
+        use crate::npc_catalog::parse_and_validate as parse_npc_catalog;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let npc_catalog = parse_npc_catalog(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur-de-rue"
+            briques = ["flaner-sur-place"]
+            "#,
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+
+        let elevator_catalog = parse_elevator_catalog(
+            r#"
+            format_version = 1
+            [[elevator]]
+            id = "77"
+            name = "test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 100
+            floors = [
+              { index = 0, hidden = false, inactive = false },
+              { index = 1, hidden = false, inactive = false },
+            ]
+            "#,
+        )
+        .unwrap();
+
+        let mut server =
+            Server::new_with_npcs(50.0, npc_catalog, director).with_elevators(elevator_catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        server.tick(&mut t); // un 2e tick pour laisser le director réagir à la présence du joueur
+
+        server.handle_elevator_call(1, 77, 1);
+        server.tick(&mut t);
+
+        let sent = t.take_sent(1);
+
+        let saw_npc = sent.iter().any(|b| {
+            let Ok(env) = flatbuffers::root::<ServerEnvelope>(b) else {
+                return false;
+            };
+            env.msg_as_snapshot()
+                .and_then(|snap| snap.npcs())
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        });
+        assert!(
+            saw_npc,
+            "un Server construit avec new_with_npcs(...).with_elevators(...) doit toujours \
+             faire apparaître des PNJ dans ses snapshots"
+        );
+
+        let saw_elevator = sent.iter().any(|b| {
+            let Ok(env) = flatbuffers::root::<ServerEnvelope>(b) else {
+                return false;
+            };
+            env.msg_as_elevator_state_msg().is_some()
+        });
+        assert!(
+            saw_elevator,
+            "le même Server doit AUSSI diffuser l'état de l'ascenseur configuré — les deux \
+             registres doivent coexister, pas s'exclure"
         );
     }
 }
