@@ -137,8 +137,22 @@ table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
 // inter-joueurs au franchissement). Reste en FIN d'union, après PositionCorrection.
 table ShardAssignment { authoritative:string; overlaps:[string]; }
 
-union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter, EntityInteraction, InteractionChoice }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult, QueueStatus, InteractionOpen, InteractionResult }
+// Client -> Serveur : « un joueur a demandé cet étage sur cet ascenseur ». Le serveur ne distingue
+// pas le bouton intérieur du terminal de palier — c'est le même acte, et c'est lui qui arbitre.
+// `elevator_id` est l'EntityID STATIQUE de la cabine, lu au runtime par le client (ADR 0012 §2.5).
+table ElevatorCall { elevator_id:ulong; floor:int; }
+
+// Serveur -> Client : état autoritaire d'une cabine. AUCUNE position de cabine n'est transportée :
+// le contrat est « même trajet, même instant de départ, même durée => mêmes positions ».
+// `requested_floors` porte les BOUTONS ALLUMÉS — sans lui, le joueur B ne voit pas l'appel de A.
+// `target_floor` vaut -1 quand il n'y en a aucun (convention alignée sur le vanilla).
+// `movement_state` : 0=Stopped 1=MovingUp 2=MovingDown 3=Paused.
+table ElevatorStateMsg { elevator_id:ulong; active_floor:int; target_floor:int;
+                         movement_state:ubyte; requested_floors:[int];
+                         depart_tick:ulong; start_delay_ms:uint; travel_time_ms:uint; }
+
+union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter, EntityInteraction, InteractionChoice, ElevatorCall }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult, QueueStatus, InteractionOpen, InteractionResult, ElevatorStateMsg }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }
