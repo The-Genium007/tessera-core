@@ -1,6 +1,8 @@
 //! Boucle serveur : draine les events transport, met à jour le World, diffuse les snapshots.
 //! Générique sur `Transport` → testable avec `InMemoryTransport`, branché sur GNS en prod.
 
+use crate::elevator::{ElevatorState, MovementState};
+use crate::elevator_catalog::ElevatorCatalog;
 use crate::interaction_session::{SessionError, SessionRegistry};
 use crate::metrics::Metrics;
 use crate::named_npc_catalog::NamedNpcCatalog;
@@ -34,6 +36,9 @@ pub struct Server {
     /// `None` = aucun PNJ nominatif sur ce Shard (comportement historique préservé). `Some(..)`
     /// uniquement via `Server::new_with_named_npcs`.
     named_npc_registry: Option<NamedNpcRegistry>,
+    /// `None` = aucun ascenseur simulé sur ce Shard. Tous les constructeurs historiques le laissent
+    /// à `None` ; seul `new_with_elevators` l'active.
+    elevator_registry: Option<ElevatorRegistry>,
     session_registry: SessionRegistry,
     /// File one-shot (actor, target) des `EntityInteraction(kind=2)` sur un PNJ nominatif à
     /// arbitrer en session — accumulée par `apply_client_message`, drainée en début de `tick()`.
@@ -52,6 +57,22 @@ struct NpcRegistry {
     next_npc_id: ClientId,
 }
 
+/// État ascenseur vivant d'un Shard. `tick_ms` est fourni à la construction plutôt que lu d'une
+/// constante globale : `elevator.rs` reste pur, et le registre est le seul endroit qui connaît la
+/// cadence réelle du serveur.
+struct ElevatorRegistry {
+    states: Vec<ElevatorState>,
+    tick_ms: u32,
+}
+
+impl ElevatorRegistry {
+    fn get_mut(&mut self, elevator_id: u64) -> Option<&mut ElevatorState> {
+        self.states
+            .iter_mut()
+            .find(|s| s.elevator_id == elevator_id)
+    }
+}
+
 impl Server {
     pub fn new(aoi_radius: f32) -> Self {
         Self {
@@ -61,6 +82,7 @@ impl Server {
             metrics: None,
             npc_registry: None,
             named_npc_registry: None,
+            elevator_registry: None,
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
@@ -80,6 +102,7 @@ impl Server {
             metrics: Some(metrics),
             npc_registry: None,
             named_npc_registry: None,
+            elevator_registry: None,
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
@@ -109,6 +132,7 @@ impl Server {
                 next_npc_id: crate::world::NPC_ID_RANGE_START,
             }),
             named_npc_registry: None,
+            elevator_registry: None,
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
@@ -155,15 +179,112 @@ impl Server {
             metrics: None,
             npc_registry: None,
             named_npc_registry: Some(named_npc_registry),
+            elevator_registry: None,
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
         }
     }
 
+    /// Identique à `Server::new`, avec en plus un registre d'ascenseurs peuplé depuis le catalogue.
+    /// `tick_ms` = durée d'un tick serveur (voir Task 6 pour la valeur réelle au boot).
+    pub fn new_with_elevators(aoi_radius: f32, catalog: ElevatorCatalog, tick_ms: u32) -> Self {
+        let mut s = Self::new(aoi_radius);
+        s.elevator_registry = Some(ElevatorRegistry {
+            states: catalog.into_states(),
+            tick_ms,
+        });
+        s
+    }
+
     /// Nombre de joueurs actuellement dans le monde de ce Shard — pour l'endpoint métriques.
     pub fn player_count(&self) -> usize {
         self.world.player_ids().len()
+    }
+
+    /// Point d'entrée d'un appel d'ascenseur. Séparé du décodage réseau pour rester testable sans
+    /// fabriquer d'enveloppe FlatBuffers. Un `elevator_id` inconnu du catalogue est IGNORÉ : le
+    /// serveur ne fabrique jamais un ascenseur sur la foi d'un message client.
+    pub fn handle_elevator_call(&mut self, _from: ClientId, elevator_id: u64, floor: i32) -> bool {
+        let Some(registry) = &mut self.elevator_registry else {
+            return false;
+        };
+        let Some(state) = registry.get_mut(elevator_id) else {
+            return false;
+        };
+        state.request_floor(floor)
+    }
+
+    /// Un pas des ascenseurs : fait avancer chaque cabine et retourne celles à diffuser.
+    ///
+    /// ⚠️ `advance` appelle DÉJÀ `start_trip_if_idle` en interne (c'est lui qui fait l'enchaînement
+    /// automatique vers l'appel suivant) — ne pas l'appeler une seconde fois ici.
+    ///
+    /// Cadence de diffusion (spec §5.3) : à chaque transition d'état, PLUS un rappel à faible
+    /// fréquence tant qu'une cabine n'est pas au repos. C'est ce rappel qui rattrape un ordre de
+    /// départ perdu (cas C3) — et il ne coûte rien quand tout est à l'arrêt.
+    fn tick_elevators(&mut self, now_tick: u64) -> Vec<ElevatorState> {
+        const HEARTBEAT_TICKS: u64 = 20;
+
+        let Some(registry) = &mut self.elevator_registry else {
+            return Vec::new();
+        };
+        let tick_ms = registry.tick_ms;
+        let mut to_broadcast = Vec::new();
+        for state in registry.states.iter_mut() {
+            let changed = state.advance(now_tick, tick_ms);
+            let moving = state.movement_state != MovementState::Stopped;
+            if changed || (moving && now_tick.is_multiple_of(HEARTBEAT_TICKS)) {
+                to_broadcast.push(state.clone());
+            }
+        }
+        to_broadcast
+    }
+
+    /// État courant de TOUTES les cabines — à envoyer à un client qui vient d'arriver (connexion,
+    /// ou entrée à portée). Sans ça, un joueur qui rejoint en pleine course ne saurait pas qu'une
+    /// cabine bouge avant sa prochaine transition (cas D1/D2 de la spec).
+    fn elevator_states_for_new_client(&self) -> Vec<ElevatorState> {
+        self.elevator_registry
+            .as_ref()
+            .map(|r| r.states.clone())
+            .unwrap_or_default()
+    }
+
+    /// Encode un `ElevatorStateMsg` (spec ascenseurs §6). AUCUNE position de cabine ne part sur le
+    /// fil (ADR 0012) — seuls les champs qui permettent au client de rejouer le même trajet.
+    fn encode_elevator_state(state: &ElevatorState) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let requested: Vec<i32> = state.requested_floors.iter().copied().collect();
+        let requested_off = b.create_vector(&requested);
+        let movement = match state.movement_state {
+            MovementState::Stopped => 0u8,
+            MovementState::MovingUp => 1,
+            MovementState::MovingDown => 2,
+            MovementState::Paused => 3,
+        };
+        let msg = ElevatorStateMsg::create(
+            &mut b,
+            &ElevatorStateMsgArgs {
+                elevator_id: state.elevator_id,
+                active_floor: state.active_floor,
+                target_floor: state.target_floor.unwrap_or(-1),
+                movement_state: movement,
+                requested_floors: Some(requested_off),
+                depart_tick: state.depart_tick.unwrap_or(0),
+                start_delay_ms: state.start_delay_ms,
+                travel_time_ms: state.travel_time_ms,
+            },
+        );
+        let env = ServerEnvelope::create(
+            &mut b,
+            &ServerEnvelopeArgs {
+                msg_type: ServerMsg::ElevatorStateMsg,
+                msg: Some(msg.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
     }
 
     /// Un pas du director de population + du moteur de briques PNJ (spec fondation PNJ) — no-op si
@@ -229,13 +350,32 @@ impl Server {
         let tick_start = std::time::Instant::now();
         for ev in transport.poll() {
             match ev {
-                TransportEvent::Connected(id) => self.world.add_player(id),
+                TransportEvent::Connected(id) => {
+                    self.world.add_player(id);
+                    // Cas D1/D2 de la spec ascenseurs : un client qui rejoint en pleine course doit
+                    // connaître l'état courant des cabines SANS attendre leur prochaine transition.
+                    for state in self.elevator_states_for_new_client() {
+                        let bytes = Self::encode_elevator_state(&state);
+                        transport.send(id, &bytes);
+                    }
+                }
                 TransportEvent::Disconnected(id) => self.world.remove_player(id),
                 TransportEvent::Message { from, data } => self.apply_client_message(from, &data),
             }
         }
         self.world.advance_tick();
         self.tick_npcs();
+        // Un pas des ascenseurs (spec §5.3) : fait avancer chaque cabine et diffuse à TOUS les
+        // clients connus de ce Shard les états qui ont transitionné (ou le rappel périodique tant
+        // qu'une cabine est en mouvement). Aucun filtrage AoI ici : `ElevatorState` ne porte aucune
+        // position de cabine (contrainte globale), et le catalogue n'attache pas non plus de
+        // position monde à une cage d'ascenseur — un filtrage par distance n'a donc rien à mordre.
+        for state in self.tick_elevators(self.world.tick()) {
+            let bytes = Self::encode_elevator_state(&state);
+            for id in self.world.player_ids() {
+                transport.send(id, &bytes);
+            }
+        }
         // Réclame les sessions d'interaction jamais résolues (client qui ouvre puis se déconnecte
         // sans jamais répondre) — trouvé en revue finale de branche (fondation d'interaction) :
         // SessionRegistry::expire_stale existait et était testé (Task 1) mais n'était jamais
@@ -392,6 +532,13 @@ impl Server {
                             ));
                         }
                     }
+                }
+            }
+            ClientMsg::ElevatorCall => {
+                if let Some((elevator_id, floor)) =
+                    crate::gateway_routing::extract_elevator_call(data)
+                {
+                    self.handle_elevator_call(from, elevator_id, floor);
                 }
             }
             _ => {}
@@ -1215,6 +1362,121 @@ mod tests {
             ok,
             Some(false),
             "une session expirée doit refuser le Choice tardif comme NotFound (ok=false)"
+        );
+    }
+
+    #[test]
+    fn a_server_without_elevators_never_emits_an_elevator_state() {
+        // Comportement historique strictement préservé.
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        for buf in &sent {
+            let env = flatbuffers::root::<ServerEnvelope>(buf).unwrap();
+            assert!(
+                env.msg_as_elevator_state_msg().is_none(),
+                "sans registre ascenseur, aucun ElevatorStateMsg ne doit partir"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configured_elevator_is_broadcast_and_moves_on_a_client_call() {
+        use crate::elevator_catalog::parse_and_validate;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[elevator]]
+            id = "77"
+            name = "test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 100
+            floors = [
+              { index = 0, hidden = false, inactive = false },
+              { index = 1, hidden = false, inactive = false },
+            ]
+            "#,
+        )
+        .unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+
+        // Le client appelle l'étage 1.
+        server.handle_elevator_call(1, 77, 1);
+        server.tick(&mut t);
+
+        let sent = t.take_sent(1);
+        let last = sent
+            .iter()
+            .rev()
+            .filter_map(|b| {
+                let env = flatbuffers::root::<ServerEnvelope>(b).ok()?;
+                env.msg_as_elevator_state_msg()
+            })
+            .next()
+            .expect("un ElevatorStateMsg doit avoir été diffusé");
+        assert_eq!(last.elevator_id(), 77);
+        assert_eq!(
+            last.target_floor(),
+            1,
+            "la cabine doit viser l'étage appelé"
+        );
+        assert_eq!(last.movement_state(), 1, "1 = MovingUp");
+    }
+
+    #[test]
+    fn a_client_connecting_mid_trip_receives_the_current_elevator_state() {
+        // Cas D1/D2 de la spec : un joueur qui rejoint en pleine course, ou qui arrive à portée
+        // d'une cabine, doit recevoir son état SANS attendre la prochaine transition — sinon il ne
+        // saura jamais qu'une cabine est en mouvement.
+        use crate::elevator_catalog::parse_and_validate;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[elevator]]
+            id = "77"
+            name = "test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 1000
+            floors = [
+              { index = 0, hidden = false, inactive = false },
+              { index = 1, hidden = false, inactive = false },
+            ]
+            "#,
+        )
+        .unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        server.handle_elevator_call(1, 77, 1);
+        server.tick(&mut t);
+        let _ = t.take_sent(1); // on vide ce qui a déjà été envoyé au premier client
+
+        // Un SECOND client arrive alors que la cabine est déjà en route.
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+
+        let sent = t.take_sent(2);
+        let seen = sent.iter().any(|b| {
+            flatbuffers::root::<ServerEnvelope>(b)
+                .ok()
+                .and_then(|env| env.msg_as_elevator_state_msg())
+                .is_some()
+        });
+        assert!(
+            seen,
+            "un client qui arrive doit recevoir l'état courant des cabines"
         );
     }
 }
