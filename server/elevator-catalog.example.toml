@@ -11,7 +11,7 @@
 format_version = 1
 
 [[elevator]]
-id = 9223372036854775000                  # Megabuilding H10, Little China (cabine sondée)
+id = "9939278384122899325"                # Megabuilding H10, Little China (cabine sondée)
 name = "megabuilding-h10-little-china"    # lisible, logs/debug uniquement
 start_floor = 1                           # étage courant mesuré au sondage
 start_delay_ms = 1000

@@ -17,7 +17,7 @@ struct RawCatalog {
 
 #[derive(Debug, Deserialize)]
 struct RawElevator {
-    id: u64,
+    id: String,
     name: String,
     start_floor: i32,
     start_delay_ms: u32,
@@ -66,6 +66,7 @@ impl ElevatorCatalog {
 pub enum ElevatorCatalogError {
     Parse(String),
     UnsupportedFormatVersion(u32),
+    InvalidElevatorId(String),
     DuplicateElevatorId(u64),
     EmptyFloorList { elevator_id: u64 },
     DuplicateFloorIndex { elevator_id: u64, index: i32 },
@@ -78,6 +79,9 @@ impl fmt::Display for ElevatorCatalogError {
             ElevatorCatalogError::Parse(e) => write!(f, "catalogue ascenseurs invalide (TOML) : {e}"),
             ElevatorCatalogError::UnsupportedFormatVersion(v) => {
                 write!(f, "format_version {v} non supporté (attendu : 1)")
+            }
+            ElevatorCatalogError::InvalidElevatorId(id) => {
+                write!(f, "id d'ascenseur {id:?} n'est pas un entier u64 valide")
             }
             ElevatorCatalogError::DuplicateElevatorId(id) => {
                 write!(f, "ascenseur {id} déclaré plusieurs fois")
@@ -108,17 +112,21 @@ pub fn parse_and_validate(toml_str: &str) -> Result<ElevatorCatalog, ElevatorCat
     }
     let mut entries: Vec<(String, ElevatorState)> = Vec::new();
     for e in raw.elevator {
-        if entries.iter().any(|(_, s)| s.elevator_id == e.id) {
-            return Err(ElevatorCatalogError::DuplicateElevatorId(e.id));
+        let id: u64 = e
+            .id
+            .parse()
+            .map_err(|_| ElevatorCatalogError::InvalidElevatorId(e.id.clone()))?;
+        if entries.iter().any(|(_, s)| s.elevator_id == id) {
+            return Err(ElevatorCatalogError::DuplicateElevatorId(id));
         }
         if e.floors.is_empty() {
-            return Err(ElevatorCatalogError::EmptyFloorList { elevator_id: e.id });
+            return Err(ElevatorCatalogError::EmptyFloorList { elevator_id: id });
         }
         let mut floors: Vec<FloorSpec> = Vec::new();
         for f in e.floors {
             if floors.iter().any(|x| x.index == f.index) {
                 return Err(ElevatorCatalogError::DuplicateFloorIndex {
-                    elevator_id: e.id,
+                    elevator_id: id,
                     index: f.index,
                 });
             }
@@ -130,13 +138,13 @@ pub fn parse_and_validate(toml_str: &str) -> Result<ElevatorCatalog, ElevatorCat
         }
         if !floors.iter().any(|f| f.index == e.start_floor) {
             return Err(ElevatorCatalogError::StartFloorNotInFloorList {
-                elevator_id: e.id,
+                elevator_id: id,
                 start_floor: e.start_floor,
             });
         }
         entries.push((
             e.name,
-            ElevatorState::new(e.id, e.start_floor, floors, e.start_delay_ms, e.travel_time_ms),
+            ElevatorState::new(id, e.start_floor, floors, e.start_delay_ms, e.travel_time_ms),
         ));
     }
     Ok(ElevatorCatalog { entries })
@@ -156,7 +164,7 @@ mod tests {
     const VALID: &str = r#"
         format_version = 1
         [[elevator]]
-        id = 9223372036854775000
+        id = "9939278384122899325"
         name = "megabuilding-h10-little-china"
         start_floor = 1
         start_delay_ms = 1000
@@ -171,7 +179,7 @@ mod tests {
     fn valid_catalog_parses_and_builds_an_initial_state() {
         let cat = parse_and_validate(VALID).unwrap();
         assert_eq!(cat.len(), 1);
-        assert_eq!(cat.name_of(9223372036854775000), Some("megabuilding-h10-little-china"));
+        assert_eq!(cat.name_of(9939278384122899325), Some("megabuilding-h10-little-china"));
         let states = cat.into_states();
         assert_eq!(states[0].active_floor, 1);
         assert_eq!(states[0].start_delay_ms, 1000);
@@ -221,6 +229,16 @@ mod tests {
             err,
             ElevatorCatalogError::StartFloorNotInFloorList { start_floor: 7, .. }
         ));
+    }
+
+    #[test]
+    fn a_non_numeric_elevator_id_is_rejected() {
+        let toml = VALID.replace(
+            r#"id = "9939278384122899325""#,
+            r#"id = "not-a-number""#,
+        );
+        let err = parse_and_validate(&toml).unwrap_err();
+        assert!(matches!(err, ElevatorCatalogError::InvalidElevatorId(ref id) if id == "not-a-number"));
     }
 
     #[test]
