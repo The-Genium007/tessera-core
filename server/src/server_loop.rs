@@ -1433,4 +1433,204 @@ mod tests {
             "sans graphe de navigation, le PNJ reste à sa Pose par défaut (0,0)"
         );
     }
+
+    #[test]
+    fn a_fleeing_npc_moves_away_from_the_threat_over_several_ticks() {
+        // Spec §9 critère « le FSM déclenche les bons déplacements (fuite s'éloigne) » — bout-en-
+        // bout via Server/InMemoryTransport (pas juste decide_destination en isolation, déjà
+        // couvert unitairement par Task 4).
+        //
+        // Piège de fixture identique en substance à celui trouvé en Task 5 (moves_over_several_ticks) :
+        // le joueur 1 (la menace) ET le PNJ spawnent tous deux à la Pose par défaut (0,0,0)
+        // (World::add_player). Si on laisse le PNJ à cette position par défaut, decide_destination
+        // calcule dx=cx-mx=0, dy=0 -> `len = 0.0.max(EPSILON)` -> direction (0/EPSILON, 0/EPSILON) =
+        // (0.0, 0.0) -> destination = position courante inchangée : la fuite ne produirait AUCUN
+        // mouvement, indépendamment du câblage. Vérifié par calcul direct de la formule (rapport de
+        // tâche). Fixe : on repositionne le PNJ (pas le joueur 1, qui reste à x=0 comme demandé par
+        // le plan) à x=10 AVANT de déclencher la fuite, avec un graphe dont le premier nœud est
+        // EXACTEMENT cette position (distance 0, pas de snap ambigu) et le second nœud EXACTEMENT à
+        // la destination de fuite attendue (10 + FLEE_DISTANCE(30) = 40, distance 0 également) — donc
+        // aucun aller-retour vers un nœud plus proche de la position de départ que la destination
+        // réelle (le piège symétrique observé en Task 5 avec un nœud hors de portée aurait ici pris
+        // la forme d'un chemin qui commence par reculer vers un nœud mal placé avant d'avancer ;
+        // vérifié par simulation manuelle de NavState::advance sur les deux fixtures avant de choisir
+        // celle-ci, cf. rapport de tâche).
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur"
+            briques = ["errer"]
+            "#,
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(10.0, 0.0, 0.0)); // position forcée de départ du PNJ
+        let b = graph.add_node(NavVec3::new(40.0, 0.0, 0.0)); // = destination de fuite exacte
+        graph.add_edge(a, b);
+        server.set_nav_graph(graph);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t); // laisse le director spawn le PNJ (Pose par défaut (0,0,0))
+
+        let sent = t.take_sent(1);
+        let npc_id = sent.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.npcs()?.iter().next().map(|n| n.id())
+        });
+        let npc_id = npc_id.expect("le PNJ doit être visible dès le premier snapshot");
+
+        // Repositionne le PNJ à x=10 (le joueur 1, la menace, reste à x=0) — évite le cas dégénéré
+        // menace==PNJ décrit ci-dessus. Accès direct à `self.world` : mêmes privilèges que le reste
+        // de ce module de test (mod tests est un enfant de server_loop, `world` reste privé au
+        // crate/module, cf. le reste de ce fichier).
+        server.world.set_pose(
+            npc_id,
+            Pose {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+                ..Pose::default()
+            },
+        );
+
+        // Le joueur 1 déclenche la fuite (kind=0=Fuite, fondation PNJ déjà câblée).
+        let interaction = encode_entity_interaction(npc_id, 0, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: interaction,
+        });
+        server.tick(&mut t); // applique l'interaction (Fuite) PUIS decide/planifie dans le même tick
+
+        let position_after_first = t.take_sent(1).iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.npcs()?
+                .iter()
+                .next()
+                .map(|n| n.position().unwrap().x())
+        });
+        let position_after_first = position_after_first
+            .expect("le PNJ doit apparaître dans le snapshot après la fuite déclenchée");
+
+        for _ in 0..20 {
+            server.tick(&mut t);
+        }
+        let position_later = t.take_sent(1).iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.npcs()?
+                .iter()
+                .next()
+                .map(|n| n.position().unwrap().x())
+        });
+        let position_later =
+            position_later.expect("le PNJ doit rester visible après plusieurs ticks de fuite");
+
+        assert!(
+            position_later > position_after_first,
+            "le PNJ en fuite doit s'éloigner du joueur 1 (menace à x=0) : x doit croître au fil des \
+             ticks (après={position_after_first}, plus tard={position_later})"
+        );
+    }
+
+    #[test]
+    fn a_npc_keeps_advancing_along_its_path_even_with_no_player_connected_dead_reckoning() {
+        // Spec §9 critère « adoption sans à-coup » : un PNJ persistant hors de portée avance quand
+        // même (dead-reckoning) et doit être vu à sa position avancée — pas à sa position de spawn —
+        // dès qu'un observateur rejoint. `tick_npcs` avance tous les PNJ inconditionnellement (pas
+        // de garde AoI dans la boucle de mouvement, confirmé Task 5 Step 5) : ce test le prouve en
+        // tickant sans AUCUN joueur connecté.
+        //
+        // Piège de fixture : le brief d'origine de cette tâche proposait un graphe à 2 nœuds, (0,0,0)
+        // et (200,0,0) — EXACTEMENT le même piège que Task 5 a trouvé et documenté dans
+        // `a_npc_with_a_nav_graph_and_an_errer_brique_moves_over_several_ticks` : ce PNJ utilise la
+        // brique `errer` (comportement Calme), dont `decide_destination` tire une destination dans
+        // un disque de rayon FIXE 15.0 autour de la position courante (`region_radius` câblé en dur
+        // dans `tick_npcs`). Le rayon maximum réellement atteignable par la formule
+        // `region_radius * sqrt((rng_unit * 7.0) % 1.0)` est ~14.849 (vérifié par calcul direct sur
+        // la formule + reproduit empiriquement : le fixture à 200 unités laisse le PNJ figé en
+        // (0,0,0) après 30 ticks de dead-reckoning, cf. rapport de tâche) — donc un nœud à 200 unités
+        // n'est JAMAIS le nœud le plus proche d'une destination errer, `nearest_node` retombe toujours
+        // sur le nœud de départ, et le "chemin" planifié est un unique waypoint à la position déjà
+        // occupée par le PNJ : aucun mouvement, quel que soit le nombre de ticks. Repris ici avec le
+        // second nœud à 10.0 (dans le rayon de 15.0), comme le fix de Task 5.
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur"
+            briques = ["errer"]
+            "#,
+        )
+        .unwrap();
+        // Densité cible 1 mais AUCUN joueur présent -> le director ne spawn normalement rien (LOD,
+        // fondation PNJ) ; ce test a donc besoin d'un PNJ déjà existant. Utiliser un joueur connecté
+        // BRIÈVEMENT pour déclencher le spawn, puis le déconnecter avant les ticks de dead-reckoning,
+        // pour prouver que le mouvement continue sans observateur (le PNJ lui-même n'est PAS despawné
+        // par l'absence de joueur dans cette fondation — seul le SPAWN est gated par présence, pas la
+        // persistance une fois spawné, cf. population_director.rs : Despawn ne se déclenche que si
+        // current > target, pas juste "plus de joueurs").
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        // `b` à 10.0 (pas 200.0, cf. commentaire ci-dessus) : dans le rayon de tir errer (15.0).
+        let b = graph.add_node(NavVec3::new(10.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+        server.set_nav_graph(graph);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t); // spawn
+        server.tick(&mut t); // 1re destination/chemin
+        t.inject(TransportEvent::Disconnected(1));
+        server.tick(&mut t);
+
+        // 30 ticks de dead-reckoning sans AUCUN observateur.
+        for _ in 0..30 {
+            server.tick(&mut t);
+        }
+
+        // Un joueur se reconnecte (le PNJ reste toujours dans le rayon AoI de 50 depuis (0,0,0), quel
+        // que soit où le wander l'a mené dans le disque de rayon 15) et doit le voir immédiatement à
+        // sa position avancée par dead-reckoning, sans à-coup.
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        let sent = t.take_sent(2);
+        let npc_position = sent.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.npcs()?.iter().next().map(|n| {
+                let p = n.position().unwrap();
+                (p.x(), p.y())
+            })
+        });
+        let npc_position =
+            npc_position.expect("le PNJ doit être immédiatement visible au joueur qui rejoint");
+        assert_ne!(
+            npc_position,
+            (0.0, 0.0),
+            "après 30+ ticks de dead-reckoning sans observateur, le PNJ ne doit plus être à sa \
+             position de spawn — preuve que le mouvement a continué sans joueur connecté \
+             (position observée = {npc_position:?})"
+        );
+    }
 }
