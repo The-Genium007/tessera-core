@@ -102,5 +102,15 @@ async fn main() -> std::io::Result<()> {
         });
 
     tracing::info!("Shard démarré pour le groupe {group_id} (écoute {addr})");
-    server::shard_main(&addr, aoi_radius, &metrics_addr, population, named_npc).await
+    // Pas de véhicules côté production pour l'instant (le peuplement par director de trafic est
+    // différé, spec véhicules autonomes §2) — `None` préserve le comportement de prod à l'identique.
+    server::shard_main(
+        &addr,
+        aoi_radius,
+        &metrics_addr,
+        population,
+        named_npc,
+        None,
+    )
+    .await
 }
