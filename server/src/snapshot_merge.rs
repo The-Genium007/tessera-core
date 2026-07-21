@@ -6,13 +6,15 @@ use flatbuffers::FlatBufferBuilder;
 use protocol::*;
 use std::collections::BTreeMap;
 
+/// Champs d'un `VehicleState` (protocol.fbs) hors id, agrégés par id durant la fusion — miroir du
+/// tuple position+yaw utilisé pour les joueurs, mais avec les champs propres au véhicule.
+type VehicleAgg = (u32, f32, f32, f32, f32, u16, u64);
+
 /// Unionne plusieurs snapshots serveur en un seul (dédup par id de joueur, `tick` = max).
 /// `None` si aucun snapshot valide n'a pu être décodé.
 pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
     let mut by_id: BTreeMap<u64, (f32, f32, f32, f32)> = BTreeMap::new();
-    // Véhicules : (archetype, x, y, z, yaw, speed, passenger) — miroir de `by_id` mais avec les
-    // champs propres à VehicleState (Task 2, protocol.fbs) plutôt qu'au triplet biped.
-    let mut vehicles_by_id: BTreeMap<u64, (u32, f32, f32, f32, f32, u16, u64)> = BTreeMap::new();
+    let mut vehicles_by_id: BTreeMap<u64, VehicleAgg> = BTreeMap::new();
     let mut tick: u64 = 0;
     let mut any = false;
 
@@ -305,17 +307,34 @@ mod tests {
     }
 
     #[test]
-    fn deduplicates_vehicle_present_on_both_shards() {
+    fn deduplicates_vehicle_present_on_both_shards_keeping_the_first_seen() {
+        // Valeurs délibérément DIFFÉRENTES entre les deux sources (id identique) pour distinguer
+        // "premier snapshot vu gagne" (comme les joueurs, `.or_insert`) de "dernier gagne" — un
+        // test avec deux tuples identiques ne prouverait que le dédoublonnage, pas la règle de
+        // priorité. En pratique un véhicule n'est simulé que par un seul shard autoritaire à la
+        // fois, donc ce désaccord ne devrait jamais survenir — ce test fige quand même le
+        // comportement déterministe attendu si ça arrivait.
         let a = snapshot_with_vehicle(1, &[], Some((100, 3, 12.0, 0.0, 0.0, 42, 0)));
-        let b = snapshot_with_vehicle(1, &[], Some((100, 3, 12.0, 0.0, 0.0, 42, 0)));
+        let b = snapshot_with_vehicle(1, &[], Some((100, 3, 99.0, 0.0, 0.0, 42, 0)));
         let merged = merge_snapshots(&[a, b]).unwrap();
-        assert_eq!(vehicles_of(&merged).len(), 1);
+        let vehicles = vehicles_of(&merged);
+        assert_eq!(vehicles.len(), 1, "un seul véhicule après dédoublonnage");
+        assert_eq!(
+            vehicles[0],
+            (100, 3, 12.0, 0.0, 0.0, 42, 0),
+            "le premier snapshot source vu doit gagner, pas le dernier"
+        );
     }
 
     #[test]
-    fn merge_with_no_vehicles_anywhere_produces_no_vehicles_vector() {
+    fn merge_with_no_vehicles_anywhere_produces_no_vehicles_vector_not_an_empty_one() {
         let a = snapshot(1, &[(1, 5.0)]); // pas de véhicule
         let merged = merge_snapshots(&[a]).unwrap();
-        assert!(vehicles_of(&merged).is_empty());
+        let env = flatbuffers::root::<ServerEnvelope>(&merged).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert!(
+            snap.vehicles().is_none(),
+            "l'absence de véhicule doit produire vehicles=None, pas Some(vec![])"
+        );
     }
 }
