@@ -39,6 +39,16 @@ pub struct Server {
     /// `None` = aucun ascenseur simulé sur ce Shard. Tous les constructeurs historiques le laissent
     /// à `None` ; seul `new_with_elevators` l'active.
     elevator_registry: Option<ElevatorRegistry>,
+    /// File one-shot des ids d'ascenseurs ayant reçu un appel NOUVELLEMENT accepté durant le
+    /// drain des events de CE tick (`apply_client_message` la remplit sur `ClientMsg::ElevatorCall`,
+    /// `tick()` la vide juste après `tick_elevators`). Nécessaire parce que `ElevatorState::advance`
+    /// calcule son `before` de détection de changement APRÈS que `handle_elevator_call` a déjà muté
+    /// `requested_floors` pour les appels reçus ce même tick (l'event-drain précède `advance` dans
+    /// `tick()`) : un appel en pleine course qui n'altère ni `target_floor` ni `movement_state` ne
+    /// ressort donc d'aucun changement détecté par `advance`, et sans ce relais ne serait diffusé
+    /// qu'au prochain rappel heartbeat (jusqu'à ~1s) au lieu d'« appel accepté » (spec §5.3) —
+    /// finding de la revue finale de branche du palier ascenseurs.
+    pending_elevator_broadcasts: Vec<u64>,
     session_registry: SessionRegistry,
     /// File one-shot (actor, target) des `EntityInteraction(kind=2)` sur un PNJ nominatif à
     /// arbitrer en session — accumulée par `apply_client_message`, drainée en début de `tick()`.
@@ -83,6 +93,7 @@ impl Server {
             npc_registry: None,
             named_npc_registry: None,
             elevator_registry: None,
+            pending_elevator_broadcasts: Vec::new(),
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
@@ -103,6 +114,7 @@ impl Server {
             npc_registry: None,
             named_npc_registry: None,
             elevator_registry: None,
+            pending_elevator_broadcasts: Vec::new(),
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
@@ -133,6 +145,7 @@ impl Server {
             }),
             named_npc_registry: None,
             elevator_registry: None,
+            pending_elevator_broadcasts: Vec::new(),
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
@@ -180,6 +193,7 @@ impl Server {
             npc_registry: None,
             named_npc_registry: Some(named_npc_registry),
             elevator_registry: None,
+            pending_elevator_broadcasts: Vec::new(),
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
@@ -384,8 +398,39 @@ impl Server {
         // qu'une cabine est en mouvement). Aucun filtrage AoI ici : `ElevatorState` ne porte aucune
         // position de cabine (contrainte globale), et le catalogue n'attache pas non plus de
         // position monde à une cage d'ascenseur — un filtrage par distance n'a donc rien à mordre.
-        for state in self.tick_elevators(self.world.tick()) {
-            let bytes = Self::encode_elevator_state(&state);
+        let elevator_updates = self.tick_elevators(self.world.tick());
+        let mut elevators_broadcast_this_tick: Vec<u64> =
+            Vec::with_capacity(elevator_updates.len());
+        for state in &elevator_updates {
+            elevators_broadcast_this_tick.push(state.elevator_id);
+            let bytes = Self::encode_elevator_state(state);
+            for id in self.world.player_ids() {
+                transport.send(id, &bytes);
+            }
+        }
+        // Diffusion immédiate d'un appel accepté en pleine course (finding revue de branche
+        // finale, cf. doc de `pending_elevator_broadcasts`) : un appel qui ajoute un étage SANS
+        // changer `target_floor`/`movement_state` de la cabine (déjà en route ailleurs) n'est vu
+        // par AUCUNE transition dans la boucle `tick_elevators` ci-dessus — sans ce relais, il
+        // n'atteindrait les autres clients qu'au prochain rappel heartbeat. On ne redouble jamais
+        // un ascenseur déjà couvert par la boucle ci-dessus (pas de double-diffusion dans le même
+        // tick).
+        for elevator_id in self.pending_elevator_broadcasts.drain(..) {
+            if elevators_broadcast_this_tick.contains(&elevator_id) {
+                continue;
+            }
+            elevators_broadcast_this_tick.push(elevator_id);
+            let Some(registry) = &self.elevator_registry else {
+                continue;
+            };
+            let Some(state) = registry
+                .states
+                .iter()
+                .find(|s| s.elevator_id == elevator_id)
+            else {
+                continue;
+            };
+            let bytes = Self::encode_elevator_state(state);
             for id in self.world.player_ids() {
                 transport.send(id, &bytes);
             }
@@ -553,7 +598,12 @@ impl Server {
                 if let Some((elevator_id, floor)) =
                     crate::gateway_routing::extract_elevator_call(data)
                 {
-                    self.handle_elevator_call(from, elevator_id, floor);
+                    // `true` = appel NOUVELLEMENT accepté (bouton qui vient de s'allumer) — mémorisé
+                    // pour que `tick()` le diffuse ce même tick même si `tick_elevators` ne détecte
+                    // aucune transition (cf. doc de `pending_elevator_broadcasts`).
+                    if self.handle_elevator_call(from, elevator_id, floor) {
+                        self.pending_elevator_broadcasts.push(elevator_id);
+                    }
                 }
             }
             _ => {}
@@ -1444,6 +1494,128 @@ mod tests {
             "la cabine doit viser l'étage appelé"
         );
         assert_eq!(last.movement_state(), 1, "1 = MovingUp");
+    }
+
+    /// Encode un `ClientEnvelope::ElevatorCall` — même patron que `encode_position` juste
+    /// au-dessus, pour injecter un VRAI message d'appel via le transport plutôt que d'appeler
+    /// `Server::handle_elevator_call` directement (nécessaire ici : le fix testé vit dans le
+    /// dispatch `ClientMsg::ElevatorCall` de `apply_client_message`, pas dans `handle_elevator_call`
+    /// lui-même).
+    fn encode_elevator_call(elevator_id: u64, floor: i32) -> Vec<u8> {
+        let mut b = FlatBufferBuilder::new();
+        let call = ElevatorCall::create(&mut b, &ElevatorCallArgs { elevator_id, floor });
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::ElevatorCall,
+                msg: Some(call.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    #[test]
+    fn a_mid_trip_call_that_does_not_change_the_target_is_broadcast_the_same_tick() {
+        // Reproduit le finding de la revue finale de branche : `ElevatorState::advance` calcule son
+        // `before` de détection de changement APRÈS que `handle_elevator_call` a déjà muté
+        // `requested_floors` pour un appel reçu ce même tick (l'event-drain précède `advance` dans
+        // `Server::tick`). Un second appel qui n'altère ni `target_floor` ni `movement_state` (la
+        // cabine est déjà en route ailleurs) ne ressortait donc d'AUCUNE transition détectée par
+        // `tick_elevators`, et n'était diffusé qu'au rappel heartbeat suivant (`HEARTBEAT_TICKS` =
+        // 20 ticks plus tard, cf. `tick_elevators`) au lieu d'« appel accepté » (spec §5.3, cadence
+        // de diffusion).
+        use crate::elevator_catalog::parse_and_validate;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[elevator]]
+            id = "77"
+            name = "test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 1000
+            floors = [
+              { index = 0, hidden = false, inactive = false },
+              { index = 1, hidden = false, inactive = false },
+              { index = 3, hidden = false, inactive = false },
+            ]
+            "#,
+        )
+        .unwrap();
+        // tick_ms=50, travel_time_ms=1000 => 1000/50 = 20 ticks pour un trajet complet (même valeur
+        // que `HEARTBEAT_TICKS`, non un hasard : ça laisse toute la marge nécessaire pour recevoir
+        // le second appel bien avant l'arrivée ET bien avant le rappel heartbeat).
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        // Premier appel : étage 3, loin de l'étage 0 courant. Démarre le trajet — la cabine passe
+        // de Stopped à MovingUp, donc CETTE transition est déjà détectée par `tick_elevators`
+        // normalement (couvert par `a_configured_elevator_is_broadcast_and_moves_on_a_client_call`
+        // ci-dessus). On la laisse passer par le vrai chemin réseau pour rester réaliste.
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_elevator_call(77, 3),
+        });
+        server.tick(&mut t);
+        t.take_sent(1); // vide la diffusion du démarrage de trajet, hors sujet ici
+
+        // Quelques ticks sans aucun appel : la cabine reste en route vers 3, aucune transition, et
+        // on est loin d'un multiple de HEARTBEAT_TICKS (20) — donc AUCUNE diffusion d'ElevatorStateMsg
+        // ne doit avoir lieu ici. Sert de garde-fou : si ça casse, le test ci-dessous ne prouverait
+        // plus rien (le heartbeat pourrait masquer un fix absent).
+        for _ in 0..3 {
+            server.tick(&mut t);
+        }
+        let idle_ticks_sent = t.take_sent(1);
+        for buf in &idle_ticks_sent {
+            let env = flatbuffers::root::<ServerEnvelope>(buf).unwrap();
+            assert!(
+                env.msg_as_elevator_state_msg().is_none(),
+                "aucune transition ni rappel heartbeat pendant ces ticks : pas de diffusion attendue"
+            );
+        }
+
+        // DEUXIÈME appel, en pleine course : l'étage 1 n'est ni l'étage actif ni le `target_floor`
+        // courant (3), et la cabine reste `MovingUp` — `ElevatorState::advance` ne verra donc AUCUN
+        // changement avant/après (le root cause du finding).
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_elevator_call(77, 1),
+        });
+        server.tick(&mut t); // UN SEUL tick après l'appel — pas d'attente du rappel heartbeat.
+
+        let sent = t.take_sent(1);
+        let last = sent
+            .iter()
+            .rev()
+            .filter_map(|b| {
+                let env = flatbuffers::root::<ServerEnvelope>(b).ok()?;
+                env.msg_as_elevator_state_msg()
+            })
+            .next()
+            .expect(
+                "l'appel accepté en pleine course doit être diffusé DANS LE MÊME TICK que \
+                 l'appel, sans attendre le rappel heartbeat",
+            );
+        assert_eq!(last.elevator_id(), 77);
+        assert_eq!(
+            last.target_floor(),
+            3,
+            "le target_floor courant (3) ne doit pas avoir changé"
+        );
+        assert_eq!(last.movement_state(), 1, "1 = MovingUp, inchangé");
+        let requested: Vec<i32> = last.requested_floors().unwrap().iter().collect();
+        assert!(
+            requested.contains(&1),
+            "l'étage nouvellement appelé (1) doit apparaître dans requested_floors du message \
+             diffusé CE tick, pas seulement au prochain rappel heartbeat"
+        );
     }
 
     #[test]
