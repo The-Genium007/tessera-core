@@ -5,6 +5,9 @@ use crate::interaction_session::{SessionError, SessionRegistry};
 use crate::metrics::Metrics;
 use crate::named_npc_catalog::NamedNpcCatalog;
 use crate::named_npc_registry::NamedNpcRegistry;
+use crate::nav::plan_path;
+use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+use crate::nav_state::NavState;
 use crate::npc::{
     behavior_to_u8, execute_transaction, EntityBehavior, NpcRecord, TransactionOutcome,
 };
@@ -41,6 +44,12 @@ pub struct Server {
     /// File one-shot (actor, session_id, outcome, target) des sessions résolues à notifier au
     /// client — accumulée par `apply_client_message`, drainée en fin de `tick()`.
     pending_interaction_results: Vec<(ClientId, u64, TransactionOutcome, ClientId)>,
+    /// Graphe de navigation (nav_graph.rs) — `None` = aucun PNJ ne se déplace (comportement
+    /// fondation PNJ préservé : sans graphe, decide_destination peut produire une destination mais
+    /// aucun chemin n'est jamais planifié, donc aucun mouvement). `Some(..)` posé après construction
+    /// via un setter dédié (`set_nav_graph`) plutôt qu'un paramètre de constructeur — la navigation
+    /// est un comportement additif, pas une variante de configuration comme catalog/director/registry.
+    nav_graph: Option<NavGraph>,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -50,6 +59,9 @@ struct NpcRegistry {
     director: PopulationDirector,
     records: std::collections::HashMap<ClientId, NpcRecord>,
     next_npc_id: ClientId,
+    /// Chemin/progression courants par PNJ (Task 3/5, plan navigation). Absent d'un id =
+    /// « n'a jamais eu de destination assignée » — traité comme un NavState vierge.
+    nav_states: std::collections::HashMap<ClientId, NavState>,
 }
 
 impl Server {
@@ -64,6 +76,7 @@ impl Server {
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
+            nav_graph: None,
         }
     }
 
@@ -83,6 +96,7 @@ impl Server {
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
+            nav_graph: None,
         }
     }
 
@@ -107,11 +121,13 @@ impl Server {
                 director,
                 records: std::collections::HashMap::new(),
                 next_npc_id: crate::world::NPC_ID_RANGE_START,
+                nav_states: std::collections::HashMap::new(),
             }),
             named_npc_registry: None,
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
+            nav_graph: None,
         }
     }
 
@@ -158,12 +174,20 @@ impl Server {
             session_registry: SessionRegistry::new(),
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
+            nav_graph: None,
         }
     }
 
     /// Nombre de joueurs actuellement dans le monde de ce Shard — pour l'endpoint métriques.
     pub fn player_count(&self) -> usize {
         self.world.player_ids().len()
+    }
+
+    /// Attache un graphe de navigation après construction. Sans appel, `tick_npcs` continue de
+    /// fonctionner exactement comme avant ce plan (FSM/briques nav-indépendantes seules, aucun
+    /// PNJ ne bouge) — comportement historique strictement préservé.
+    pub fn set_nav_graph(&mut self, graph: NavGraph) {
+        self.nav_graph = Some(graph);
     }
 
     /// Un pas du director de population + du moteur de briques PNJ (spec fondation PNJ) — no-op si
@@ -214,13 +238,79 @@ impl Server {
                 }
             }
         }
+        const NPC_SPEED_UNITS_PER_SEC: f32 = 3.0; // marche (spec parle de vitesse par brique/archétype
+                                                  // via .aiarch, différé — constante v1 uniforme ici,
+                                                  // documentée comme simplification assumée).
+        let tick_dt = 1.0 / crate::default_tick_rate_hz() as f32;
+        let move_distance = NPC_SPEED_UNITS_PER_SEC * tick_dt;
+
         for (id, record) in registry.records.iter_mut() {
-            if let Some(archetype) = registry.catalog.archetype(record.archetype) {
-                record.apply_brique_tick(archetype);
+            let Some(archetype) = registry.catalog.archetype(record.archetype) else {
+                continue;
+            };
+            record.apply_brique_tick(archetype);
+
+            let Some(graph) = &self.nav_graph else {
+                continue; // comportement historique préservé sans graphe (Global Constraints)
+            };
+            let nav_state = registry.nav_states.entry(*id).or_default();
+            let current_pose = self.world.pose_of(*id).unwrap_or_default();
+            let current_pos = (current_pose.x, current_pose.y, current_pose.z);
+
+            if !nav_state.has_path() || nav_state.has_arrived() {
+                // Pas de chemin en cours (ou arrivé) -> décide d'une nouvelle destination et planifie.
+                // region_center/region_radius v1 : la position ACTUELLE du PNJ (simplification assumée —
+                // le vrai centre de région par archétype, spec §4, attend une config dédiée future).
+                // menace_or_cible : résolue via World::pose_of sur l'id porté par le behavior FSM (Fuite/
+                // Hostile) — sans ceci, un PNJ en fuite ne saurait jamais de quelle position s'éloigner
+                // (npc.rs::decide_destination retourne None sans position réelle pour Fuite, testé
+                // séparément). Calme/Flane/ATerre n'utilisent jamais cette valeur.
+                let menace_or_cible = match record.behavior {
+                    crate::npc::EntityBehavior::Fuite { menace } => {
+                        self.world.pose_of(menace).map(|p| (p.x, p.y, p.z))
+                    }
+                    crate::npc::EntityBehavior::Hostile { cible } => {
+                        self.world.pose_of(cible).map(|p| (p.x, p.y, p.z))
+                    }
+                    _ => None,
+                };
+                if let Some(dest) = crate::npc::decide_destination(
+                    record.behavior,
+                    archetype,
+                    current_pos,
+                    menace_or_cible,
+                    current_pos,
+                    15.0,
+                    pseudo_random_unit(*id, self.world.tick()),
+                ) {
+                    let (dx, dy, dz) = dest;
+                    if let Some(path) = plan_path(
+                        graph,
+                        NavVec3::new(current_pos.0, current_pos.1, current_pos.2),
+                        NavVec3::new(dx, dy, dz),
+                    ) {
+                        nav_state.set_path(path);
+                    }
+                }
             }
-            let _ = id; // le pose (locomotion/mouvement réel) n'est PAS mis à jour ici — aucune
-                        // brique nav-indépendante ne bouge le PNJ (Global Constraints) ; sa Pose
-                        // reste celle par défaut (immobile) jusqu'au plan de navigation suivant.
+
+            if nav_state.has_path() {
+                let new_pos = nav_state.advance(
+                    NavVec3::new(current_pos.0, current_pos.1, current_pos.2),
+                    move_distance,
+                );
+                self.world.set_pose(
+                    *id,
+                    Pose {
+                        x: new_pos.x,
+                        y: new_pos.y,
+                        z: new_pos.z,
+                        locomotion: 1, // Walk (cf. commentaire triplet biped, world.rs) — v1 uniforme,
+                        // Sprint réservé à Fuite en raffinement futur (spec §5)
+                        ..current_pose
+                    },
+                );
+            }
         }
     }
 
@@ -244,7 +334,8 @@ impl Server {
         // pour ne pas laisser une session fantôme vivre indéfiniment (spec fondation d'interaction
         // §2 : « timeout serveur », aucune valeur numérique imposée par la spec).
         const INTERACTION_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-        self.session_registry.expire_stale(INTERACTION_SESSION_TIMEOUT);
+        self.session_registry
+            .expire_stale(INTERACTION_SESSION_TIMEOUT);
         for (actor, target) in self.pending_interaction_opens.drain(..) {
             let session_id = self.session_registry.open(actor, target, 0);
             let bytes = crate::gateway_routing::encode_interaction_open(session_id, target, 0, &[]);
@@ -461,6 +552,16 @@ impl Server {
         b.finish(env, None);
         b.finished_data().to_vec()
     }
+}
+
+/// Pseudo-aléatoire déterministe [0.0, 1.0) dérivé de l'id du PNJ + du tick courant — pas un vrai
+/// RNG (pas de dépendance `rand` ajoutée), suffisant pour varier les destinations `errer` sans
+/// motif visible à l'échelle d'un playtest. Documenté comme simplification v1 assumée.
+fn pseudo_random_unit(seed: ClientId, tick: u64) -> f32 {
+    let mixed = seed
+        .wrapping_mul(2654435761)
+        .wrapping_add(tick.wrapping_mul(0x9E3779B97F4A7C15));
+    ((mixed >> 40) as f32) / (1u64 << 24) as f32 % 1.0
 }
 
 #[cfg(test)]
@@ -1215,6 +1316,121 @@ mod tests {
             ok,
             Some(false),
             "une session expirée doit refuser le Choice tardif comme NotFound (ok=false)"
+        );
+    }
+
+    #[test]
+    fn a_npc_with_a_nav_graph_and_an_errer_brique_moves_over_several_ticks() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur"
+            briques = ["errer"]
+            "#,
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        // `b` à 10.0 (pas 200.0) : la brique errer tire des destinations dans un disque de
+        // rayon 15.0 autour de la position courante (region_radius câblé dans tick_npcs) — un
+        // second nœud à 200 unités n'est JAMAIS le nœud le plus proche d'une destination errer
+        // (nearest_node(to) == nearest_node(from) à chaque fois, path=[position courante],
+        // le PNJ "arrive" instantanément sans jamais bouger). À 10.0, une partie des destinations
+        // tirées (x > 5, la médiatrice des deux nœuds) snappent sur `b`, produisant un vrai chemin
+        // à traverser — vérifié en isolant le calcul (pseudo_random_unit + la formule errer)
+        // avant de corriger ce fixture, cf. rapport de tâche.
+        let b = graph.add_node(NavVec3::new(10.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+        server.set_nav_graph(graph);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t); // laisse le director spawn le PNJ
+        server.tick(&mut t); // laisse le premier tick assigner une destination + planifier
+
+        let position_after_first = t.take_sent(1).iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.npcs()?.iter().next().map(|n| {
+                let p = n.position().unwrap();
+                (p.x(), p.y())
+            })
+        });
+
+        // Plusieurs ticks supplémentaires -> le PNJ doit avoir progressé (position différente).
+        for _ in 0..20 {
+            server.tick(&mut t);
+        }
+        let position_later = t.take_sent(1).iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.npcs()?.iter().next().map(|n| {
+                let p = n.position().unwrap();
+                (p.x(), p.y())
+            })
+        });
+
+        assert!(
+            position_after_first.is_some() && position_later.is_some(),
+            "le PNJ doit apparaître dans les deux snapshots"
+        );
+        assert_ne!(
+            position_after_first, position_later,
+            "après plusieurs ticks avec un graphe de navigation, la position du PNJ doit avoir changé"
+        );
+    }
+
+    #[test]
+    fn a_npc_without_a_nav_graph_never_moves_from_its_default_pose() {
+        // Comportement historique préservé (fondation PNJ) : sans set_nav_graph, un PNJ avec une
+        // brique errer ne bouge jamais — decide_destination peut produire une destination mais aucun
+        // chemin n'est planifiable sans graphe.
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur"
+            briques = ["errer"]
+            "#,
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+        // PAS de set_nav_graph.
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        for _ in 0..5 {
+            server.tick(&mut t);
+        }
+        let sent = t.take_sent(1);
+        let npc_position = sent.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.npcs()?.iter().next().map(|n| {
+                let p = n.position().unwrap();
+                (p.x(), p.y())
+            })
+        });
+        assert_eq!(
+            npc_position,
+            Some((0.0, 0.0)),
+            "sans graphe de navigation, le PNJ reste à sa Pose par défaut (0,0)"
         );
     }
 }
