@@ -202,7 +202,20 @@ impl Server {
         let Some(registry) = &mut self.npc_registry else {
             return;
         };
-        let player_count = self.world.player_ids().len() as u32;
+        // Trouvé en revue finale de branche (plan navigation) : player_ids() renvoie TOUT le
+        // monde dans World, PNJ compris (mêmes add_player/remove_player, décision délibérée de la
+        // fondation PNJ pour réutiliser snapshot_for/la grille spatiale telles quelles). Sans ce
+        // filtre, dès qu'au moins un PNJ existe, ce compte ne retombe jamais à zéro même si tous
+        // les vrais joueurs se déconnectent — le chemin de despawn-sur-district-vide
+        // (population_director.rs, !has_players) devient inatteignable en pratique. Bug
+        // préexistant à ce plan (présent depuis la fondation PNJ), corrigé ici car c'est ce même
+        // plan qui l'a fait échouer pour de vrai (test de nettoyage nav_states, Task 6).
+        let player_count = self
+            .world
+            .player_ids()
+            .into_iter()
+            .filter(|id| !crate::world::is_npc_id(*id))
+            .count() as u32;
         let players_by_district =
             std::collections::HashMap::from([("default".to_string(), player_count)]);
         let existing_by_district = std::collections::HashMap::from([(
@@ -233,6 +246,7 @@ impl Server {
                         .collect();
                     for id in to_remove {
                         registry.records.remove(&id);
+                        registry.nav_states.remove(&id);
                         self.world.remove_player(id);
                     }
                 }
@@ -1435,6 +1449,75 @@ mod tests {
     }
 
     #[test]
+    fn a_despawned_npc_has_its_nav_state_removed_not_leaked() {
+        // Trouvé en revue finale de branche (plan navigation) : le despawn (population director,
+        // fondation PNJ) retirait bien le NpcRecord et l'entrée World, mais laissait l'entrée
+        // nav_states orpheline — fuite de mémoire lente (non bornée) sur un Shard longue durée à
+        // fort churn spawn/despawn (les ids ne sont jamais réutilisés, next_npc_id ne fait
+        // qu'augmenter). Ce test verrouille le nettoyage : après un cycle spawn -> déconnexion du
+        // seul joueur présent (qui déclenche le despawn total du district "default",
+        // population_director.rs) -> tick, le nombre d'entrées de nav_states doit être revenu à 0.
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur"
+            briques = ["errer"]
+            "#,
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(10.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+        server.set_nav_graph(graph);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t); // spawn
+        server.tick(&mut t); // planifie un chemin -> nav_states gagne une entrée
+        assert_eq!(
+            server
+                .npc_registry
+                .as_ref()
+                .map(|r| r.nav_states.len())
+                .unwrap_or(0),
+            1,
+            "précondition : le PNJ doit avoir un NavState avant le despawn"
+        );
+
+        t.inject(TransportEvent::Disconnected(1));
+        server.tick(&mut t); // plus aucun joueur -> le director despawn tout le district "default"
+
+        assert_eq!(
+            server
+                .npc_registry
+                .as_ref()
+                .map(|r| r.records.len())
+                .unwrap_or(0),
+            0,
+            "le PNJ doit être despawné (comportement déjà existant, fondation PNJ)"
+        );
+        assert_eq!(
+            server
+                .npc_registry
+                .as_ref()
+                .map(|r| r.nav_states.len())
+                .unwrap_or(0),
+            0,
+            "nav_states ne doit PAS garder une entrée orpheline après le despawn"
+        );
+    }
+
+    #[test]
     fn a_fleeing_npc_moves_away_from_the_threat_over_several_ticks() {
         // Spec §9 critère « le FSM déclenche les bons déplacements (fuite s'éloigne) » — bout-en-
         // bout via Server/InMemoryTransport (pas juste decide_destination en isolation, déjà
@@ -1551,7 +1634,17 @@ mod tests {
         // même (dead-reckoning) et doit être vu à sa position avancée — pas à sa position de spawn —
         // dès qu'un observateur rejoint. `tick_npcs` avance tous les PNJ inconditionnellement (pas
         // de garde AoI dans la boucle de mouvement, confirmé Task 5 Step 5) : ce test le prouve en
-        // tickant sans AUCUN joueur connecté.
+        // tickant sans observateur PROCHE du PNJ.
+        //
+        // Trouvé en revue finale de branche : le compte `player_count` de `tick_npcs` comptait à
+        // tort les PNJ eux-mêmes (bug corrigé dans le même commit que ce test, cf. commentaire sur
+        // `let player_count` plus haut dans ce fichier). Une fois corrigé, un district sans AUCUN
+        // vrai joueur despawn réellement (population_director.rs, `!has_players`) — donc ce test ne
+        // peut plus déconnecter le SEUL joueur du serveur sans faire despawn le PNJ avant même
+        // d'atteindre les ticks de dead-reckoning. Un second joueur reste connecté, loin du PNJ
+        // (hors de son rayon AoI de 50, donc jamais son observateur), pour garder le district
+        // "default" non-vide pendant tout le scénario — le test prouve ainsi la vraie sémantique
+        // LOD spec'd : « persistant hors de PORTÉE », pas « zéro joueur au monde ».
         //
         // Piège de fixture : le brief d'origine de cette tâche proposait un graphe à 2 nœuds, (0,0,0)
         // et (200,0,0) — EXACTEMENT le même piège que Task 5 a trouvé et documenté dans
@@ -1582,12 +1675,10 @@ mod tests {
         )
         .unwrap();
         // Densité cible 1 mais AUCUN joueur présent -> le director ne spawn normalement rien (LOD,
-        // fondation PNJ) ; ce test a donc besoin d'un PNJ déjà existant. Utiliser un joueur connecté
-        // BRIÈVEMENT pour déclencher le spawn, puis le déconnecter avant les ticks de dead-reckoning,
-        // pour prouver que le mouvement continue sans observateur (le PNJ lui-même n'est PAS despawné
-        // par l'absence de joueur dans cette fondation — seul le SPAWN est gated par présence, pas la
-        // persistance une fois spawné, cf. population_director.rs : Despawn ne se déclenche que si
-        // current > target, pas juste "plus de joueurs").
+        // fondation PNJ) ; ce test a donc besoin d'un PNJ déjà existant. Le joueur 1 déclenche le
+        // spawn puis se déconnecte ; le joueur 2, loin du PNJ, reste connecté pendant tout le
+        // scénario pour garder le district non-vide (cf. commentaire ci-dessus) sans jamais observer
+        // le PNJ (hors du rayon AoI de 50).
         let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
         let mut server = Server::new_with_npcs(50.0, catalog, director);
         let mut graph = NavGraph::new();
@@ -1601,20 +1692,34 @@ mod tests {
         t.inject(TransportEvent::Connected(1));
         server.tick(&mut t); // spawn
         server.tick(&mut t); // 1re destination/chemin
+
+        // Joueur 2, loin (bien hors du rayon AoI de 50 depuis l'origine où erre le PNJ) — garde le
+        // district non-vide sans jamais devenir l'observateur du PNJ. Sa propre position n'est
+        // jamais mise à jour ensuite (aucun PositionUpdate envoyé), donc il reste loin tout le test.
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        let far_position = encode_position(500.0, 500.0, 0.0, 0.0);
+        t.inject(TransportEvent::Message {
+            from: 2,
+            data: far_position,
+        });
+        server.tick(&mut t);
+
         t.inject(TransportEvent::Disconnected(1));
         server.tick(&mut t);
 
-        // 30 ticks de dead-reckoning sans AUCUN observateur.
+        // 30 ticks de dead-reckoning sans observateur PROCHE (le joueur 2 reste connecté, mais loin).
         for _ in 0..30 {
             server.tick(&mut t);
         }
+        t.take_sent(2); // purge les snapshots accumulés du joueur 2 (jamais dans l'AoI du PNJ)
 
-        // Un joueur se reconnecte (le PNJ reste toujours dans le rayon AoI de 50 depuis (0,0,0), quel
-        // que soit où le wander l'a mené dans le disque de rayon 15) et doit le voir immédiatement à
+        // Un troisième joueur rejoint près du PNJ (le wander le maintient dans le disque de rayon 15
+        // autour de l'origine, donc toujours dans le rayon AoI de 50) et doit le voir immédiatement à
         // sa position avancée par dead-reckoning, sans à-coup.
-        t.inject(TransportEvent::Connected(2));
+        t.inject(TransportEvent::Connected(3));
         server.tick(&mut t);
-        let sent = t.take_sent(2);
+        let sent = t.take_sent(3);
         let npc_position = sent.iter().find_map(|bytes| {
             let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
             let snap = env.msg_as_snapshot()?;
