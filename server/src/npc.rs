@@ -1,0 +1,326 @@
+//! État comportemental des PNJ (FSM, canonique côté serveur) et enregistrement PNJ. Vit à CÔTÉ du
+//! canal cosmétique `Pose` (`world.rs`), jamais fusionné dedans — `Pose` reste le triplet
+//! locomotion/move_dir/flags/sustained partagé joueurs+PNJ ; ce module porte le POURQUOI
+//! (comportement), `Pose` porte le RENDU (anim).
+
+use crate::transport::ClientId;
+
+/// État comportemental FSM (spec fondation PNJ §3, modèle serveur §2). `Alerte`/`Fuite`/
+/// `Hostile` portent une cible (id d'entité, joueur ou PNJ, dans le même espace `ClientId`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntityBehavior {
+    #[default]
+    Calme,
+    Flane,
+    Alerte {
+        menace: ClientId,
+    },
+    Fuite {
+        menace: ClientId,
+    },
+    Hostile {
+        cible: ClientId,
+    },
+    ATerre,
+}
+
+/// Enregistrement complet d'un PNJ, distinct de `Pose` (le canal cosmétique). `id` est dans la
+/// plage réservée (`is_npc_id`, Task 6) — jamais un id de connexion réelle. Ne porte PAS la brique
+/// active en propre : `apply_brique_tick` (Task 4) reçoit le `NpcArchetypeConfig` complet à chaque
+/// appel (résolu depuis `archetype` par l'appelant) plutôt que dupliquer cette info ici — une seule
+/// source de vérité pour "quelles briques sont actives pour ce PNJ" (le catalogue), pas deux.
+#[derive(Debug, Clone)]
+pub struct NpcRecord {
+    pub id: ClientId,
+    pub archetype: u32,
+    pub owner: ClientId, // 0 = personne (hiberné) — cf. spec ownership §4
+    pub behavior: EntityBehavior,
+}
+
+impl NpcRecord {
+    pub fn new(id: ClientId, archetype: u32) -> Self {
+        Self {
+            id,
+            archetype,
+            owner: 0,
+            behavior: EntityBehavior::default(),
+        }
+    }
+
+    /// Transition FSM déclenchée par une `EntityInteraction` rapportée par un joueur (spec §2 :
+    /// « le serveur met à jour l'état canonique »). `kind` : 0=Menace/attaque 1=Parle 2=Interagit
+    /// (cf. schéma `EntityInteraction`, Task 5). Seul `kind=0` déclenche une transition de peur —
+    /// les autres kinds sont gérés par les briques sociales (Task 4), pas la FSM elle-même.
+    pub fn apply_interaction(&mut self, from: ClientId, kind: u8) {
+        if kind == 0 {
+            self.behavior = EntityBehavior::Fuite { menace: from };
+        }
+    }
+
+    /// Un pas du moteur de briques (spec modèle serveur §5 : « lit ces configs et pilote le FSM +
+    /// les intentions »). Nav-indépendant uniquement — aucune brique ici ne modifie la position ;
+    /// `marcher-route`/`patrouiller`/`aller-au-point`/`errer` sont différées au plan de navigation
+    /// et n'existent pas dans ce catalogue (Task 2 les rejetterait comme brique inconnue si un
+    /// opérateur les déclarait par erreur avant que le plan suivant ne les implémente — la
+    /// résolution ci-dessous ignore silencieusement une brique qu'elle ne reconnaît pas, un
+    /// comportement délibérément permissif pour ne pas faire planter le serveur sur une config
+    /// TOML en avance sur le code : documenté ici, pas un oubli).
+    ///
+    /// Ne fait RIEN si `behavior` est `Fuite`/`Hostile`/`ATerre` — ces états sont pilotés par la
+    /// FSM (interactions), pas par la brique passive de l'archétype (cohérent avec spec §2 : « le
+    /// FSM est la cause, la brique/pathfinding est l'effet » — une brique sociale ne doit jamais
+    /// écraser un état de peur/agression en cours).
+    pub fn apply_brique_tick(&mut self, archetype: &crate::npc_catalog::NpcArchetypeConfig) {
+        if !matches!(self.behavior, EntityBehavior::Calme | EntityBehavior::Flane) {
+            return;
+        }
+        if archetype.briques.iter().any(|b| b == "flaner-sur-place") {
+            self.behavior = EntityBehavior::Flane;
+        }
+        // "rester-statique" : ne change jamais `behavior` (reste Calme) — c'est la définition même
+        // de la brique (spec §4 : « le danseur hip-hop = brique… zéro navigation »).
+        // "vendre"/"donner-quête"/"réagir-dialogue" : hooks sociaux, pas de transition de
+        // mouvement — traités par un futur plan d'interaction (fondation d'interaction, séquencement
+        // Phase 3.1), hors périmètre ici.
+    }
+}
+
+/// Une cible en `Fuite`/`Hostile`/`ATerre` refuse toute interaction fonctionnelle (spec §2 : « un
+/// vendeur `fuite`/`à terre` refuse ») — matrice interaction×FSM minimale (spec §10, « à écrire
+/// dans le moteur de briques »). `Calme`/`Flane`/`Alerte` restent interactibles : `Alerte` n'est
+/// qu'une vigilance accrue, pas un refus de contact (un PNJ qui a repéré une menace au loin peut
+/// encore répondre à un client qui l'aborde calmement).
+///
+/// Note : contrairement à `behavior_to_u8` (match exhaustif, sans bras `_`, qui casse
+/// volontairement à la compilation si `EntityBehavior` gagne un variant), cette fonction utilise
+/// `matches!` sur une liste de refus — un futur variant non listé ici serait AUTORISÉ par défaut,
+/// pas refusé. Si un futur plan ajoute un état FSM qui doit refuser l'interaction, l'ajouter
+/// explicitement à ce `matches!`, ne pas compter sur une erreur de compilation pour le rappeler.
+pub fn interaction_allowed(behavior: EntityBehavior) -> bool {
+    !matches!(
+        behavior,
+        EntityBehavior::Fuite { .. } | EntityBehavior::Hostile { .. } | EntityBehavior::ATerre
+    )
+}
+
+/// Résultat d'une transaction d'interaction (spec §4 : « transaction atomique »). `ok=false` porte
+/// une raison IN-FICTION (spec §2 : jamais « erreur 409 ») — le CONTENU de cette raison est
+/// hors périmètre ici (aucune string réelle n'est décidée par ce squelette), seul le TRANSPORT
+/// (succès/échec + payload opaque) est fondé.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransactionOutcome {
+    pub ok: bool,
+    pub payload: Vec<u8>,
+}
+
+/// Squelette de transaction atomique (spec §4, §9 : contenu différé, plomberie seule). Suit
+/// EXACTEMENT le patron `admin_commands::execute` (server/src/admin_commands.rs:194-202) : PURE,
+/// synchrone, aucune I/O, aucun `.await` — la persistance et le log surviennent APRÈS, dans
+/// l'appelant (Task 5), jamais ici. `apply` reçoit une closure représentant LE contenu réel de la
+/// transaction (débit/stock/inventaire — inconnu de ce module, injecté par l'appelant) ; ce
+/// squelette ne fait que garantir l'ordre (vérifier `interaction_allowed` D'ABORD, exécuter
+/// ENSUITE, jamais l'inverse) — la seule garantie d'atomicité que ce plan peut honnêtement offrir
+/// sans connaître le contenu réel (spec §9 : l'économie est un gros sous-système séparé, différé).
+pub fn execute_transaction(
+    target_behavior: EntityBehavior,
+    apply: impl FnOnce() -> TransactionOutcome,
+) -> TransactionOutcome {
+    if !interaction_allowed(target_behavior) {
+        return TransactionOutcome {
+            ok: false,
+            payload: Vec::new(),
+        };
+    }
+    apply()
+}
+
+#[cfg(test)]
+mod interaction_fsm_tests {
+    use super::*;
+
+    #[test]
+    fn calme_flane_and_alerte_allow_interaction() {
+        assert!(interaction_allowed(EntityBehavior::Calme));
+        assert!(interaction_allowed(EntityBehavior::Flane));
+        assert!(interaction_allowed(EntityBehavior::Alerte { menace: 1 }));
+    }
+
+    #[test]
+    fn fuite_hostile_and_aterre_refuse_interaction() {
+        assert!(!interaction_allowed(EntityBehavior::Fuite { menace: 1 }));
+        assert!(!interaction_allowed(EntityBehavior::Hostile { cible: 1 }));
+        assert!(!interaction_allowed(EntityBehavior::ATerre));
+    }
+
+    #[test]
+    fn execute_transaction_calls_apply_when_the_target_is_interactible() {
+        let outcome = execute_transaction(EntityBehavior::Calme, || TransactionOutcome {
+            ok: true,
+            payload: vec![1, 2, 3],
+        });
+        assert_eq!(
+            outcome,
+            TransactionOutcome {
+                ok: true,
+                payload: vec![1, 2, 3]
+            }
+        );
+    }
+
+    #[test]
+    fn execute_transaction_never_calls_apply_when_the_target_refuses() {
+        // La closure ne doit JAMAIS s'exécuter si la cible refuse — vérifié en la faisant paniquer
+        // si elle est appelée : un test qui passerait silencieusement sans cette assertion ne
+        // prouverait rien sur l'ORDRE des opérations.
+        let outcome = execute_transaction(EntityBehavior::ATerre, || {
+            panic!("apply ne doit jamais être appelée si interaction_allowed est faux")
+        });
+        assert_eq!(outcome.ok, false);
+        assert!(outcome.payload.is_empty());
+    }
+}
+
+/// Encodage `EntityBehavior` -> `NpcState.behavior:ubyte` (protocol.fbs, doc comment sur `NpcState` :
+/// 0=Calme 1=Flane 2=Alerte 3=Fuite 4=Hostile 5=ATerre). `EntityBehavior` porte des données sur
+/// certains variants (`ClientId` pour Alerte/Fuite/Hostile) et n'a pas de `#[repr(u8)]` — un `as u8`
+/// nu ne compile pas dessus, d'où cette fonction dédiée. Match exhaustif SANS bras `_` : si un futur
+/// plan ajoute un variant à `EntityBehavior`, cette fonction cesse de compiler tant qu'elle n'est pas
+/// mise à jour — propriété délibérée, ne pas ajouter de bras générique pour "corriger" une erreur de
+/// compilation ici.
+pub fn behavior_to_u8(b: EntityBehavior) -> u8 {
+    match b {
+        EntityBehavior::Calme => 0,
+        EntityBehavior::Flane => 1,
+        EntityBehavior::Alerte { .. } => 2,
+        EntityBehavior::Fuite { .. } => 3,
+        EntityBehavior::Hostile { .. } => 4,
+        EntityBehavior::ATerre => 5,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn behavior_to_u8_matches_the_documented_protocol_encoding() {
+        assert_eq!(behavior_to_u8(EntityBehavior::Calme), 0);
+        assert_eq!(behavior_to_u8(EntityBehavior::Flane), 1);
+        assert_eq!(behavior_to_u8(EntityBehavior::Alerte { menace: 1 }), 2);
+        assert_eq!(behavior_to_u8(EntityBehavior::Fuite { menace: 1 }), 3);
+        assert_eq!(behavior_to_u8(EntityBehavior::Hostile { cible: 1 }), 4);
+        assert_eq!(behavior_to_u8(EntityBehavior::ATerre), 5);
+    }
+
+    #[test]
+    fn default_behavior_is_calme() {
+        assert_eq!(EntityBehavior::default(), EntityBehavior::Calme);
+    }
+
+    #[test]
+    fn alerte_and_fuite_carry_the_threat_id() {
+        let b = EntityBehavior::Alerte { menace: 42 };
+        assert_eq!(b, EntityBehavior::Alerte { menace: 42 });
+        assert_ne!(b, EntityBehavior::Alerte { menace: 43 });
+    }
+
+    #[test]
+    fn hostile_carries_the_target_id() {
+        let b = EntityBehavior::Hostile { cible: 7 };
+        assert_eq!(b, EntityBehavior::Hostile { cible: 7 });
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    #[test]
+    fn new_record_starts_calme_and_unowned() {
+        let r = NpcRecord::new(1_000_000, 7);
+        assert_eq!(r.behavior, EntityBehavior::Calme);
+        assert_eq!(r.owner, 0);
+        assert_eq!(r.archetype, 7);
+    }
+
+    #[test]
+    fn a_threat_interaction_triggers_fuite_with_the_reporter_as_threat() {
+        let mut r = NpcRecord::new(1_000_000, 7);
+        r.apply_interaction(55, 0);
+        assert_eq!(r.behavior, EntityBehavior::Fuite { menace: 55 });
+    }
+
+    #[test]
+    fn a_non_threat_interaction_does_not_change_behavior() {
+        let mut r = NpcRecord::new(1_000_000, 7);
+        r.apply_interaction(55, 2); // kind=2=Interagit
+        assert_eq!(r.behavior, EntityBehavior::Calme);
+    }
+
+    #[test]
+    fn a_second_threat_interaction_updates_the_threat_id() {
+        let mut r = NpcRecord::new(1_000_000, 7);
+        r.apply_interaction(55, 0);
+        r.apply_interaction(99, 0);
+        assert_eq!(r.behavior, EntityBehavior::Fuite { menace: 99 });
+    }
+}
+
+#[cfg(test)]
+mod brique_engine_tests {
+    use super::*;
+    use crate::npc_catalog::parse_and_validate;
+
+    fn archetype_with_briques(briques: &[&str]) -> crate::npc_catalog::NpcArchetypeConfig {
+        let toml = format!(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"test\"\nbriques = [{}]\n",
+            briques
+                .iter()
+                .map(|b| format!("\"{b}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        parse_and_validate(&toml)
+            .unwrap()
+            .archetype(1)
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn flaner_sur_place_brique_moves_calme_npc_to_flane() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = archetype_with_briques(&["flaner-sur-place"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(r.behavior, EntityBehavior::Flane);
+    }
+
+    #[test]
+    fn rester_statique_brique_never_changes_calme() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = archetype_with_briques(&["rester-statique"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(r.behavior, EntityBehavior::Calme);
+    }
+
+    #[test]
+    fn brique_tick_never_overrides_an_active_fuite_state() {
+        let mut r = NpcRecord::new(1, 1);
+        r.apply_interaction(99, 0); // déclenche Fuite
+        let archetype = archetype_with_briques(&["flaner-sur-place"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(
+            r.behavior,
+            EntityBehavior::Fuite { menace: 99 },
+            "une brique passive ne doit jamais écraser un état de peur en cours"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_brique_name_is_silently_ignored_not_a_panic() {
+        let mut r = NpcRecord::new(1, 1); // brique nav, pas encore implémentée ici
+        let archetype = archetype_with_briques(&["marcher-route"]);
+        r.apply_brique_tick(&archetype); // ne doit pas paniquer
+        assert_eq!(r.behavior, EntityBehavior::Calme);
+    }
+}

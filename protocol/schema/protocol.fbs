@@ -10,7 +10,11 @@ struct Vec3 { x:float; y:float; z:float; }
 // plutôt qu'un comportement indéfini (désérialisation qui dérive silencieusement au fil des
 // évolutions du schéma). 0 par défaut FlatBuffers si absent (client trop ancien pour connaître le
 // champ) — mismatch avec la version courante dès qu'elle dépasse 0.
-table Join { display_name:string; token:string; protocol_version:uint; }
+// `hwid_hash` : identifiant matériel HACHÉ+salé côté launcher (jamais l'identifiant brut — voir
+// `ban_store.rs`), schéma de TRAVAIL (pas encore figé/régénéré côté fork C++, sous-projet C robustesse
+// opérationnelle palier 2). Chaîne vide par défaut FlatBuffers si absent (client qui ne le pose pas
+// encore) — vérifié contre le vecteur `hwid_hash` d'un `BanRecord` au Join, cf. `gateway.rs`.
+table Join { display_name:string; token:string; protocol_version:uint; hwid_hash:string; }
 
 // locomotion : enum EXTENSIBLE en ubyte (append-only) — 0=Idle 1=Walk 2=Run 3=Sprint
 //              4=CrouchIdle 5=CrouchMove 6=InAir/Jump (documenté, jamais re-gelé).
@@ -22,7 +26,17 @@ table PositionUpdate { position:Vec3; yaw:float; locomotion:ubyte; move_dir:ubyt
 // sustained : pose/émote TENUE en cours (id d'émote natif), 0 = aucune. N'existe que côté
 // PlayerState (le début/fin d'une pose tenue passe par EmoteReport, pas PositionUpdate).
 table PlayerState { id:ulong; position:Vec3; yaw:float; locomotion:ubyte; move_dir:ubyte; flags:ubyte; sustained:uint; }
-table Snapshot { tick:ulong; players:[PlayerState]; }
+
+// PNJ orchestré serveur (fondation nav-indépendante, palier 2). Réutilise le triplet biped d'A
+// (locomotion/move_dir/flags/sustained) — même canal cosmétique que PlayerState, id dans une plage
+// réservée disjointe des connexions réelles (jamais un id de session). `behavior` : voir
+// EntityBehavior (npc.rs) — encodage 0=Calme 1=Flane 2=Alerte 3=Fuite 4=Hostile 5=ATerre, la cible
+// éventuelle (menace/cible) N'EST PAS transportée ici (c'est un détail serveur, le client n'a besoin
+// que de savoir QUOI animer, pas POURQUOI) — cf. principe canal cosmétique/état canonique séparé.
+table NpcState { id:ulong; archetype:uint; position:Vec3; yaw:float;
+                 locomotion:ubyte; move_dir:ubyte; flags:ubyte; sustained:uint; behavior:ubyte; }
+
+table Snapshot { tick:ulong; players:[PlayerState]; npcs:[NpcState]; }
 
 // Client -> serveur, one-shot (saut, tir, reload, dodge, et émote one-shot type coucou).
 // action = enum extensible ; param = contexte (arme, id émote one-shot...).
@@ -30,6 +44,29 @@ table PlayerActionReport { action:ubyte; param:uint; }
 
 // Client -> serveur. Pose TENUE uniquement : start=true la commence, start=false la termine.
 table EmoteReport { emote:uint; start:bool; }
+
+// Rapport d'interaction client -> serveur : « le joueur a fait X sur l'entité #N » (spec modèle
+// serveur §1). kind : 0=Menace/attaque 1=Parle 2=Interagit (extensible) ; param = contexte
+// (dégâts, id dialogue…). Arbitré par le serveur (NpcRecord::apply_interaction, npc.rs) —
+// anti-triche gratuit : un client ne peut jamais forcer directement l'état comportemental d'un PNJ,
+// seulement RAPPORTER une interaction que le serveur choisit ou non de traduire en transition FSM.
+table EntityInteraction { target:ulong; kind:ubyte; param:uint; }
+
+// Enveloppe de session d'interaction (fondation d'interaction, palier 2, Phase 3.1). session_id
+// arbitre la concurrence (deux joueurs au même comptoir) et le timeout — géré par
+// interaction_session.rs, jamais interprété côté client au-delà du renvoyer tel quel dans
+// InteractionChoice. `payload` OPAQUE (spec §7 : « payload opaque de l'enveloppe... zéro re-gel ») —
+// ni ce schéma ni le serveur transport n'interprètent son contenu, seul un futur plan de contenu
+// (économie/dialogue) le fera. `ui_kind` sélectionne l'écran tessera-uikit côté client (vendeur/
+// dialogue/contrat...), catalogue non figé ici (contenu différé, spec §9).
+table InteractionOpen { session_id:ulong; target:ulong; ui_kind:ubyte; payload:[ubyte]; }
+// Client -> serveur : réponse à une InteractionOpen. `choice`/`param` opaques, interprétés par le
+// contenu réel (différé) ; ce plan ne transporte que la plomberie.
+table InteractionChoice { session_id:ulong; choice:ubyte; param:uint; }
+// Verdict serveur (spec §2 : succès, OU refus avec raison IN-FICTION portée dans `payload`, jamais
+// un code d'erreur générique). `ok=false` avec payload vide = refus sans détail transporté (ex.
+// session inconnue/expirée) ; `ok=false` avec payload = raison encodée par le contenu réel (différé).
+table InteractionResult { session_id:ulong; ok:bool; payload:[ubyte]; }
 
 // Serveur -> clients proches (relais filtré par AoI, porte l'identité de l'acteur).
 // kind : 0=Action (extensible, réservé pour de futurs types d'événement) — une pose TENUE
@@ -73,6 +110,10 @@ table CommandResult { success:bool; message:string; }
 // changement affectant ce compte, sans reconnexion nécessaire.
 table PermissionSync { nodes:[string]; }
 
+// File d'attente côté launcher (sous-projet C) — position et estimation, consommé AVANT même
+// de lancer le jeu. Pas d'écran d'attente in-game en v1.
+table QueueStatus { position:uint; eta_seconds:uint; }
+
 // Départ volontaire (déconnexion propre, ex. joueur qui quitte via un menu) — distinct d'une
 // coupure réseau/crash (`TransportEvent::Disconnected`, jamais annoncé par le client). Permet au
 // Gateway de libérer immédiatement le slot du joueur plutôt que d'attendre l'expiration d'un
@@ -96,8 +137,8 @@ table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
 // inter-joueurs au franchissement). Reste en FIN d'union, après PositionCorrection.
 table ShardAssignment { authoritative:string; overlaps:[string]; }
 
-union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult }
+union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter, EntityInteraction, InteractionChoice }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult, QueueStatus, InteractionOpen, InteractionResult }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }

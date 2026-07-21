@@ -359,6 +359,78 @@ services:
       timeout: 5s
       retries: 10
 
+  # --- Observabilité (Prometheus/Grafana/Alertmanager, sous-projet C, Task 6) ---
+  # Scrape le Gateway sur son port métriques 9100 (non publié via `ports:`, mais joignable depuis
+  # `prometheus` par nom de service DNS Compose sur le même réseau — voir observability/prometheus.yml).
+  # Pas de `ports:` publié ici non plus par défaut : ce stack est pensé pour un accès interne
+  # (port-forward SSH / VPN) plutôt qu'exposé publiquement comme le port 9103 (logs en direct) —
+  # à revisiter explicitement si un accès public est un jour souhaité (mêmes réserves que 9103,
+  # voir CLAUDE.md).
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - tessera-prometheus-data:/prometheus
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-256m}
+    cpus: ${PROMETHEUS_CPUS:-0.5}
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      - GF_SECURITY_ADMIN_USER=${TESSERA_GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${TESSERA_GRAFANA_ADMIN_PASSWORD:?variable requise}
+    volumes:
+      - ./observability/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/tessera.json:ro
+      - ./observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/tessera.yml:ro
+      - tessera-grafana-data:/var/lib/grafana
+    mem_limit: ${GRAFANA_MEM_LIMIT:-256m}
+    cpus: ${GRAFANA_CPUS:-0.5}
+    depends_on:
+      - prometheus
+
+  # ⚠️ Alertmanager NE substitue PAS lui-même `${VAR}` dans son propre YAML (pas d'interpolation
+  # d'env var native — issue amont prometheus/alertmanager#2818, jamais mergée ; confirmé en local
+  # le 2026-07-20 : lancé tel quel, le conteneur crash-loop avec `invalid URL: unsupported scheme
+  # "" for URL`, `${TESSERA_ALERTMANAGER_DISCORD_WEBHOOK}` étant lu comme une URL littérale). Le
+  # gabarit versionné est donc monté sous `alertmanager.yml.tmpl` (jamais directement au chemin
+  # `--config.file` attendu), et l'entrypoint ci-dessous le substitue via `sed` (busybox, présent
+  # dans cette image — pas de dépendance à `envsubst`/`gettext`, absent de l'image `prom/alertmanager`
+  # de base, vérifié en local) vers un fichier généré dans le volume `/alertmanager` avant d'exec le
+  # vrai binaire. Écarté : un proxy webhook tiers (`alertmanager-discord`) — ajoute un service et une
+  # image externe pour un problème que `sed` résout en une ligne ici.
+  alertmanager:
+    image: prom/alertmanager:latest
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      - TESSERA_ALERTMANAGER_DISCORD_WEBHOOK=${TESSERA_ALERTMANAGER_DISCORD_WEBHOOK:?variable requise}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      # `$$` (pas `$`) devant CHAQUE référence à la variable : Compose interpole lui-même tout
+      # `${VAR}`/`$VAR` non échappé dans ce bloc AVANT de l'écrire dans le conteneur (piège trouvé
+      # en local le 2026-07-20 — `docker compose config` montrait le webhook déjà en clair dans le
+      # pattern sed côté hôte). `$$VAR` dans le YAML devient littéralement `$VAR` une fois passé
+      # au conteneur, où c'est alors le shell QUI L'INTERPRÈTE (comportement voulu, une seule fois,
+      # côté conteneur).
+      - |
+        set -e
+        sed "s#\$${TESSERA_ALERTMANAGER_DISCORD_WEBHOOK}#$$TESSERA_ALERTMANAGER_DISCORD_WEBHOOK#g" \
+          /etc/alertmanager/alertmanager.yml.tmpl > /alertmanager/alertmanager.yml
+        exec /bin/alertmanager --config.file=/alertmanager/alertmanager.yml --storage.path=/alertmanager
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml.tmpl:ro
+      - tessera-alertmanager-data:/alertmanager
+    mem_limit: ${ALERTMANAGER_MEM_LIMIT:-128m}
+    cpus: ${ALERTMANAGER_CPUS:-0.25}
+
 volumes:
   tessera-players:
   tessera-postgres-data:
+  tessera-prometheus-data:
+  tessera-grafana-data:
+  tessera-alertmanager-data:

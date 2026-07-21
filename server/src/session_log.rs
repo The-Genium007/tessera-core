@@ -55,6 +55,17 @@ pub enum SessionEvent {
         actor: String,
         action: String,
     },
+    /// Résolution d'une session d'interaction (fondation d'interaction, palier 2) — succès ou refus,
+    /// la « règle du log RP » (spec fondation d'interaction §2/§7 : toute transaction résolue est
+    /// journalisée). `payload_len` (pas le payload lui-même, opaque et potentiellement non-lisible en
+    /// JSON) documente qu'une réponse a été transportée sans en fuiter le contenu dans le journal.
+    InteractionResolved {
+        session_id: u64,
+        actor: u64,
+        target: u64,
+        ok: bool,
+        payload_len: usize,
+    },
 }
 
 /// Une ligne du journal : horodatage unix (ms) + l'événement aplati (clé "event" + champs).

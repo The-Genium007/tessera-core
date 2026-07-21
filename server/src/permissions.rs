@@ -227,10 +227,7 @@ mod tests {
 
     #[test]
     fn reads_the_slot_count_from_a_matching_node() {
-        assert_eq!(
-            max_character_slots(&["character.slots.5".to_string()]),
-            5
-        );
+        assert_eq!(max_character_slots(&["character.slots.5".to_string()]), 5);
     }
 
     #[test]
@@ -244,7 +241,10 @@ mod tests {
     #[test]
     fn takes_the_maximum_across_multiple_matching_nodes() {
         assert_eq!(
-            max_character_slots(&["character.slots.3".to_string(), "character.slots.5".to_string()]),
+            max_character_slots(&[
+                "character.slots.3".to_string(),
+                "character.slots.5".to_string()
+            ]),
             5,
             "un compte cumulant plusieurs sources garde le plafond le plus généreux"
         );

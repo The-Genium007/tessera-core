@@ -108,12 +108,14 @@ const BUFFER_RADIUS: f32 = 25.0;
 fn encode_join(name: &str) -> Vec<u8> {
     let mut b = FlatBufferBuilder::new();
     let n = b.create_string(name);
+    let hwid_hash = b.create_string("");
     let join = Join::create(
         &mut b,
         &JoinArgs {
             display_name: Some(n),
             token: None,
             protocol_version: server::gateway_routing::CURRENT_PROTOCOL_VERSION,
+            hwid_hash: Some(hwid_hash),
         },
     );
     let env = ClientEnvelope::create(
@@ -263,12 +265,12 @@ async fn run_test() {
     }
 
     tokio::spawn(async move {
-        server::shard_main(shard_a_addr, 1000.0, "127.0.0.1:0")
+        server::shard_main(shard_a_addr, 1000.0, "127.0.0.1:0", None, None)
             .await
             .expect("shard A ne devrait pas échouer");
     });
     tokio::spawn(async move {
-        server::shard_main(shard_b_addr, 1000.0, "127.0.0.1:0")
+        server::shard_main(shard_b_addr, 1000.0, "127.0.0.1:0", None, None)
             .await
             .expect("shard B ne devrait pas échouer");
     });
@@ -309,6 +311,7 @@ async fn run_test() {
             false,
             std::collections::HashSet::new(),
             hot_state,
+            None, // serveur privé : pas de BanStore Postgres (cf. bin/gateway.rs)
             None, // serveur privé : pas de store personnage (flux d'arrivée inerte)
         )
         .await

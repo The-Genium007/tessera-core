@@ -1,0 +1,16 @@
+# Manifeste de PNJ NOMINATIFS (fondation d'interaction, palier 2, Phase 3.1) — distinct du
+# catalogue d'archétypes de la foule anonyme (npc-catalog.example.toml). Un PNJ nominatif a un
+# id-manifeste STABLE (clé de persistance future, spec §6), pas géré par PopulationDirector.
+format_version = 1
+
+[[pnj]]
+id = "ripperdoc-watson-01"
+archetype = "ripperdoc_male_a"
+position = [120.5, 340.2, 11.0]
+briques = ["rester-statique", "vendre", "reagir-dialogue"]
+
+[[pnj]]
+id = "fixer-corpo-plaza-01"
+archetype = "fixer_female_a"
+position = [-45.0, 220.0, 8.5]
+briques = ["rester-statique", "donner-quete"]

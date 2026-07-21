@@ -62,6 +62,10 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
         &SnapshotArgs {
             tick,
             players: Some(players),
+            // La fusion inter-shard ne porte aujourd'hui que les joueurs (dédup par id) — les PNJ
+            // n'ont pas de présence en zone tampon multi-shard à ce stade (fondation protocole,
+            // Task 5 ; câblage réel à Task 6).
+            npcs: None,
         },
     );
     let env = ServerEnvelope::create(
@@ -107,6 +111,7 @@ mod tests {
             &SnapshotArgs {
                 tick,
                 players: Some(pv),
+                npcs: None,
             },
         );
         let env = ServerEnvelope::create(

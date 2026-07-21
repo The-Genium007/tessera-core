@@ -42,12 +42,65 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(1);
         });
 
-    let manifest =
-        server::manifest::load(std::path::Path::new(manifest_path)).unwrap_or_else(|e| {
-            eprintln!("manifeste invalide ({manifest_path}): {e}");
+    let manifest_path_buf = std::path::Path::new(manifest_path);
+    let manifest = server::manifest::load(manifest_path_buf).unwrap_or_else(|e| {
+        eprintln!("manifeste invalide ({manifest_path}): {e}");
+        std::process::exit(1);
+    });
+    let aoi_radius = server::manifest::shard_aoi_radius(&manifest);
+
+    // Comportement historique préservé : `[runtime.population.target_density]` absent ou vide (le
+    // défaut sûr, cf. manifest.rs) = pas de PNJ sur ce Shard, exactement comme avant l'existence de
+    // cette fonctionnalité (fondation nav-indépendante, sous-projet PNJ, palier 2).
+    let population = if manifest.runtime.population.target_density.is_empty() {
+        None
+    } else {
+        // Résolu depuis le répertoire du manifeste, même convention que
+        // `TopologyConfig::authority_artifact` (cf. `manifest.rs::load_authority_topology`) : le
+        // catalogue PNJ est un fichier local versionné à côté du manifeste, pas un chemin absolu
+        // codé en dur.
+        let manifest_dir = manifest_path_buf.parent().unwrap_or_else(|| {
+            eprintln!("manifeste invalide ({manifest_path}): chemin sans répertoire parent");
             std::process::exit(1);
         });
-    let aoi_radius = server::manifest::shard_aoi_radius(&manifest);
+        let catalog_path = manifest_dir.join("npc-catalog.toml");
+        let catalog = server::npc_catalog::load(&catalog_path).unwrap_or_else(|e| {
+            eprintln!("catalogue PNJ invalide ({}): {e}", catalog_path.display());
+            std::process::exit(1);
+        });
+        let director = server::population_director::PopulationDirector::new(
+            manifest.runtime.population.target_density.clone(),
+        );
+        Some((catalog, director))
+    };
+
+    // Comportement historique préservé : `named_npc_manifest_path` absent = aucun PNJ nominatif
+    // sur ce Shard (le défaut sûr, cf. manifest.rs), exactement comme avant l'existence de cette
+    // fonctionnalité (fondation d'interaction, sous-projet Phase 3.1, palier 2).
+    let named_npc = manifest
+        .runtime
+        .named_npc_manifest_path
+        .as_ref()
+        .map(|path| {
+            // Résolu depuis le répertoire du manifeste, même convention que le catalogue PNJ de foule
+            // ci-dessus / `TopologyConfig::authority_artifact` : un fichier local versionné à côté du
+            // manifeste, pas un chemin absolu codé en dur.
+            let manifest_dir = manifest_path_buf.parent().unwrap_or_else(|| {
+                eprintln!("manifeste invalide ({manifest_path}): chemin sans répertoire parent");
+                std::process::exit(1);
+            });
+            let catalog_path = manifest_dir.join(path);
+            let catalog = server::named_npc_catalog::load(&catalog_path).unwrap_or_else(|e| {
+                eprintln!(
+                    "manifeste PNJ nominatif invalide ({}): {e}",
+                    catalog_path.display()
+                );
+                std::process::exit(1);
+            });
+            let registry = server::named_npc_registry::NamedNpcRegistry::from_catalog(&catalog);
+            (catalog, registry)
+        });
+
     tracing::info!("Shard démarré pour le groupe {group_id} (écoute {addr})");
-    server::shard_main(&addr, aoi_radius, &metrics_addr).await
+    server::shard_main(&addr, aoi_radius, &metrics_addr, population, named_npc).await
 }

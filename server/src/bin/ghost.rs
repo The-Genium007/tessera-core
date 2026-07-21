@@ -65,12 +65,14 @@ fn main() {
         if connected && !join_sent {
             let mut b = FlatBufferBuilder::new();
             let name = b.create_string("Fantome-Tessera");
+            let hwid_hash = b.create_string("");
             let join = Join::create(
                 &mut b,
                 &JoinArgs {
                     display_name: Some(name),
                     token: None,
                     protocol_version: server::gateway_routing::CURRENT_PROTOCOL_VERSION,
+                    hwid_hash: Some(hwid_hash),
                 },
             );
             let env = ClientEnvelope::create(

@@ -99,13 +99,16 @@ fn sanitize_display_name(raw: &str) -> String {
 }
 
 /// Décode un `ClientEnvelope` client ; si c'est un `Join`, renvoie `(display_name nettoyé, token,
-/// protocol_version)` (voir `sanitize_display_name` — le nom brut n'est jamais fiable, il vient du
-/// réseau). `token` est renvoyé tel quel, chaîne vide si absent (défaut FlatBuffers) — sa
-/// vérification (JWT ZITADEL, requise seulement si `identity.public = true`) vit dans
+/// protocol_version, hwid_hash)` (voir `sanitize_display_name` — le nom brut n'est jamais fiable,
+/// il vient du réseau). `token` est renvoyé tel quel, chaîne vide si absent (défaut FlatBuffers) —
+/// sa vérification (JWT ZITADEL, requise seulement si `identity.public = true`) vit dans
 /// `gateway::resolve_join_key`, pas ici : ce module reste pur décodage, sans connaissance du
 /// `JwksCache`. `protocol_version` vaut 0 si absent (client trop ancien pour connaître le champ) —
 /// sa comparaison à `CURRENT_PROTOCOL_VERSION` vit aussi côté `gateway.rs` (Task C3), pas ici.
-pub fn extract_join_fields(client_payload: &[u8]) -> Option<(String, String, u32)> {
+/// `hwid_hash` (Task 3, robustesse opérationnelle) vaut chaîne vide si absent (client qui ne le
+/// pose pas encore, ou schéma de travail non régénéré côté fork C++) — sa vérification contre les
+/// bans actifs vit aussi côté `gateway.rs`, pas ici.
+pub fn extract_join_fields(client_payload: &[u8]) -> Option<(String, String, u32, String)> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
     if env.msg_type() != ClientMsg::Join {
         return None;
@@ -116,7 +119,8 @@ pub fn extract_join_fields(client_payload: &[u8]) -> Option<(String, String, u32
         .map(sanitize_display_name)
         .unwrap_or_default();
     let token = join.token().unwrap_or_default().to_string();
-    Some((name, token, join.protocol_version()))
+    let hwid_hash = join.hwid_hash().unwrap_or_default().to_string();
+    Some((name, token, join.protocol_version(), hwid_hash))
 }
 
 /// Décode un `ClientEnvelope` client ; si c'est un `Leave` (départ volontaire, Task C3), renvoie
@@ -141,6 +145,31 @@ pub fn extract_admin_command(client_payload: &[u8]) -> Option<String> {
     }
     let cmd = env.msg_as_admin_command()?;
     cmd.text().map(|s| s.to_string())
+}
+
+/// Décode un `ClientEnvelope` client ; si c'est un `EntityInteraction` (fondation PNJ, palier 2),
+/// renvoie `(target, kind, param)` — l'entité visée, le type d'interaction rapporté (0=Menace/
+/// attaque 1=Parle 2=Interagit) et son contexte. L'arbitrage (traduire ou non en transition FSM)
+/// vit dans `NpcRecord::apply_interaction` (npc.rs), pas ici : ce module reste pur décodage.
+pub fn extract_entity_interaction(client_payload: &[u8]) -> Option<(u64, u8, u32)> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::EntityInteraction {
+        return None;
+    }
+    let ei = env.msg_as_entity_interaction()?;
+    Some((ei.target(), ei.kind(), ei.param()))
+}
+
+/// Décode un `ClientEnvelope` ; si c'est un `InteractionChoice` (fondation d'interaction, palier 2),
+/// renvoie `(session_id, choice, param)`. Pur décodage — l'arbitrage (session valide ? bon
+/// propriétaire ?) vit dans `interaction_session.rs`, pas ici.
+pub fn extract_interaction_choice(client_payload: &[u8]) -> Option<(u64, u8, u32)> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::InteractionChoice {
+        return None;
+    }
+    let ic = env.msg_as_interaction_choice()?;
+    Some((ic.session_id(), ic.choice(), ic.param()))
 }
 
 // ── Flux d'arrivée : dispatch personnage (palier 2, tranche A serveur) ────────────────────────
@@ -199,6 +228,69 @@ pub fn encode_character_result(success: bool, reason: &str) -> Vec<u8> {
         &ServerEnvelopeArgs {
             msg_type: ServerMsg::CharacterResult,
             msg: Some(res.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Construit le payload serveur d'un `InteractionOpen` (fondation d'interaction, palier 2 —
+/// ouverture de session). `payload` est copié tel quel (opaque, cf. commentaire du schéma) :
+/// ni ce module ni le schéma n'en interprètent le contenu.
+pub fn encode_interaction_open(
+    session_id: u64,
+    target: u64,
+    ui_kind: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    use protocol::{
+        InteractionOpen, InteractionOpenArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
+    };
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let payload_off = b.create_vector(payload);
+    let open = InteractionOpen::create(
+        &mut b,
+        &InteractionOpenArgs {
+            session_id,
+            target,
+            ui_kind,
+            payload: Some(payload_off),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::InteractionOpen,
+            msg: Some(open.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    b.finished_data().to_vec()
+}
+
+/// Construit le payload serveur d'un `InteractionResult` (fondation d'interaction, palier 2 —
+/// verdict de session). `ok=false` avec `payload` vide = refus sans détail transporté (session
+/// inconnue/expirée) ; `ok=false` avec `payload` = raison in-fiction encodée par le contenu réel
+/// (différé, cf. commentaire du schéma).
+pub fn encode_interaction_result(session_id: u64, ok: bool, payload: &[u8]) -> Vec<u8> {
+    use protocol::{
+        InteractionResult, InteractionResultArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
+    };
+    let mut b = flatbuffers::FlatBufferBuilder::new();
+    let payload_off = b.create_vector(payload);
+    let result = InteractionResult::create(
+        &mut b,
+        &InteractionResultArgs {
+            session_id,
+            ok,
+            payload: Some(payload_off),
+        },
+    );
+    let env = ServerEnvelope::create(
+        &mut b,
+        &ServerEnvelopeArgs {
+            msg_type: ServerMsg::InteractionResult,
+            msg: Some(result.as_union_value()),
         },
     );
     b.finish(env, None);
@@ -370,12 +462,14 @@ mod tests {
         let mut b = FlatBufferBuilder::new();
         let name = b.create_string(name);
         let token = token.map(|t| b.create_string(t));
+        let hwid_hash = b.create_string("");
         let join = Join::create(
             &mut b,
             &JoinArgs {
                 display_name: Some(name),
                 token,
                 protocol_version,
+                hwid_hash: Some(hwid_hash),
             },
         );
         let env = ClientEnvelope::create(
@@ -467,14 +561,20 @@ mod tests {
     fn extract_join_fields_reads_display_name_and_token() {
         assert_eq!(
             extract_join_fields(&client_join()),
-            Some(("v".to_string(), String::new(), CURRENT_PROTOCOL_VERSION))
+            Some((
+                "v".to_string(),
+                String::new(),
+                CURRENT_PROTOCOL_VERSION,
+                String::new()
+            ))
         );
         assert_eq!(
             extract_join_fields(&client_join_with_token("v", Some("jwt-abc"))),
             Some((
                 "v".to_string(),
                 "jwt-abc".to_string(),
-                CURRENT_PROTOCOL_VERSION
+                CURRENT_PROTOCOL_VERSION,
+                String::new()
             ))
         );
         assert_eq!(extract_join_fields(&client_position(1.0, 2.0, 3.0)), None); // pas un Join
@@ -485,8 +585,35 @@ mod tests {
     fn extract_join_fields_reads_the_protocol_version_field() {
         assert_eq!(
             extract_join_fields(&client_join_with_version("v", None, 999)),
-            Some(("v".to_string(), String::new(), 999))
+            Some(("v".to_string(), String::new(), 999, String::new()))
         );
+    }
+
+    #[test]
+    fn extract_join_fields_reads_hwid_hash() {
+        let mut b = flatbuffers::FlatBufferBuilder::new();
+        let name = b.create_string("Lucas");
+        let token = b.create_string("");
+        let hwid = b.create_string("hashed-value");
+        let join = Join::create(
+            &mut b,
+            &JoinArgs {
+                display_name: Some(name),
+                token: Some(token),
+                protocol_version: 1,
+                hwid_hash: Some(hwid),
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::Join,
+                msg: Some(join.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let (_, _, _, hwid_hash) = extract_join_fields(b.finished_data()).unwrap();
+        assert_eq!(hwid_hash, "hashed-value");
     }
 
     /// Octets d'un `Join` produits par le VRAI encodeur C++ du client (fork Cyberverse,
@@ -514,18 +641,22 @@ mod tests {
 
     #[test]
     fn server_decodes_a_join_encoded_by_the_real_cpp_client() {
-        let (name, token, version) =
+        let (name, token, version, hwid_hash) =
             extract_join_fields(CPP_CLIENT_JOIN_V1).expect("le Join du client C++ doit se décoder");
         assert_eq!(name, "Lucas");
         assert_eq!(token, ""); // pas encore câblé côté client (JWT ZITADEL à venir)
         assert_eq!(version, 1);
+        // `hwid_hash` n'existait pas dans le schéma au moment où ces octets ont été capturés
+        // (2026-07-15) — champ additif en fin de table, défaut FlatBuffers vide attendu tant que
+        // le fork C++ n'est pas régénéré pour le poser (Task 3, robustesse opérationnelle).
+        assert_eq!(hwid_hash, "");
     }
 
     #[test]
     fn the_cpp_client_join_is_accepted_by_the_version_check() {
         // Le test qui aurait attrapé le kick du 2026-07-15 avant qu'il n'atteigne un joueur :
         // ce sont les octets réels du client, passés à la fonction réelle qui kicke.
-        let (_, _, version) = extract_join_fields(CPP_CLIENT_JOIN_V1).unwrap();
+        let (_, _, version, _) = extract_join_fields(CPP_CLIENT_JOIN_V1).unwrap();
         assert_eq!(
             version, CURRENT_PROTOCOL_VERSION,
             "le client C++ publié doit parler la version courante — sinon le Gateway le kicke \
@@ -657,6 +788,60 @@ mod tests {
     }
 
     #[test]
+    fn extract_entity_interaction_reads_target_kind_and_param() {
+        let mut b = FlatBufferBuilder::new();
+        let ei = EntityInteraction::create(
+            &mut b,
+            &EntityInteractionArgs {
+                target: 42,
+                kind: 1,
+                param: 7,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::EntityInteraction,
+                msg: Some(ei.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        assert_eq!(
+            extract_entity_interaction(b.finished_data()),
+            Some((42, 1, 7))
+        );
+        assert_eq!(extract_entity_interaction(&client_join()), None); // pas un EntityInteraction
+        assert_eq!(extract_entity_interaction(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
+    fn extract_interaction_choice_reads_session_id_choice_and_param() {
+        let mut b = FlatBufferBuilder::new();
+        let ic = InteractionChoice::create(
+            &mut b,
+            &InteractionChoiceArgs {
+                session_id: 99,
+                choice: 2,
+                param: 5,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::InteractionChoice,
+                msg: Some(ic.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        assert_eq!(
+            extract_interaction_choice(b.finished_data()),
+            Some((99, 2, 5))
+        );
+        assert_eq!(extract_interaction_choice(&client_join()), None); // pas un InteractionChoice
+        assert_eq!(extract_interaction_choice(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
     fn extract_create_character_reads_the_pseudonym() {
         let mut b = FlatBufferBuilder::new();
         let p = b.create_string("Nyx");
@@ -719,6 +904,29 @@ mod tests {
         let res = env.msg_as_character_result().unwrap();
         assert!(!res.success());
         assert_eq!(res.reason(), Some("pseudonym_taken"));
+    }
+
+    #[test]
+    fn encode_interaction_open_roundtrips() {
+        let bytes = encode_interaction_open(7, 42, 1, &[1, 2, 3]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::InteractionOpen);
+        let open = env.msg_as_interaction_open().unwrap();
+        assert_eq!(open.session_id(), 7);
+        assert_eq!(open.target(), 42);
+        assert_eq!(open.ui_kind(), 1);
+        assert_eq!(open.payload().unwrap().bytes(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn encode_interaction_result_roundtrips() {
+        let bytes = encode_interaction_result(7, false, &[9]);
+        let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
+        assert_eq!(env.msg_type(), protocol::ServerMsg::InteractionResult);
+        let res = env.msg_as_interaction_result().unwrap();
+        assert_eq!(res.session_id(), 7);
+        assert!(!res.ok());
+        assert_eq!(res.payload().unwrap().bytes(), &[9]);
     }
 
     #[test]

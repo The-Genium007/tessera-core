@@ -565,6 +565,7 @@ pub fn cleanup_client_state(
     display_names: &mut HashMap<u64, String>,
     last_pos: &mut HashMap<u64, [f32; 3]>,
     last_pos_at: &mut HashMap<u64, std::time::Instant>,
+    last_hot_state_write: &mut HashMap<u64, std::time::Instant>,
     bypass_warned_at: &mut HashMap<u64, std::time::Instant>,
     anomaly_trackers: &mut HashMap<u64, AnomalyTracker>,
     ranks: &mut HashMap<u64, crate::handoff::Rank>,
@@ -590,6 +591,7 @@ pub fn cleanup_client_state(
     display_names.remove(&cid);
     last_pos.remove(&cid);
     last_pos_at.remove(&cid);
+    last_hot_state_write.remove(&cid);
     bypass_warned_at.remove(&cid);
     anomaly_trackers.remove(&cid);
     ranks.remove(&cid);
@@ -804,6 +806,10 @@ pub async fn gateway_main(
     whitelist_enabled: bool,
     whitelist_names: std::collections::HashSet<String>,
     hot_state: crate::hot_state_cache::HotStateCache,
+    // `None` sur serveur privé (pas de Postgres, cf. `bin/gateway.rs`) : le check ban au Join et
+    // la persistance `ban`/`unban` sont alors des no-op — comportement inchangé pour ce cas.
+    // `Some((store, bans_actifs_charges_au_boot))` sur serveur public.
+    mut ban_store: Option<(crate::ban_store::BanStore, Vec<crate::ban_store::BanRecord>)>,
     // Store personnage (flux d'arrivée, palier 2). `None` sur un serveur privé (FileStore,
     // pas de Postgres) — le flux personnage est alors inerte : aucun `CharacterList` n'est
     // envoyé et les messages `CreateCharacter`/`SelectCharacter`/`DeleteCharacter` restent sans
@@ -832,6 +838,15 @@ pub async fn gateway_main(
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::time::Duration;
+
+    // Cache RAM des bans actifs, vérifié à chaque Join (voir plus bas) — peuplé une fois ici
+    // depuis ce que `bin/gateway.rs` a chargé au boot (`BanStore::load_all_active_async`), jamais
+    // relu depuis Postgres par connexion. Vide (donc aucun Join jamais refusé pour ban) si
+    // `ban_store` est `None` (serveur privé).
+    let mut bans: Vec<crate::ban_store::BanRecord> = ban_store
+        .as_mut()
+        .map(|(_, loaded)| std::mem::take(loaded))
+        .unwrap_or_default();
 
     let mut shards: HashMap<String, ShardLink> = HashMap::new();
     let mut loader = ShardLoader::new();
@@ -867,6 +882,12 @@ pub async fn gateway_main(
     // Horodatage de la dernière PositionUpdate ACCEPTÉE par client (absent tant qu'aucune
     // position n'a encore été acceptée depuis le Join — sert de garde anti-triche).
     let mut last_pos_at: HashMap<u64, std::time::Instant> = HashMap::new();
+    // Horodatage de la dernière écriture HotStateCache par client (throttle, Task 7 robustesse
+    // opérationnelle) : sans ça, chaque PositionUpdate acceptée déclenche une écriture Redis —
+    // à la fréquence d'un tick client, ça martèle le Redis Gateway-central partagé pour rien
+    // (le TTL de reprise, 120s, tolère largement un rafraîchissement bien moins fréquent).
+    let mut last_hot_state_write: HashMap<u64, std::time::Instant> = HashMap::new();
+    const HOT_STATE_WRITE_INTERVAL: Duration = Duration::from_secs(2);
     // Dernière fois qu'on a loggé le contournement anti-triche GameMaster pour ce client (2026-07-07,
     // rapporté en playtest) : sans throttle, un GameMaster en mouvement spamme un WARN à chaque
     // PositionUpdate (plusieurs par seconde) — noie le reste des logs, y compris les Handoff qu'on
@@ -880,6 +901,13 @@ pub async fn gateway_main(
     let mut residence: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
     // Fenêtre de rate-limit par client (audit prod 2026-07-03 §5.4).
     let mut rate_states: HashMap<u64, RateLimitState> = HashMap::new();
+    // Mode drain (Task 5, robustesse opérationnelle sous-projet C) : refuse tout nouveau Join
+    // quand actif ; les clients déjà connectés ne sont pas déconnectés. Togglable manuellement
+    // pour ce plan (pas de commande admin `/drain` branchée ici — extension naturelle non
+    // couverte en détail dans cette tâche, qui retirera ce `#[allow(unused_mut)]` en câblant un
+    // vrai toggle, ex. `maintenance::MaintenanceSchedule::should_drain_now`).
+    #[allow(unused_mut)]
+    let mut drain_mode = false;
 
     // Machine à états d'arrivée (flux d'arrivée, palier 2). Un client passe en `AwaitingSelection`
     // dès son Join réussi (on lui envoie alors la liste de ses personnages) et n'entre en jeu
@@ -1105,6 +1133,7 @@ pub async fn gateway_main(
                         &mut display_names,
                         &mut last_pos,
                         &mut last_pos_at,
+                        &mut last_hot_state_write,
                         &mut bypass_warned_at,
                         &mut anomaly_trackers,
                         &mut ranks,
@@ -1126,8 +1155,22 @@ pub async fn gateway_main(
             // PositionUpdate → placement (topologie + rang) et mémorisation de la dernière position.
             let mut placement = None;
             if let TransportEvent::Message { data, .. } = &ev {
-                if let Some((name, token, protocol_version)) = extract_join_fields(data) {
+                if let Some((name, token, protocol_version, hwid_hash)) = extract_join_fields(data)
+                {
                     if !name.is_empty() || !token.is_empty() {
+                        // Mode drain (Task 5, robustesse opérationnelle sous-projet C) : refuse
+                        // tout nouveau Join AVANT toute autre vérification — un serveur en
+                        // maintenance ne doit consommer ni slot ni cycle de résolution d'identité
+                        // pour une connexion qu'il va rejeter de toute façon.
+                        if drain_mode {
+                            client.send(
+                                cid,
+                                &encode_kicked("serveur en maintenance, réessayez plus tard"),
+                            );
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
                         if let Err(reason) = resolve_protocol_version(protocol_version) {
                             tracing::warn!(
                                 client = cid,
@@ -1174,6 +1217,30 @@ pub async fn gateway_main(
                                 continue;
                             }
                         };
+                        // Check ban (Task 3, robustesse opérationnelle sous-projet C) : AVANT la
+                        // vérification de capacité — un compte/HWID banni ne doit pas consommer un
+                        // slot ni jamais atteindre `reject_join_if_server_full`. `sub_for_ban` est
+                        // `effective_key` (le `sub` OIDC vérifié sur serveur public, cf.
+                        // `resolve_join_key` ; `None` n'a pas de sens ici car `effective_key` est
+                        // toujours renseigné — display_name en repli sur serveur privé, où `bans`
+                        // est de toute façon vide). LIMITE ASSUMÉE : aucune corrélation IP au Join
+                        // dans cette tâche — le `Transport` actuel (`transport.rs`/`gns_transport.rs`,
+                        // trait `poll`/`send`/`disconnect`) n'expose aucune IP source par `ClientId`.
+                        // Le vecteur `ip` d'un `BanRecord` reste stocké et utilisable pour un futur
+                        // enforcement quand cette API existera, mais n'est PAS vérifié ici.
+                        let sub_for_ban: Option<&str> = Some(effective_key.as_str());
+                        let ban_match = bans.iter().find(|b| {
+                            (b.subject.is_some() && b.subject.as_deref() == sub_for_ban)
+                                || (b.hwid_hash.is_some()
+                                    && b.hwid_hash.as_deref() == Some(hwid_hash.as_str()))
+                        });
+                        if let Some(ban) = ban_match {
+                            tracing::warn!(client = cid, reason = %ban.reason, "kick : banni");
+                            client.send(cid, &encode_kicked(&format!("banni : {}", ban.reason)));
+                            client.disconnect(cid);
+                            rate_states.remove(&cid);
+                            continue;
+                        }
                         if reject_join_if_server_full(
                             keys.contains_key(&cid),
                             keys.len(),
@@ -1364,13 +1431,24 @@ pub async fn gateway_main(
                     // Écriture hot-state (Décision 3, design stockage 2026-07-09) : à chaque
                     // PositionUpdate ACCEPTÉ, taguée par la clé effective (jamais display_name).
                     // Un client sans clé effective connue (ne devrait pas arriver après un Join
-                    // réussi) est silencieusement ignoré plutôt que de paniquer.
+                    // réussi) est silencieusement ignoré plutôt que de paniquer. Throttlée à
+                    // HOT_STATE_WRITE_INTERVAL (Task 7 robustesse opérationnelle) : le Redis
+                    // Gateway-central est partagé entre tous les clients, pas la peine de
+                    // l'écrire à chaque tick quand le TTL de reprise tolère un rafraîchissement
+                    // bien moins fréquent.
                     if let Some(effective_key) = keys.get(&cid) {
-                        if let Err(e) = hot_state.write(effective_key, [x, y, z]).await {
-                            tracing::warn!(
-                                client = cid,
-                                "HotStateCache::write échoué (subject={effective_key}): {e:?}"
-                            );
+                        let last_write = last_hot_state_write.get(&cid).copied();
+                        if crate::hot_state_cache::should_write_now(
+                            last_write,
+                            HOT_STATE_WRITE_INTERVAL,
+                        ) {
+                            if let Err(e) = hot_state.write(effective_key, [x, y, z]).await {
+                                tracing::warn!(
+                                    client = cid,
+                                    "HotStateCache::write échoué (subject={effective_key}): {e:?}"
+                                );
+                            }
+                            last_hot_state_write.insert(cid, std::time::Instant::now());
                         }
                     }
                     let r = radius.radius_for(*ranks.get(&cid).unwrap_or(&Rank::Player));
@@ -1498,12 +1576,25 @@ pub async fn gateway_main(
                         }
                         _ => None,
                     };
+                    // Capturé AVANT le `match parsed` qui déplace `parsed` dans `execute_admin_command`
+                    // (`ParsedCommand::Ban`/`Unban` possèdent des `String`, non `Copy`) — sert juste
+                    // après à décider la persistance Postgres réelle sans re-matcher une valeur
+                    // déplacée. `Unban` ne porte que `target` : pas besoin de le cloner en entier.
+                    let unban_target: Option<String> = match &parsed {
+                        Ok(crate::admin_commands::ParsedCommand::Unban { target }) => {
+                            Some(target.clone())
+                        }
+                        _ => None,
+                    };
+                    let is_ban_cmd =
+                        matches!(parsed, Ok(crate::admin_commands::ParsedCommand::Ban { .. }));
                     let outcome = match parsed {
                         Ok(cmd) => execute_admin_command(
                             cmd,
                             is_root,
                             &mut admin_store.groups,
                             &mut admin_store.admins,
+                            &mut bans,
                             now_ms,
                             &issuer,
                         ),
@@ -1516,6 +1607,40 @@ pub async fn gateway_main(
                     if outcome.success {
                         admin_store.save_groups();
                         admin_store.save_admins();
+                        // Persistance Postgres réelle de ban/unban (Task 3, robustesse
+                        // opérationnelle sous-projet C) : `execute_admin_command` ci-dessus ne
+                        // mute QUE `bans` en RAM (pur, testable sans IO — cf. admin_commands.rs) ;
+                        // c'est ici, symétriquement à `admin_store.save_groups()`/`save_admins()`
+                        // juste au-dessus, que l'effet devient durable. `None` (serveur privé, pas
+                        // de Postgres) : no-op, comportement inchangé.
+                        if is_ban_cmd {
+                            if let Some((ban_persist, _)) = ban_store.as_mut() {
+                                if let Some(new_ban) = bans.last() {
+                                    if let Err(e) = ban_persist.save_async(new_ban, &issuer).await {
+                                        tracing::warn!("persistance ban Postgres échouée: {e:?}");
+                                    }
+                                }
+                            }
+                        } else if let Some(target) = unban_target.as_ref() {
+                            if let Some((ban_persist, _)) = ban_store.as_mut() {
+                                // LIMITE ASSUMÉE (Task 1 : BanStore n'expose que
+                                // delete_by_subject_async, aucune suppression IP/HWID côté
+                                // Postgres) : un `/unban ip:X` ou `/unban hwid:Y` retire bien le
+                                // ban de la liste RAM `bans` juste au-dessus (execute() dans
+                                // admin_commands.rs traite les 3 vecteurs) — l'effet est donc
+                                // réel pour le reste de l'uptime de ce process — mais RIEN n'est
+                                // supprimé en base : au prochain redémarrage, le ban IP/HWID est
+                                // rechargé depuis Postgres et réapparaît silencieusement. Seul le
+                                // vecteur account est durablement débanni ici.
+                                if let Some(subject) = target.strip_prefix("account:") {
+                                    if let Err(e) =
+                                        ban_persist.delete_by_subject_async(subject).await
+                                    {
+                                        tracing::warn!("suppression ban Postgres échouée: {e:?}");
+                                    }
+                                }
+                            }
+                        }
                         if let Some(sl) = slog.as_mut() {
                             sl.write(&crate::session_log::SessionEvent::AdminAction {
                                 actor: issuer.clone(),
@@ -1584,6 +1709,7 @@ pub async fn gateway_main(
                         &mut display_names,
                         &mut last_pos,
                         &mut last_pos_at,
+                        &mut last_hot_state_write,
                         &mut bypass_warned_at,
                         &mut anomaly_trackers,
                         &mut ranks,
@@ -1734,6 +1860,7 @@ pub async fn gateway_main(
                 display_names.remove(&cid);
                 last_pos.remove(&cid);
                 last_pos_at.remove(&cid);
+                last_hot_state_write.remove(&cid);
                 bypass_warned_at.remove(&cid);
                 ranks.remove(&cid);
                 permissions.remove(&cid);
@@ -1792,6 +1919,9 @@ pub async fn gateway_main(
         // Stall : une itération complète (poll + routage + merge + envois) au-delà de 100 ms
         // (2× le budget de tick 50 ms) mérite une trace — c'est le « gel » vécu par les joueurs.
         let iter_micros = iter_start.elapsed().as_micros() as u64;
+        // Task 6 (observabilité) : exposée en gauge Prometheus, même valeur que le calcul de
+        // stall ci-dessous — un seul chronomètre pour les deux, pas de mesure dupliquée.
+        metrics.record_gateway_loop_duration_micros(iter_micros as i64);
         if iter_micros > 100_000 {
             if let Some(sl) = slog.as_mut() {
                 sl.write(&crate::session_log::SessionEvent::TickStall {
@@ -2103,12 +2233,14 @@ mod tests {
     fn join_payload() -> Vec<u8> {
         let mut b = flatbuffers::FlatBufferBuilder::new();
         let name = b.create_string("v");
+        let hwid_hash = b.create_string("");
         let join = protocol::Join::create(
             &mut b,
             &protocol::JoinArgs {
                 display_name: Some(name),
                 token: None,
                 protocol_version: 1,
+                hwid_hash: Some(hwid_hash),
             },
         );
         let env = protocol::ClientEnvelope::create(
@@ -2961,6 +3093,8 @@ mod tests {
         last_pos.insert(cid, [1.0, 2.0, 3.0]);
         let mut last_pos_at = HashMap::new();
         last_pos_at.insert(cid, std::time::Instant::now());
+        let mut last_hot_state_write = HashMap::new();
+        last_hot_state_write.insert(cid, std::time::Instant::now());
         let mut bypass_warned_at = HashMap::new();
         bypass_warned_at.insert(cid, std::time::Instant::now());
         let mut anomaly_trackers = HashMap::new();
@@ -2995,6 +3129,7 @@ mod tests {
             &mut display_names,
             &mut last_pos,
             &mut last_pos_at,
+            &mut last_hot_state_write,
             &mut bypass_warned_at,
             &mut anomaly_trackers,
             &mut ranks,
@@ -3011,6 +3146,7 @@ mod tests {
         assert!(display_names.is_empty());
         assert!(last_pos.is_empty());
         assert!(last_pos_at.is_empty());
+        assert!(last_hot_state_write.is_empty());
         assert!(bypass_warned_at.is_empty());
         assert!(ranks.is_empty());
         assert!(permissions.is_empty());
@@ -3347,8 +3483,17 @@ mod tests {
         // les logs/granted_by), comme au call site réel de `gateway.rs`.
         let mut groups = Vec::new();
         let mut admins = Vec::new();
+        let mut bans = Vec::new();
         let parsed = parse_admin_command("/creategroup moderators").expect("commande valide");
-        let outcome = execute_admin_command(parsed, is_root, &mut groups, &mut admins, 0, &issuer);
+        let outcome = execute_admin_command(
+            parsed,
+            is_root,
+            &mut groups,
+            &mut admins,
+            &mut bans,
+            0,
+            &issuer,
+        );
         assert!(
             outcome.success,
             "la commande admin doit réussir : sub reconnu root admin"

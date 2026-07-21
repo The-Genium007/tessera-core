@@ -94,6 +94,19 @@ pub struct Runtime {
     pub topology: TopologyConfig,
     pub radius: RadiusConfig,
     pub aoi: AoiConfig,
+    /// Densité PNJ cible par district (fondation nav-indépendante, sous-projet PNJ, palier 2) —
+    /// absente ou vide = aucune simulation PNJ sur ce Shard (comportement historique préservé,
+    /// cf. `Server::new_with_npcs` vs `Server::new`/`new_with_metrics` dans `server_loop.rs`).
+    #[serde(default)]
+    pub population: PopulationConfig,
+    /// Chemin (relatif au répertoire du manifeste, même convention que
+    /// `TopologyConfig::authority_artifact`) vers un manifeste TOML de PNJ NOMINATIFS (fondation
+    /// d'interaction, sous-projet Phase 3.1, palier 2) — voir `named_npc_catalog.rs`. ABSENT =
+    /// aucun PNJ nominatif sur ce serveur (défaut sûr, comportement historique préservé, cf.
+    /// `Server::new_with_named_npcs` vs `Server::new`/`new_with_metrics`/`new_with_npcs` dans
+    /// `server_loop.rs`).
+    #[serde(default)]
+    pub named_npc_manifest_path: Option<String>,
 }
 
 /// Valeur par défaut de `Runtime::redis_url` quand absente du TOML — Redis local, cohérent avec
@@ -166,6 +179,18 @@ pub struct RadiusConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AoiConfig {
     pub visibility_radius: f32,
+}
+
+/// Config PNJ du Shard (fondation nav-indépendante, sous-projet PNJ, palier 2). Suit la même
+/// convention que `TopologyConfig::radius_overrides` : une `HashMap<String, _>` par code de
+/// district, optionnelle et vide par défaut.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PopulationConfig {
+    /// Densité PNJ cible par code de district (même clé `code` que `districts.json`/
+    /// `radius_overrides`). Absent ou vide = aucune simulation PNJ sur ce serveur (comportement
+    /// historique préservé, cf. `Server::new_with_npcs` vs `Server::new` dans `server_loop.rs`).
+    #[serde(default)]
+    pub target_density: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -802,6 +827,48 @@ mod tests {
         assert_eq!(
             config.radius_overrides.get("CC-CP-DOW-GLE-WEL"),
             Some(&150.0)
+        );
+    }
+
+    // --- PopulationConfig : densité PNJ cible par district (fondation nav-indépendante) ---
+
+    #[test]
+    fn population_target_density_defaults_to_empty_when_absent() {
+        let m = parse_and_validate(MINIMAL_TOML).unwrap();
+        assert!(m.runtime.population.target_density.is_empty());
+    }
+
+    #[test]
+    fn population_target_density_parses_declared_districts() {
+        let toml = format!(
+            "{MINIMAL_TOML}\n[runtime.population.target_density]\ncentre = 20\nperiph = 5\n"
+        );
+        let m = parse_and_validate(&toml).unwrap();
+        assert_eq!(m.runtime.population.target_density.get("centre"), Some(&20));
+        assert_eq!(m.runtime.population.target_density.get("periph"), Some(&5));
+    }
+
+    // --- named_npc_manifest_path : chemin du catalogue PNJ nominatif (fondation d'interaction) ---
+
+    #[test]
+    fn named_npc_manifest_path_defaults_to_none_when_absent() {
+        let m = parse_and_validate(MINIMAL_TOML).unwrap();
+        assert_eq!(m.runtime.named_npc_manifest_path, None);
+    }
+
+    #[test]
+    fn named_npc_manifest_path_parses_declared_path() {
+        // Insérée sous `[runtime]`, AVANT tout sous-tableau (`[runtime.gateway]`, etc.) — une
+        // clé nue placée après un sous-tableau `[runtime.xxx]` appartiendrait à ce sous-tableau
+        // en TOML, pas à `[runtime]` (piège vécu en écrivant ce test).
+        let toml = MINIMAL_TOML.replace(
+            "[runtime]\n        whitelist = false",
+            "[runtime]\n        named_npc_manifest_path = \"named-npc-catalog.toml\"\n        whitelist = false",
+        );
+        let m = parse_and_validate(&toml).unwrap();
+        assert_eq!(
+            m.runtime.named_npc_manifest_path,
+            Some("named-npc-catalog.toml".to_string())
         );
     }
 

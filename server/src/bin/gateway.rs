@@ -97,6 +97,10 @@ async fn main() -> std::io::Result<()> {
     let redis_url =
         server::manifest::resolve_redis_url(&manifest.runtime.redis_url, redis_url_env.as_deref());
 
+    // Conservé à côté de `store` (`Some` uniquement sur serveur public) — sert à instancier
+    // `BanStore` juste après sans reconnecter à Postgres une 2e fois : `PgPool` est un handle
+    // partagé (clone = Arc interne, pas une nouvelle connexion physique).
+    let mut pg_pool: Option<sqlx::PgPool> = None;
     // Store personnage (flux d'arrivée, palier 2) : construit UNIQUEMENT sur un serveur public,
     // depuis le même pool Postgres que `PostgresStore`. `None` sur un serveur privé (FileStore) —
     // le flux personnage y est alors inerte (voir `gateway_main`). Rempli dans la branche
@@ -150,6 +154,7 @@ async fn main() -> std::io::Result<()> {
                 eprintln!("migrations Postgres échouées ({postgres_url}): {e}");
                 std::process::exit(1);
             });
+        pg_pool = Some(pool.clone());
         // Même pool Postgres que le `PostgresStore` (le `PgPool` est un handle clonable, backé par
         // un Arc — pas une nouvelle connexion). Alimente le flux d'arrivée : liste/creation/
         // sélection/suppression de personnages, table `characters` (migrée juste au-dessus).
@@ -176,6 +181,22 @@ async fn main() -> std::io::Result<()> {
         std::path::Path::new(&store_path).with_file_name("server_admins.json"),
     );
     let max_players = manifest.identity.max_players;
+
+    // BanStore (Task 3, robustesse opérationnelle sous-projet C) : même garde que PostgresStore
+    // ci-dessus — un ban à 3 vecteurs (compte/IP/HWID) suppose une notion de compte stable,
+    // cohérente avec le fait que Postgres n'existe déjà que sur serveur public. Les bans actifs
+    // sont chargés une fois ici et vérifiés en RAM à chaque Join (`gateway_main`) — jamais une
+    // requête Postgres par connexion.
+    let ban_store = if let Some(pool) = pg_pool {
+        let store = server::ban_store::BanStore::new(pool);
+        let loaded = store.load_all_active_async().await.unwrap_or_else(|e| {
+            tracing::warn!("chargement des bans échoué: {e:?} — démarrage avec liste vide");
+            Vec::new()
+        });
+        Some((store, loaded))
+    } else {
+        None
+    };
 
     // ZITADEL est l'IdP unique de la plateforme (auth.tesserasynth.net, cf. design
     // 2026-07-09 launcher-server-auth §1 : « un seul compte pour tout ») — pas un service
@@ -252,6 +273,7 @@ async fn main() -> std::io::Result<()> {
         whitelist_enabled,
         whitelist_names,
         hot_state,
+        ban_store,
         character_store,
     )
     .await

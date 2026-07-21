@@ -1,6 +1,10 @@
 //! Cache de lecture/tampon de reprise pour l'état chaud (position, catégorie A du design
-//! stockage 2026-07-09) — un par shard. Jamais la source de vérité pour la durabilité : TTL
-//! systématique, pas de garantie de persistance au-delà de la fenêtre de reprise visée.
+//! stockage 2026-07-09) — **un seul Redis PARTAGÉ, Gateway-central** (jamais un par shard : la
+//! clé est le joueur qui migre entre shards au handoff, un cache par-shard casserait la
+//! continuité cross-shard — décision explicite, cf. discussion 10 du 2026-07-18). Écrit/lu
+//! uniquement par le Gateway ; les Shards n'y touchent jamais. Jamais la source de vérité pour
+//! la durabilité : TTL systématique, pas de garantie de persistance au-delà de la fenêtre de
+//! reprise visée.
 
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
@@ -52,6 +56,41 @@ impl HotStateCache {
                 None
             }
         }))
+    }
+}
+
+/// Décide si une écriture hot-state doit avoir lieu MAINTENANT pour ce client, étant donné la
+/// dernière écriture connue et l'intervalle minimal configuré. Pure — aucune I/O.
+pub fn should_write_now(
+    last_write: Option<std::time::Instant>,
+    min_interval: std::time::Duration,
+) -> bool {
+    match last_write {
+        None => true,
+        Some(t) => t.elapsed() >= min_interval,
+    }
+}
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn should_write_now_is_true_when_never_written_before() {
+        assert!(should_write_now(None, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn should_write_now_is_false_immediately_after_a_write() {
+        let now = std::time::Instant::now();
+        assert!(!should_write_now(Some(now), Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn should_write_now_is_true_once_the_interval_has_elapsed() {
+        let past = std::time::Instant::now() - Duration::from_secs(10);
+        assert!(should_write_now(Some(past), Duration::from_secs(5)));
     }
 }
 

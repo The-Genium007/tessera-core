@@ -1,21 +1,54 @@
 //! Parsing et exécution des commandes de gestion des permissions (`/promote`, `/grant`...).
 //! Pur : ne touche ni le réseau ni le disque — le caller (Gateway) persiste et journalise.
 
+use crate::ban_store::{BanRecord, BanScope};
 use crate::permissions::{AdminRecord, Group};
 
 #[derive(Debug, PartialEq)]
 pub enum ParsedCommand {
-    Promote { account: String, group: String },
-    Demote { account: String },
-    Grant { account: String, node: String },
-    Revoke { account: String, node: String },
+    Promote {
+        account: String,
+        group: String,
+    },
+    Demote {
+        account: String,
+    },
+    Grant {
+        account: String,
+        node: String,
+    },
+    Revoke {
+        account: String,
+        node: String,
+    },
     ListAdmins,
     ListGroups,
-    GroupInfo { group: String },
-    CreateGroup { name: String },
-    GroupGrant { group: String, node: String },
-    GroupRevoke { group: String, node: String },
-    DeleteGroup { name: String },
+    GroupInfo {
+        group: String,
+    },
+    CreateGroup {
+        name: String,
+    },
+    GroupGrant {
+        group: String,
+        node: String,
+    },
+    GroupRevoke {
+        group: String,
+        node: String,
+    },
+    DeleteGroup {
+        name: String,
+    },
+    Ban {
+        target: String,
+        vector: String,
+        duration_secs: Option<u64>,
+        reason: String,
+    },
+    Unban {
+        target: String,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -92,6 +125,34 @@ pub fn parse(text: &str) -> Result<ParsedCommand, ParseError> {
             }),
             _ => Err(ParseError::MissingArgs),
         },
+        "ban" => {
+            if rest.len() < 3 {
+                return Err(ParseError::MissingArgs);
+            }
+            let target = rest[0].to_string();
+            let vector_field = rest[1];
+            let (vector, duration_secs) = if let Some(secs) = vector_field.strip_prefix("temp:") {
+                let secs: u64 = secs.parse().map_err(|_| ParseError::MissingArgs)?;
+                ("temp".to_string(), Some(secs))
+            } else if vector_field == "perm" {
+                ("perm".to_string(), None)
+            } else {
+                return Err(ParseError::MissingArgs);
+            };
+            let reason = rest[2..].join(" ");
+            Ok(ParsedCommand::Ban {
+                target,
+                vector,
+                duration_secs,
+                reason,
+            })
+        }
+        "unban" => match rest.as_slice() {
+            [target] => Ok(ParsedCommand::Unban {
+                target: target.to_string(),
+            }),
+            _ => Err(ParseError::MissingArgs),
+        },
         _ => Err(ParseError::UnknownCommand),
     }
 }
@@ -135,6 +196,7 @@ pub fn execute(
     is_root: bool,
     groups: &mut Vec<Group>,
     admins: &mut Vec<AdminRecord>,
+    bans: &mut Vec<BanRecord>,
     now_ms: u64,
     actor: &str,
 ) -> ExecOutcome {
@@ -274,12 +336,63 @@ pub fn execute(
             }
             ok(format!("groupe {name} supprimé"))
         }
+        ParsedCommand::Ban {
+            target,
+            vector,
+            duration_secs,
+            reason,
+        } => {
+            let (subject, ip, hwid_hash) = if let Some(v) = target.strip_prefix("account:") {
+                (Some(v.to_string()), None, None)
+            } else if let Some(v) = target.strip_prefix("ip:") {
+                (None, Some(v.to_string()), None)
+            } else if let Some(v) = target.strip_prefix("hwid:") {
+                (None, None, Some(v.to_string()))
+            } else {
+                return fail(format!(
+                    "cible invalide : {target} (attendu account:/ip:/hwid:)"
+                ));
+            };
+            let scope = if vector == "perm" {
+                BanScope::Perm
+            } else {
+                BanScope::Temp
+            };
+            let expires_at = duration_secs.map(|secs| (now_ms / 1000) as i64 + secs as i64);
+            bans.push(BanRecord {
+                subject,
+                ip,
+                hwid_hash,
+                scope,
+                reason: reason.clone(),
+                expires_at,
+                banned_by: actor.to_string(),
+            });
+            ok(format!("{target} banni ({vector}) : {reason}"))
+        }
+        ParsedCommand::Unban { target } => {
+            let before = bans.len();
+            if let Some(v) = target.strip_prefix("account:") {
+                bans.retain(|b| b.subject.as_deref() != Some(v));
+            } else if let Some(v) = target.strip_prefix("ip:") {
+                bans.retain(|b| b.ip.as_deref() != Some(v));
+            } else if let Some(v) = target.strip_prefix("hwid:") {
+                bans.retain(|b| b.hwid_hash.as_deref() != Some(v));
+            } else {
+                return fail(format!("cible invalide : {target}"));
+            }
+            if bans.len() == before {
+                return fail(format!("{target} n'est pas banni"));
+            }
+            ok(format!("{target} débanni"))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ban_store::{BanRecord, BanScope};
 
     #[test]
     fn parses_promote_with_leading_slash() {
@@ -375,6 +488,7 @@ mod tests {
     fn non_root_cannot_execute_any_management_command() {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
+        let mut bans = vec![];
         let outcome = execute(
             ParsedCommand::Promote {
                 account: "Compte1".into(),
@@ -383,6 +497,7 @@ mod tests {
             false,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "PasRoot",
         );
@@ -394,6 +509,7 @@ mod tests {
     fn promote_to_unknown_group_fails() {
         let mut groups = vec![];
         let mut admins = vec![];
+        let mut bans = vec![];
         let outcome = execute(
             ParsedCommand::Promote {
                 account: "Compte1".into(),
@@ -402,6 +518,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -413,6 +530,7 @@ mod tests {
     fn promote_to_known_group_succeeds_and_reports_affected_account() {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
+        let mut bans = vec![];
         let outcome = execute(
             ParsedCommand::Promote {
                 account: "Compte1".into(),
@@ -421,6 +539,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             1000,
             "Root",
         );
@@ -435,6 +554,7 @@ mod tests {
     fn demote_unknown_account_fails() {
         let mut groups = vec![];
         let mut admins = vec![];
+        let mut bans = vec![];
         let outcome = execute(
             ParsedCommand::Demote {
                 account: "Compte1".into(),
@@ -442,6 +562,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -452,6 +573,7 @@ mod tests {
     fn grant_and_revoke_edit_the_account_overrides() {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
+        let mut bans = vec![];
         execute(
             ParsedCommand::Promote {
                 account: "Compte1".into(),
@@ -460,6 +582,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -471,6 +594,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -485,6 +609,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -497,6 +622,7 @@ mod tests {
     fn deletegroup_refused_while_members_remain() {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
+        let mut bans = vec![];
         execute(
             ParsedCommand::Promote {
                 account: "Compte1".into(),
@@ -505,6 +631,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -515,6 +642,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -526,6 +654,7 @@ mod tests {
     fn deletegroup_succeeds_once_no_members_remain() {
         let mut groups = vec![moderator_group()];
         let mut admins = vec![];
+        let mut bans = vec![];
         let outcome = execute(
             ParsedCommand::DeleteGroup {
                 name: "moderator".into(),
@@ -533,6 +662,7 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -544,11 +674,13 @@ mod tests {
     fn creategroup_then_groupgrant_populates_its_permissions() {
         let mut groups = vec![];
         let mut admins = vec![];
+        let mut bans = vec![];
         execute(
             ParsedCommand::CreateGroup { name: "vip".into() },
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
@@ -561,9 +693,129 @@ mod tests {
             true,
             &mut groups,
             &mut admins,
+            &mut bans,
             0,
             "Root",
         );
         assert_eq!(groups[0].permissions, vec!["admin.teleport".to_string()]);
+    }
+
+    #[test]
+    fn parse_ban_account_temp_with_duration_and_reason() {
+        let cmd = parse("/ban account:Compte1 temp:3600 flood").unwrap();
+        assert_eq!(
+            cmd,
+            ParsedCommand::Ban {
+                target: "account:Compte1".to_string(),
+                vector: "temp".to_string(),
+                duration_secs: Some(3600),
+                reason: "flood".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ban_hwid_perm_has_no_duration() {
+        let cmd = parse("/ban hwid:abc123 perm cheating").unwrap();
+        assert_eq!(
+            cmd,
+            ParsedCommand::Ban {
+                target: "hwid:abc123".to_string(),
+                vector: "perm".to_string(),
+                duration_secs: None,
+                reason: "cheating".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ban_missing_args_is_an_error() {
+        assert_eq!(parse("/ban account:Compte1"), Err(ParseError::MissingArgs));
+    }
+
+    #[test]
+    fn parse_unban_takes_a_single_target() {
+        let cmd = parse("/unban account:Compte1").unwrap();
+        assert_eq!(
+            cmd,
+            ParsedCommand::Unban {
+                target: "account:Compte1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn execute_ban_appends_a_ban_record_for_account_vector() {
+        let mut groups = Vec::new();
+        let mut admins = Vec::new();
+        let mut bans = Vec::new();
+        let cmd = ParsedCommand::Ban {
+            target: "account:Compte1".to_string(),
+            vector: "perm".to_string(),
+            duration_secs: None,
+            reason: "cheating".to_string(),
+        };
+        let outcome = execute(cmd, true, &mut groups, &mut admins, &mut bans, 1000, "root");
+        assert!(outcome.success);
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].reason, "cheating");
+        assert_eq!(bans[0].scope, BanScope::Perm);
+    }
+
+    #[test]
+    fn execute_ban_requires_root() {
+        let mut groups = Vec::new();
+        let mut admins = Vec::new();
+        let mut bans = Vec::new();
+        let cmd = ParsedCommand::Ban {
+            target: "account:Compte1".to_string(),
+            vector: "perm".to_string(),
+            duration_secs: None,
+            reason: "x".to_string(),
+        };
+        let outcome = execute(
+            cmd,
+            false,
+            &mut groups,
+            &mut admins,
+            &mut bans,
+            1000,
+            "actor",
+        );
+        assert!(!outcome.success);
+        assert!(bans.is_empty());
+    }
+
+    #[test]
+    fn execute_unban_removes_matching_ban_records_by_target() {
+        let mut groups = Vec::new();
+        let mut admins = Vec::new();
+        let mut bans = vec![BanRecord {
+            subject: Some("Compte1".to_string()),
+            ip: None,
+            hwid_hash: None,
+            scope: BanScope::Perm,
+            reason: "x".to_string(),
+            expires_at: None,
+            banned_by: "root".to_string(),
+        }];
+        let cmd = ParsedCommand::Unban {
+            target: "account:Compte1".to_string(),
+        };
+        let outcome = execute(cmd, true, &mut groups, &mut admins, &mut bans, 1000, "root");
+        assert!(outcome.success);
+        assert!(bans.is_empty());
+    }
+
+    #[test]
+    fn execute_unban_fails_when_no_matching_ban() {
+        let mut groups = Vec::new();
+        let mut admins = Vec::new();
+        let mut bans = Vec::new();
+        let cmd = ParsedCommand::Unban {
+            target: "account:Inconnu".to_string(),
+        };
+        let outcome = execute(cmd, true, &mut groups, &mut admins, &mut bans, 1000, "root");
+        assert!(!outcome.success);
     }
 }
