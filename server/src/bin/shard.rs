@@ -101,6 +101,36 @@ async fn main() -> std::io::Result<()> {
             (catalog, registry)
         });
 
+    // Comportement historique préservé : `elevator_catalog_path` absent = aucun ascenseur simulé
+    // sur ce Shard (le défaut sûr, cf. manifest.rs). Contrairement à `population`/`named_npc`
+    // ci-dessus, les ascenseurs ne sont PAS mutuellement exclusifs avec les PNJ — un manifeste peut
+    // déclarer les deux, `shard_main` les combine via `Server::with_elevators` (Task 6).
+    let elevators = manifest.runtime.elevator_catalog_path.as_ref().map(|p| {
+        // Résolu depuis le répertoire du manifeste, même convention que le catalogue PNJ nominatif
+        // ci-dessus / `TopologyConfig::authority_artifact` : un fichier local versionné à côté du
+        // manifeste, pas un chemin absolu codé en dur.
+        let manifest_dir = manifest_path_buf.parent().unwrap_or_else(|| {
+            eprintln!("manifeste invalide ({manifest_path}): chemin sans répertoire parent");
+            std::process::exit(1);
+        });
+        let catalog_path = manifest_dir.join(p);
+        server::elevator_catalog::load(&catalog_path).unwrap_or_else(|e| {
+            eprintln!(
+                "catalogue ascenseurs invalide ({}): {e}",
+                catalog_path.display()
+            );
+            std::process::exit(1);
+        })
+    });
+
     tracing::info!("Shard démarré pour le groupe {group_id} (écoute {addr})");
-    server::shard_main(&addr, aoi_radius, &metrics_addr, population, named_npc).await
+    server::shard_main(
+        &addr,
+        aoi_radius,
+        &metrics_addr,
+        population,
+        named_npc,
+        elevators,
+    )
+    .await
 }

@@ -12,6 +12,8 @@ pub mod ban_store;
 pub mod character_migration;
 pub mod character_store;
 pub mod degradation;
+pub mod elevator;
+pub mod elevator_catalog;
 pub mod framing;
 pub mod gateway;
 pub mod gateway_routing;
