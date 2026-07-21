@@ -14,6 +14,7 @@ use crate::npc::{
 use crate::npc_catalog::NpcCatalog;
 use crate::population_director::PopulationDirector;
 use crate::transport::{ClientId, Transport, TransportEvent};
+use crate::vehicle::VehicleRecord;
 use crate::world::{Pose, World};
 use flatbuffers::FlatBufferBuilder;
 use protocol::*;
@@ -50,6 +51,12 @@ pub struct Server {
     /// via un setter dédié (`set_nav_graph`) plutôt qu'un paramètre de constructeur — la navigation
     /// est un comportement additif, pas une variante de configuration comme catalog/director/registry.
     nav_graph: Option<NavGraph>,
+    /// `None` = aucune simulation véhicule sur ce Shard (comportement historique préservé — tous
+    /// les appels `Server::new`/`new_with_metrics`/`new_with_npcs`/`new_with_named_npcs` existants
+    /// restent inchangés et n'activent jamais les véhicules). `Some(..)` uniquement via
+    /// `Server::new_with_vehicles`, registre VIDE au départ (spawn explicite via `spawn_vehicle`,
+    /// cf. doc de ce constructeur).
+    vehicle_registry: Option<VehicleRegistry>,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -62,6 +69,18 @@ struct NpcRegistry {
     /// Chemin/progression courants par PNJ (Task 3/5, plan navigation). Absent d'un id =
     /// « n'a jamais eu de destination assignée » — traité comme un NavState vierge.
     nav_states: std::collections::HashMap<ClientId, NavState>,
+}
+
+/// Regroupe l'état véhicule vivant d'un Shard — sibling de `NpcRegistry`, mais SANS catalogue ni
+/// director : un véhicule n'est pas peuplé automatiquement dans ce noyau (spec véhicules autonomes
+/// §2 « trafic d'ambiance » différé, cf. doc de `Server::new_with_vehicles`), il n'y a donc rien à
+/// réconcilier contre une présence de district comme le fait `PopulationDirector` pour les PNJ.
+struct VehicleRegistry {
+    records: std::collections::HashMap<ClientId, VehicleRecord>,
+    /// Chemin/progression courants par véhicule — même mécanique que `NpcRegistry::nav_states`
+    /// (NavState réutilisé tel quel, cf. Interfaces de cette tâche).
+    nav_states: std::collections::HashMap<ClientId, NavState>,
+    next_vehicle_id: ClientId,
 }
 
 impl Server {
@@ -77,6 +96,7 @@ impl Server {
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
             nav_graph: None,
+            vehicle_registry: None,
         }
     }
 
@@ -97,6 +117,7 @@ impl Server {
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
             nav_graph: None,
+            vehicle_registry: None,
         }
     }
 
@@ -128,6 +149,7 @@ impl Server {
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
             nav_graph: None,
+            vehicle_registry: None,
         }
     }
 
@@ -175,6 +197,69 @@ impl Server {
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
             nav_graph: None,
+            vehicle_registry: None,
+        }
+    }
+
+    /// Identique à `Server::new`, avec en plus un registre de véhicules actif — VIDE au départ
+    /// (aucun véhicule de trafic d'ambiance spawn automatiquement dans ce noyau ; le spawn se fait
+    /// explicitement via `spawn_vehicle`, appelé soit par un test, soit par un futur câblage
+    /// director-de-trafic hors périmètre de ce plan — spec §2 « trafic d'ambiance » différé, ce
+    /// noyau livre le mécanisme, pas le peuplement automatique). Nouvelle méthode plutôt qu'un
+    /// changement de signature des constructeurs existants : `Server::new`/`new_with_metrics`/
+    /// `new_with_npcs`/`new_with_named_npcs` sont déjà appelés par de nombreux tests existants qui
+    /// ne doivent pas changer pour cette tâche (même raisonnement que chacun d'eux).
+    pub fn new_with_vehicles(aoi_radius: f32) -> Self {
+        Self {
+            world: World::new(),
+            aoi_radius,
+            pending_events: Vec::new(),
+            metrics: None,
+            npc_registry: None,
+            named_npc_registry: None,
+            session_registry: SessionRegistry::new(),
+            pending_interaction_opens: Vec::new(),
+            pending_interaction_results: Vec::new(),
+            nav_graph: None,
+            vehicle_registry: Some(VehicleRegistry {
+                records: std::collections::HashMap::new(),
+                nav_states: std::collections::HashMap::new(),
+                next_vehicle_id: crate::world::VEHICLE_ID_RANGE_START,
+            }),
+        }
+    }
+
+    /// Fait naître un véhicule à `from`, avec une destination initiale `to` déjà planifiée (v1 :
+    /// pas de director de trafic, le spawn est explicite — cf. doc de `new_with_vehicles`).
+    /// No-op silencieux si ce `Server` n'a pas de registre véhicule (`Server::new` et les autres
+    /// constructeurs sans véhicules) — même style que `tick_npcs`/`tick_vehicles` (garde `let
+    /// else` plutôt qu'un panic sur un appel a priori incorrect côté appelant, cohérent avec le
+    /// reste du fichier).
+    pub fn spawn_vehicle(&mut self, archetype: u32, from: NavVec3, to: NavVec3) {
+        let Some(registry) = &mut self.vehicle_registry else {
+            return;
+        };
+        let id = registry.next_vehicle_id;
+        registry.next_vehicle_id += 1;
+        // Vitesse fixée à 8.0 u/s ici (v1 : constante, pas encore par archétype/.aiarch — même
+        // simplification assumée que `NPC_SPEED_UNITS_PER_SEC` côté piéton dans `tick_npcs`).
+        registry
+            .records
+            .insert(id, VehicleRecord::new(id, archetype, 8.0));
+        self.world.add_player(id);
+        self.world.set_pose(
+            id,
+            Pose {
+                x: from.x,
+                y: from.y,
+                z: from.z,
+                ..Default::default()
+            },
+        );
+        if let Some(graph) = &self.nav_graph {
+            if let Some(path) = plan_path(graph, from, to) {
+                registry.nav_states.entry(id).or_default().set_path(path);
+            }
         }
     }
 
@@ -328,6 +413,45 @@ impl Server {
         }
     }
 
+    /// Un pas de navigation véhicule (spec véhicules autonomes §3) — no-op si ce `Server` n'a pas
+    /// de registre véhicule (`Server::new` et les autres constructeurs sans véhicules). Même
+    /// mécanique que la navigation PNJ (`tick_npcs` : NavGraph/plan_path/NavState réutilisés tels
+    /// quels), mais SANS director (aucune réconciliation spawn/despawn ici — spawn explicite via
+    /// `spawn_vehicle` uniquement, cf. sa doc) et avec la vitesse PROPRE du véhicule
+    /// (`record.speed_units_per_sec`) plutôt que la constante `NPC_SPEED_UNITS_PER_SEC` piétonne.
+    fn tick_vehicles(&mut self) {
+        let Some(registry) = &mut self.vehicle_registry else {
+            return;
+        };
+        let tick_dt = 1.0 / crate::default_tick_rate_hz() as f32;
+        for (id, record) in registry.records.iter_mut() {
+            let Some(nav_state) = registry.nav_states.get_mut(id) else {
+                continue;
+            };
+            if !nav_state.has_path() {
+                continue; // v1 : pas de re-décision de destination automatique (pas de director de
+                          // trafic, cf. spawn_vehicle) — un véhicule arrivé s'arrête, spec §8
+                          // (annulation/nouvelle destination) différé.
+            }
+            let current_pose = self.world.pose_of(*id).unwrap_or_default();
+            let new_pos = nav_state.advance(
+                NavVec3::new(current_pose.x, current_pose.y, current_pose.z),
+                record.speed_units_per_sec * tick_dt,
+            );
+            self.world.set_pose(
+                *id,
+                Pose {
+                    x: new_pos.x,
+                    y: new_pos.y,
+                    z: new_pos.z,
+                    ..current_pose
+                },
+            );
+            let _ = &record.movement; // v1 : toujours EnRoute pendant le déplacement, Arrete est
+                                      // posé/lu par un futur câblage hélage (spec §8, hors périmètre).
+        }
+    }
+
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
     pub fn tick<T: Transport>(&mut self, transport: &mut T) {
         let tick_start = std::time::Instant::now();
@@ -340,6 +464,7 @@ impl Server {
         }
         self.world.advance_tick();
         self.tick_npcs();
+        self.tick_vehicles();
         // Réclame les sessions d'interaction jamais résolues (client qui ouvre puis se déconnecte
         // sans jamais répondre) — trouvé en revue finale de branche (fondation d'interaction) :
         // SessionRegistry::expire_stale existait et était testé (Task 1) mais n'était jamais
@@ -546,17 +671,39 @@ impl Server {
                 ))
             })
             .collect();
+        let vehicle_states: Vec<_> = self
+            .vehicle_registry
+            .iter()
+            .flat_map(|r| r.records.values())
+            .filter_map(|record| {
+                let pose = self.world.pose_of(record.id)?;
+                Some(VehicleState::create(
+                    b,
+                    &VehicleStateArgs {
+                        id: record.id,
+                        archetype: record.archetype,
+                        position: Some(&Vec3::new(pose.x, pose.y, pose.z)),
+                        yaw: pose.yaw,
+                        // Quantization simple centiunités/s (choix v1, raffinable au gel consolidé
+                        // si une meilleure précision s'avère nécessaire) — cohérent avec l'esprit
+                        // de quantization déjà prévu pour le protocole (cf. commentaire schéma
+                        // VehicleState, protocol.fbs).
+                        speed: (record.speed_units_per_sec * 100.0).round() as u16,
+                        passenger: record.passenger.unwrap_or(0),
+                    },
+                ))
+            })
+            .collect();
         let players = b.create_vector(&states);
         let npcs = b.create_vector(&npc_states);
+        let vehicles = b.create_vector(&vehicle_states);
         let snap = Snapshot::create(
             b,
             &SnapshotArgs {
                 tick: self.world.tick(),
                 players: Some(players),
                 npcs: Some(npcs),
-                // Câblage réel du registre de véhicules = Task 5 (cette task ne fait que le
-                // schéma). VehicleState/VehicleStateArgs sont déjà disponibles via `protocol::*`.
-                vehicles: None,
+                vehicles: Some(vehicles),
             },
         );
         let env = ServerEnvelope::create(
@@ -1739,6 +1886,67 @@ mod tests {
             "après 30+ ticks de dead-reckoning sans observateur, le PNJ ne doit plus être à sa \
              position de spawn — preuve que le mouvement a continué sans joueur connecté \
              (position observée = {npc_position:?})"
+        );
+    }
+
+    #[test]
+    fn a_vehicle_with_a_nav_graph_moves_along_its_route_over_several_ticks() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(50.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(50.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(50.0, 0.0, 0.0));
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        let first = t.take_sent(1).iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.vehicles()?.iter().next().map(|v| {
+                let p = v.position().unwrap();
+                (p.x(), p.y())
+            })
+        });
+
+        for _ in 0..20 {
+            server.tick(&mut t);
+        }
+        let later = t.take_sent(1).iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.vehicles()?.iter().next().map(|v| {
+                let p = v.position().unwrap();
+                (p.x(), p.y())
+            })
+        });
+
+        assert!(first.is_some() && later.is_some());
+        assert_ne!(
+            first, later,
+            "le véhicule doit avoir progressé le long de sa route"
+        );
+    }
+
+    #[test]
+    fn a_server_without_vehicles_never_adds_any_vehicle_state_to_the_snapshot() {
+        // Comportement historique préservé : Server::new (sans véhicules) ne doit jamais faire
+        // apparaître de VehicleState dans un Snapshot.
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert!(
+            snap.vehicles().map(|v| v.len()).unwrap_or(0) == 0,
+            "sans registre véhicule, vehicles doit rester vide"
         );
     }
 }
