@@ -93,13 +93,22 @@ pub async fn write_to_shard(
 /// recréée au prochain `write_to_shard` pour cette adresse — et purge de `latest`, pour tous les
 /// clients, tout snapshot associé à cette adresse : un snapshot laissé en place y serait
 /// rediffusé à chaque tick jusqu'à la reconnexion, comme s'il était encore à jour (bug A.1).
+///
+/// `entity_reports` accumule tout `EntityPositionReport` décodé sur ce même flux (pont
+/// Shard→Gateway générique, `shard_boundary_bridge.rs` / spec véhicules autonomes §5) —
+/// (entity_id, x, y, z, speed), à traiter par l'appelant via `topology.locate` +
+/// `ShardLoader::feed`, exactement comme un `PositionUpdate` de client réel (cf. `gateway_main`).
+/// `read_from_shards` reste volontairement AVEUGLE au sens de ces rapports (pas de `topology`/
+/// `loader` ici, cette fonction ne connaît que la lecture socket + framing) — la seule
+/// responsabilité ajoutée ici est de les extraire du même flux d'octets que les `ServerSend`.
 pub async fn read_from_shards(
     shards: &mut HashMap<String, ShardLink>,
     latest: &mut HashMap<u64, HashMap<String, Vec<u8>>>,
     current_tick: u64,
     snapshot_ticks: &mut HashMap<u64, HashMap<String, u64>>,
+    entity_reports: &mut Vec<(u64, f32, f32, f32, f32)>,
 ) {
-    use crate::internal_net::decode_server_send;
+    use crate::internal_net::{decode_entity_position_report, decode_server_send};
 
     let addrs: Vec<String> = shards.keys().cloned().collect();
     let mut dead = Vec::new();
@@ -133,6 +142,8 @@ pub async fn read_from_shards(
                                 .entry(cid)
                                 .or_default()
                                 .insert(addr.clone(), current_tick);
+                        } else if let Some(report) = decode_entity_position_report(&body) {
+                            entity_reports.push(report);
                         }
                     }
                     // Continue la boucle : peut-être encore plus à lire sur ce même shard.
@@ -1074,7 +1085,62 @@ pub async fn gateway_main(
     let mut current_tick: u64 = 0;
     loop {
         // 1) Lire chaque shard connecté (évacue et laisse reconnecter les connexions mortes).
-        read_from_shards(&mut shards, &mut latest, current_tick, &mut snapshot_ticks).await;
+        let mut entity_reports: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
+        read_from_shards(
+            &mut shards,
+            &mut latest,
+            current_tick,
+            &mut snapshot_ticks,
+            &mut entity_reports,
+        )
+        .await;
+
+        // 1bis) Pont Shard→Gateway générique (shard_boundary_bridge.rs, spec véhicules autonomes
+        // §5) : une entité SIMULÉE côté Shard (véhicule aujourd'hui, PNJ piéton demain) dont le
+        // chemin planifié entre dans le tampon d'un shard voisin a émis un `EntityPositionReport`.
+        // Traité EXACTEMENT comme un `PositionUpdate` de client réel juste en dessous (même
+        // `topology.locate` + `ShardLoader::feed` + `write_to_shard`) — `entity_id` joue le rôle du
+        // `ClientId`, `loader` ne fait aucune différence entre un vrai client et une entité simulée.
+        // Une entité simulée n'a pas de vraie connexion (pas de Connected/Join préalable) : `feed`
+        // bufferise alors un préambule vide sans effet, l'entité n'ayant aucun état de session à
+        // rejouer contrairement à un joueur.
+        for (entity_id, x, y, z, speed) in entity_reports {
+            let rank_bonus = crate::shard_boundary_bridge::predictive_rank_bonus(speed, 2.0, 200.0);
+            let placement = topology.locate(x, y, rank_bonus);
+            // `encode_position_update` (gateway_routing.rs) est DÉJÀ le point de production
+            // existant pour "le Gateway construit un PositionUpdate au nom d'un client" — utilisé
+            // aujourd'hui pour re-semer la dernière position connue d'un client réel sur un shard
+            // qui vient de perdre son état (même besoin exact : renseigner un shard nouvellement
+            // chargé sur où se trouve l'entité). Réutilisé tel quel, aucune nouvelle fonction
+            // d'encodage nécessaire.
+            let synthetic_position_payload =
+                crate::gateway_routing::encode_position_update([x, y, z]);
+            for LoadAction::Forward { shard, frames } in loader.feed(
+                TransportEvent::Message {
+                    from: entity_id,
+                    data: synthetic_position_payload,
+                },
+                Some(placement),
+            ) {
+                let Some(shard_addr) = topology.addr_for(&shard).map(str::to_string) else {
+                    tracing::error!(
+                        shard = %shard,
+                        entity = entity_id,
+                        "aucune adresse connue pour ce shard — vérifier \
+                         runtime.topology.shard_addrs dans le manifeste"
+                    );
+                    continue;
+                };
+                if let Err(e) = write_to_shard(&mut shards, &shard, &shard_addr, &frames).await {
+                    tracing::warn!(
+                        shard = %shard,
+                        addr = %shard_addr,
+                        entity = entity_id,
+                        "écriture vers le shard impossible (rapport de position d'entité) : {e}"
+                    );
+                }
+            }
+        }
 
         // 2) Tick, avec une course contre le signal d'arrêt propre (SIGTERM/SIGINT).
         tokio::select! {
@@ -2385,12 +2451,79 @@ mod tests {
 
         let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
         let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
-        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
+        read_from_shards(
+            &mut shards,
+            &mut latest,
+            0,
+            &mut snapshot_ticks,
+            &mut Vec::new(),
+        )
+        .await;
 
         assert_eq!(
             latest.len(),
             N as usize,
             "un seul appel doit drainer TOUTES les frames disponibles, pas juste ~8192 octets"
+        );
+    }
+
+    /// Pont Shard→Gateway (Task 5, spec véhicules autonomes §5) : le Shard multiplexe des frames
+    /// `ServerSend` (snapshots clients) ET `EntityPositionReport` (véhicules/PNJ simulés) sur la
+    /// MÊME socket TCP interne — `read_from_shards` doit distinguer les deux et alimenter
+    /// respectivement `latest` et `entity_reports`, sans qu'aucune frame de l'un ne soit prise pour
+    /// l'autre (ou perdue).
+    #[tokio::test]
+    async fn read_from_shards_decodes_interleaved_entity_position_reports() {
+        use crate::internal_net::{encode_entity_position_report, InternalTransport};
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Une frame ServerSend "normale" (client 42) suivie d'un rapport de position d'entité
+            // (véhicule id 99), comme le ferait réellement `shard_main` dans une même itération de
+            // tick : `transport.take_outbound()` puis `take_pending_entity_reports()`.
+            let mut it = InternalTransport::new();
+            it.send(42, b"snapshot-opaque");
+            for frame in it.take_outbound() {
+                sock.write_all(&frame).await.unwrap();
+            }
+            let report_frame = encode_entity_position_report(99, 12.0, -3.0, 0.0, 8.0);
+            sock.write_all(&report_frame).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await; // garde la connexion ouverte
+        });
+
+        let mut shards: HashMap<String, ShardLink> = HashMap::new();
+        write_to_shard(&mut shards, &addr, &addr, &[])
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
+        let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
+        let mut entity_reports: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
+        read_from_shards(
+            &mut shards,
+            &mut latest,
+            0,
+            &mut snapshot_ticks,
+            &mut entity_reports,
+        )
+        .await;
+
+        assert_eq!(
+            latest.get(&42).and_then(|m| m.get(&addr)),
+            Some(&b"snapshot-opaque".to_vec()),
+            "la frame ServerSend doit toujours atterrir dans `latest`, inchangée"
+        );
+        assert_eq!(
+            entity_reports,
+            vec![(99u64, 12.0f32, -3.0f32, 0.0f32, 8.0f32)],
+            "la frame EntityPositionReport doit atterrir dans `entity_reports`, décodée"
         );
     }
 
@@ -2429,7 +2562,14 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
-        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
+        read_from_shards(
+            &mut shards,
+            &mut latest,
+            0,
+            &mut snapshot_ticks,
+            &mut Vec::new(),
+        )
+        .await;
 
         assert!(
             !latest.get(&1).unwrap().contains_key(&addr),
@@ -2498,7 +2638,14 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let mut latest: HashMap<u64, HashMap<String, Vec<u8>>> = HashMap::new();
         let mut snapshot_ticks: HashMap<u64, HashMap<String, u64>> = HashMap::new();
-        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
+        read_from_shards(
+            &mut shards,
+            &mut latest,
+            0,
+            &mut snapshot_ticks,
+            &mut Vec::new(),
+        )
+        .await;
         assert!(!shards.contains_key(&addr));
 
         // Le shard redémarre sur la MÊME adresse et capture tout ce qu'il reçoit. Le Gateway
@@ -2598,7 +2745,14 @@ mod tests {
 
         // Laisse le "shard" fermer, puis détecte l'EOF côté lecture.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
+        read_from_shards(
+            &mut shards,
+            &mut latest,
+            0,
+            &mut snapshot_ticks,
+            &mut Vec::new(),
+        )
+        .await;
         assert!(
             !shards.contains_key(&addr),
             "la connexion morte doit être évacuée après EOF"
@@ -3660,7 +3814,14 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
+        read_from_shards(
+            &mut shards,
+            &mut latest,
+            0,
+            &mut snapshot_ticks,
+            &mut Vec::new(),
+        )
+        .await;
 
         // Vérifier que nous avons le snapshot
         assert!(latest.contains_key(&1), "snapshot devrait être reçu");
@@ -3678,7 +3839,14 @@ mod tests {
         // Ticks suivants : relire sans recevoir de nouvelles données
         // Le snapshot devient plus ancien à chaque tick
         for tick in 1..=5 {
-            read_from_shards(&mut shards, &mut latest, tick, &mut snapshot_ticks).await;
+            read_from_shards(
+                &mut shards,
+                &mut latest,
+                tick,
+                &mut snapshot_ticks,
+                &mut Vec::new(),
+            )
+            .await;
 
             // Le snapshot doit toujours être présent (pas de EOF, juste pas de nouvelles données)
             assert!(

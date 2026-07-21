@@ -66,15 +66,16 @@ impl NpcRecord {
     /// comportement délibérément permissif pour ne pas faire planter le serveur sur une config
     /// TOML en avance sur le code : documenté ici, pas un oubli).
     ///
-    /// Ne fait RIEN si `behavior` est `Fuite`/`Hostile`/`ATerre` — ces états sont pilotés par la
-    /// FSM (interactions), pas par la brique passive de l'archétype (cohérent avec spec §2 : « le
-    /// FSM est la cause, la brique/pathfinding est l'effet » — une brique sociale ne doit jamais
-    /// écraser un état de peur/agression en cours).
+    /// La brique `flaner-sur-place` ne s'applique qu'aux états `Calme`/`Flane` (cohérent avec spec
+    /// §2 : « le FSM est la cause, la brique/pathfinding est l'effet » — une brique sociale ne doit
+    /// jamais écraser un état de peur/agression en cours) : la condition est portée localement sur
+    /// cette brique précise, pas par un early-return sur toute la fonction — `Fuite`/`Hostile`/
+    /// `ATerre` continuent d'exécuter cette fonction (changement délibéré, plan navigation) pour
+    /// permettre à un futur appelant d'y piloter leur destination via `decide_destination`.
     pub fn apply_brique_tick(&mut self, archetype: &crate::npc_catalog::NpcArchetypeConfig) {
-        if !matches!(self.behavior, EntityBehavior::Calme | EntityBehavior::Flane) {
-            return;
-        }
-        if archetype.briques.iter().any(|b| b == "flaner-sur-place") {
+        if matches!(self.behavior, EntityBehavior::Calme | EntityBehavior::Flane)
+            && archetype.briques.iter().any(|b| b == "flaner-sur-place")
+        {
             self.behavior = EntityBehavior::Flane;
         }
         // "rester-statique" : ne change jamais `behavior` (reste Calme) — c'est la définition même
@@ -82,6 +83,184 @@ impl NpcRecord {
         // "vendre"/"donner-quête"/"réagir-dialogue" : hooks sociaux, pas de transition de
         // mouvement — traités par un futur plan d'interaction (fondation d'interaction, séquencement
         // Phase 3.1), hors périmètre ici.
+    }
+}
+
+/// Résout la brique/l'état FSM actif d'un PNJ en une destination cible (spec §4 : « chaque brique
+/// produit une intention de destination ; le pathfinding la réalise » ; spec §5 : « fuite → aller-
+/// au-point dans la direction opposée à la menace... hostile → aller-au-point vers la cible »).
+/// `menace_or_cible_position` : position ACTUELLE de la menace/cible (résolue par l'appelant via
+/// `World::pose_of`, ce module n'accède jamais à `World` directement — cohérent avec le reste de
+/// `npc.rs`, pur). `region_center`/`region_radius` : bornes de la brique `errer` (spec §4 :
+/// « destinations aléatoires dans une région »). Retourne `None` si aucune brique/état ne pilote
+/// de destination (ex. `rester-statique`, `ATerre` — un PNJ à terre ne se déplace jamais).
+pub fn decide_destination(
+    behavior: EntityBehavior,
+    archetype: &crate::npc_catalog::NpcArchetypeConfig,
+    current_position: (f32, f32, f32),
+    menace_or_cible_position: Option<(f32, f32, f32)>,
+    region_center: (f32, f32, f32),
+    region_radius: f32,
+    rng_unit: f32, // [0.0, 1.0), injecté par l'appelant pour rester testable déterministe
+) -> Option<(f32, f32, f32)> {
+    match behavior {
+        EntityBehavior::ATerre => None,
+        EntityBehavior::Fuite { .. } => {
+            let menace = menace_or_cible_position?;
+            let (cx, cy, cz) = current_position;
+            let (mx, my, _) = menace;
+            let (dx, dy) = (cx - mx, cy - my);
+            let len = (dx * dx + dy * dy).sqrt().max(f32::EPSILON);
+            // Direction opposée à la menace, distance fixe (spec : « dans la direction opposée »).
+            const FLEE_DISTANCE: f32 = 30.0;
+            Some((
+                cx + (dx / len) * FLEE_DISTANCE,
+                cy + (dy / len) * FLEE_DISTANCE,
+                cz,
+            ))
+        }
+        EntityBehavior::Hostile { .. } => menace_or_cible_position,
+        // `Alerte` = vigilance accrue, pas encore de fuite/agression (spec §2 : reste interactible
+        // comme Calme/Flane) — aucune spec §4/§5 ne lui attribue de destination dirigée propre ;
+        // elle suit donc la même résolution que Calme/Flane (briques passives de l'archétype).
+        EntityBehavior::Calme | EntityBehavior::Flane | EntityBehavior::Alerte { .. } => {
+            if archetype.briques.iter().any(|b| b == "errer") {
+                // Destination aléatoire dans la région (spec §4). rng_unit in [0,1) mappé sur un
+                // angle+rayon dans le disque de région — déterministe pour les tests (rng injecté).
+                let angle = rng_unit * std::f32::consts::TAU;
+                let radius = region_radius * ((rng_unit * 7.0) % 1.0).sqrt();
+                let (cx, cy, cz) = region_center;
+                Some((cx + radius * angle.cos(), cy + radius * angle.sin(), cz))
+            } else if archetype.briques.iter().any(|b| b == "marcher-route") {
+                // v1 minimal : la "route" EST la région (liste de points différée, spec §4 note
+                // "config : liste de points/région" — la variante liste-de-points explicite est un
+                // raffinement futur, non implémenté ici ; documenté, pas un oubli).
+                Some(region_center)
+            } else if archetype.briques.iter().any(|b| b == "patrouiller") {
+                Some(region_center)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+    use crate::npc_catalog::parse_and_validate;
+
+    fn archetype_with_briques(briques: &[&str]) -> crate::npc_catalog::NpcArchetypeConfig {
+        let toml = format!(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"test\"\nbriques = [{}]\n",
+            briques
+                .iter()
+                .map(|b| format!("\"{b}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        parse_and_validate(&toml)
+            .unwrap()
+            .archetype(1)
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn aterre_never_produces_a_destination() {
+        let archetype = archetype_with_briques(&["errer"]);
+        let dest = decide_destination(
+            EntityBehavior::ATerre,
+            &archetype,
+            (0.0, 0.0, 0.0),
+            None,
+            (0.0, 0.0, 0.0),
+            10.0,
+            0.5,
+        );
+        assert_eq!(dest, None);
+    }
+
+    #[test]
+    fn fuite_produces_a_destination_away_from_the_threat() {
+        let archetype = archetype_with_briques(&["errer"]);
+        let dest = decide_destination(
+            EntityBehavior::Fuite { menace: 99 },
+            &archetype,
+            (0.0, 0.0, 0.0),
+            Some((10.0, 0.0, 0.0)), // menace à l'est
+            (0.0, 0.0, 0.0),
+            10.0,
+            0.5,
+        )
+        .unwrap();
+        assert!(
+            dest.0 < 0.0,
+            "doit fuir vers l'ouest, loin de la menace à l'est"
+        );
+    }
+
+    #[test]
+    fn fuite_without_a_resolvable_threat_position_produces_no_destination() {
+        let archetype = archetype_with_briques(&["errer"]);
+        let dest = decide_destination(
+            EntityBehavior::Fuite { menace: 99 },
+            &archetype,
+            (0.0, 0.0, 0.0),
+            None,
+            (0.0, 0.0, 0.0),
+            10.0,
+            0.5,
+        );
+        assert_eq!(dest, None);
+    }
+
+    #[test]
+    fn hostile_produces_the_target_position_directly() {
+        let archetype = archetype_with_briques(&["errer"]);
+        let dest = decide_destination(
+            EntityBehavior::Hostile { cible: 5 },
+            &archetype,
+            (0.0, 0.0, 0.0),
+            Some((7.0, 8.0, 9.0)),
+            (0.0, 0.0, 0.0),
+            10.0,
+            0.5,
+        );
+        assert_eq!(dest, Some((7.0, 8.0, 9.0)));
+    }
+
+    #[test]
+    fn calme_with_errer_brique_produces_a_destination_within_the_region_radius() {
+        let archetype = archetype_with_briques(&["errer"]);
+        let dest = decide_destination(
+            EntityBehavior::Calme,
+            &archetype,
+            (0.0, 0.0, 0.0),
+            None,
+            (100.0, 100.0, 0.0),
+            5.0,
+            0.3,
+        )
+        .unwrap();
+        let dx = dest.0 - 100.0;
+        let dy = dest.1 - 100.0;
+        assert!((dx * dx + dy * dy).sqrt() <= 5.0 + 0.01);
+    }
+
+    #[test]
+    fn calme_with_rester_statique_only_produces_no_destination() {
+        let archetype = archetype_with_briques(&["rester-statique"]);
+        let dest = decide_destination(
+            EntityBehavior::Calme,
+            &archetype,
+            (0.0, 0.0, 0.0),
+            None,
+            (0.0, 0.0, 0.0),
+            10.0,
+            0.5,
+        );
+        assert_eq!(dest, None);
     }
 }
 
@@ -322,5 +501,26 @@ mod brique_engine_tests {
         let archetype = archetype_with_briques(&["marcher-route"]);
         r.apply_brique_tick(&archetype); // ne doit pas paniquer
         assert_eq!(r.behavior, EntityBehavior::Calme);
+    }
+
+    #[test]
+    fn apply_brique_tick_no_longer_early_returns_on_fuite_hostile_aterre() {
+        // Changement de comportement délibéré (plan navigation) : avant, apply_brique_tick ne faisait
+        // RIEN pour ces 3 états. Après, la fonction continue de s'exécuter (même si aucune brique
+        // nav-indépendante ne s'applique à ces états) — ce test verrouille juste l'absence de panique/
+        // early-return silencieux, la logique de destination réelle vit dans decide_destination
+        // (testé séparément ci-dessus), appelée par Server::tick_npcs (Task 5), pas ici.
+        let mut r = NpcRecord::new(1, 1);
+        r.apply_interaction(99, 0); // -> Fuite { menace: 99 }
+        let archetype = crate::npc_catalog::parse_and_validate(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"t\"\nbriques = [\"flaner-sur-place\"]\n",
+        )
+        .unwrap()
+        .archetype(1)
+        .unwrap()
+        .clone();
+        r.apply_brique_tick(&archetype);
+        // flaner-sur-place ne s'applique qu'à Calme/Flane -> le behavior Fuite reste inchangé.
+        assert_eq!(r.behavior, EntityBehavior::Fuite { menace: 99 });
     }
 }

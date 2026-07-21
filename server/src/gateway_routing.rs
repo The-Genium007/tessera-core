@@ -206,6 +206,19 @@ pub fn extract_delete_character(client_payload: &[u8]) -> Option<u64> {
     env.msg_as_delete_character().map(|c| c.id())
 }
 
+/// Décode un `ClientEnvelope` client ; si c'est un `ElevatorCall` (modèle serveur ascenseur, palier
+/// 2, Task 4), renvoie `(elevator_id, floor)`. Le serveur ne distingue pas le bouton intérieur de la
+/// cabine du terminal de palier — c'est le même acte, et l'arbitrage (file SCAN, `ElevatorState`)
+/// vit dans `elevator.rs`, pas ici : ce module reste pur décodage.
+pub fn extract_elevator_call(client_payload: &[u8]) -> Option<(u64, i32)> {
+    let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
+    if env.msg_type() != ClientMsg::ElevatorCall {
+        return None;
+    }
+    let call = env.msg_as_elevator_call()?;
+    Some((call.elevator_id(), call.floor()))
+}
+
 /// Construit le payload serveur d'un `CharacterResult` — réponse à un `CreateCharacter`/
 /// `SelectCharacter`/`DeleteCharacter`. `reason` porte un code d'erreur stable (`pseudonym_taken`,
 /// `slot_full`, `not_found`, `not_owner`, `database_error`) quand `success` est faux, chaîne vide
@@ -894,6 +907,32 @@ mod tests {
         assert_eq!(extract_delete_character(b.finished_data()), Some(7));
         assert_eq!(extract_delete_character(&client_join()), None); // pas un DeleteCharacter
         assert_eq!(extract_delete_character(&[9, 9, 9]), None); // garbage
+    }
+
+    #[test]
+    fn extract_elevator_call_reads_both_fields() {
+        let mut b = FlatBufferBuilder::new();
+        let call = ElevatorCall::create(
+            &mut b,
+            &ElevatorCallArgs {
+                elevator_id: 9939278384122899325,
+                floor: 3,
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::ElevatorCall,
+                msg: Some(call.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        assert_eq!(
+            extract_elevator_call(b.finished_data()),
+            Some((9939278384122899325, 3))
+        );
+        assert_eq!(extract_elevator_call(&client_join()), None); // pas un ElevatorCall
+        assert_eq!(extract_elevator_call(&[9, 9, 9]), None); // garbage
     }
 
     #[test]

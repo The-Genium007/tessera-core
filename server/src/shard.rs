@@ -1,9 +1,11 @@
 //! Le Shard : simulation autoritaire d'une zone, pilotée par le Gateway via TCP interne.
 //! Une seule connexion Gateway en v1 (M0-M1). Tick 20 Hz.
 
+use crate::elevator_catalog::ElevatorCatalog;
 use crate::internal_net::InternalTransport;
 use crate::named_npc_catalog::NamedNpcCatalog;
 use crate::named_npc_registry::NamedNpcRegistry;
+use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
 use crate::npc_catalog::NpcCatalog;
 use crate::population_director::PopulationDirector;
 use crate::server_loop::Server;
@@ -11,7 +13,54 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const TICK: Duration = Duration::from_millis(50); // 20 Hz
+/// Cadence réelle du Shard, en millisecondes — 20 Hz. Constante nommée (plutôt qu'un littéral
+/// dupliqué) car `Server::with_elevators`/`new_with_elevators` (Task 6) ont besoin de cette même
+/// valeur pour convertir leurs durées de trajet (`travel_time_ms`, `start_delay_ms`) en nombre de
+/// ticks — `TICK` (la version `Duration` utilisée par le ticker tokio) en dérive pour ne jamais
+/// diverger.
+pub(crate) const TICK_MS: u32 = 50;
+const TICK: Duration = Duration::from_millis(TICK_MS as u64); // 20 Hz
+
+/// Graine déclarative pour faire naître des véhicules autonomes dans un vrai process Shard, sans
+/// exiger que `NavGraph` (qui ne dérive PAS `Clone`) soit copiable. `shard_main` reconstruit un
+/// `NavGraph` neuf à partir de cette graine à CHAQUE (re)connexion Gateway — cohérent avec le fait
+/// que le `Server` est lui-même reconstruit par connexion (l'état de simulation d'un Shard n'est
+/// pas persistant ; il repart de zéro à chaque nouvelle connexion Gateway, cf. la boucle `accept`
+/// ci-dessous et le commentaire "réinitialisation du shard"). Purement additif : les 3 voies
+/// existantes (`new_with_npcs`/`new_with_named_npcs`/`new_with_metrics`) restent inchangées et
+/// prioritaires ; la voie véhicule n'est empruntée que quand ni `population` ni `named_npc` ne sont
+/// fournis ET qu'une graine véhicule l'est.
+///
+/// Aujourd'hui n'a pour appelant que le test d'intégration réseau réel cross-shard
+/// (`tests/vehicle_predictive_handoff.rs`) : le câblage production (director de trafic qui
+/// peuplerait un Shard depuis un manifeste) est différé (spec véhicules autonomes §2, trafic
+/// d'ambiance). `bin/shard.rs` passe donc `None` — comportement de production strictement préservé.
+#[derive(Clone, Debug)]
+pub struct VehicleShardSeed {
+    /// Positions des nœuds du graphe de navigation, indexées comme les `NodeId` rendus par
+    /// `NavGraph::add_node` (ordre d'insertion : le nœud `i` = `nodes[i]`).
+    pub nodes: Vec<NavVec3>,
+    /// Arêtes non orientées (paires d'indices dans `nodes`) — pondérées par distance euclidienne
+    /// au moment de la reconstruction, exactement comme `NavGraph::add_edge`.
+    pub edges: Vec<(usize, usize)>,
+    /// Véhicules à faire naître : `(archétype, from, to)` — même triplet que `Server::spawn_vehicle`.
+    pub vehicles: Vec<(u32, NavVec3, NavVec3)>,
+}
+
+impl VehicleShardSeed {
+    /// Reconstruit un `NavGraph` frais à partir de la graine (nécessaire à chaque connexion car
+    /// `NavGraph` n'est pas `Clone` et le `Server` est recréé par connexion).
+    fn build_graph(&self) -> NavGraph {
+        let mut graph = NavGraph::new();
+        for node in &self.nodes {
+            graph.add_node(*node);
+        }
+        for (a, b) in &self.edges {
+            graph.add_edge(*a, *b);
+        }
+        graph
+    }
+}
 
 pub async fn shard_main(
     addr: &str,
@@ -19,6 +68,8 @@ pub async fn shard_main(
     metrics_addr: &str,
     population: Option<(NpcCatalog, PopulationDirector)>,
     named_npc: Option<(NamedNpcCatalog, NamedNpcRegistry)>,
+    elevators: Option<ElevatorCatalog>,
+    vehicles: Option<VehicleShardSeed>,
 ) -> std::io::Result<()> {
     let metrics = crate::metrics::Metrics::new();
     {
@@ -71,8 +122,32 @@ pub async fn shard_main(
             (None, Some((catalog, registry))) => {
                 Server::new_with_named_npcs(aoi_radius, catalog, registry.clone())
             }
-            (None, None) => Server::new_with_metrics(aoi_radius, metrics.clone()),
+            // Voie véhicule (spec véhicules autonomes §5) : n'est empruntée que si NI foule NI PNJ
+            // nominatif ne sont configurés — les 3 voies existantes gardent la priorité et restent
+            // strictement inchangées. Le graphe de nav et les véhicules sont reconstruits à neuf à
+            // chaque connexion depuis la graine `Clone` (cf. doc de `VehicleShardSeed` — `NavGraph`
+            // n'est pas `Clone`, et l'état de simulation du Shard n'est de toute façon pas
+            // persistant entre connexions).
+            (None, None) => match &vehicles {
+                Some(seed) => {
+                    let mut s = Server::new_with_vehicles(aoi_radius);
+                    s.set_nav_graph(seed.build_graph());
+                    for (archetype, from, to) in &seed.vehicles {
+                        s.spawn_vehicle(*archetype, *from, *to);
+                    }
+                    s
+                }
+                None => Server::new_with_metrics(aoi_radius, metrics.clone()),
+            },
         };
+        // Ascenseurs (Task 6) : orthogonaux aux PNJ (foule ou nominatifs), donc chaînés APRÈS le
+        // match ci-dessus plutôt qu'intégrés dedans — `Server::with_elevators` s'applique quel
+        // qu'ait été le constructeur choisi pour les PNJ, contrairement à la limitation
+        // population/named_npc documentée juste au-dessus (celle-là reste entière, elle ne
+        // concerne pas les ascenseurs).
+        if let Some(catalog) = &elevators {
+            server = server.with_elevators(catalog.clone(), TICK_MS);
+        }
         let mut transport = InternalTransport::new();
         let mut buf = [0u8; 8192];
         let mut ticker = tokio::time::interval(TICK);
@@ -105,6 +180,19 @@ pub async fn shard_main(
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     for frame in transport.take_outbound() {
+                        if sock.write_all(&frame).await.is_err() {
+                            return Ok(()); // Gateway parti
+                        }
+                    }
+                    // Pont Shard→Gateway générique (shard_boundary_bridge.rs, spec véhicules
+                    // autonomes §5) : un véhicule dont le chemin planifié entre dans le tampon
+                    // prédictif d'un shard voisin a poussé un rapport dans `tick_vehicles` ce
+                    // tick — on le draine et l'écrit sur la même socket TCP interne que les
+                    // frames `ServerSend` ci-dessus (multiplexé, `InternalEnvelope` distingue les
+                    // deux types côté lecteur). Même garde de déconnexion Gateway que ci-dessus.
+                    for (entity_id, x, y, z, speed) in server.take_pending_entity_reports() {
+                        let frame =
+                            crate::internal_net::encode_entity_position_report(entity_id, x, y, z, speed);
                         if sock.write_all(&frame).await.is_err() {
                             return Ok(()); // Gateway parti
                         }
@@ -149,7 +237,7 @@ mod tests {
         // tout — la course doit gagner dès la boucle d'accept externe).
         let addr = "127.0.0.1:27131";
         let handle = tokio::spawn(async move {
-            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None).await
+            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None, None, None).await
         });
 
         // Laisse le shard se binder et enregistrer son ShutdownSignal avant d'envoyer le signal.
@@ -180,7 +268,7 @@ mod tests {
         // tests exécutés en parallèle.
         let addr = "127.0.0.1:27132";
         let handle = tokio::spawn(async move {
-            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None).await
+            super::shard_main(addr, 1000.0, "127.0.0.1:0", None, None, None, None).await
         });
 
         // Laisse le shard se binder et enregistrer son ShutdownSignal avant de se connecter.

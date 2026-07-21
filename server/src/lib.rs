@@ -12,6 +12,8 @@ pub mod ban_store;
 pub mod character_migration;
 pub mod character_store;
 pub mod degradation;
+pub mod elevator;
+pub mod elevator_catalog;
 pub mod framing;
 pub mod gateway;
 pub mod gateway_routing;
@@ -28,6 +30,9 @@ pub mod npc;
 pub mod npc_catalog;
 pub mod named_npc_catalog;
 pub mod named_npc_registry;
+pub mod nav;
+pub mod nav_graph;
+pub mod nav_state;
 pub mod permissions;
 pub mod persistence;
 pub mod player_store_impl;
@@ -39,9 +44,11 @@ pub mod server_loop;
 pub mod session_log;
 pub mod session_log_html;
 pub mod shard;
+pub mod shard_boundary_bridge;
 pub mod shutdown;
 pub mod snapshot_merge;
 pub mod transport;
+pub mod vehicle;
 pub mod world;
 pub mod world_clock;
 pub mod write_behind;
@@ -50,7 +57,7 @@ pub mod write_behind_journal;
 #[cfg(feature = "gns")]
 pub mod gns_transport;
 
-pub use shard::shard_main;
+pub use shard::{shard_main, VehicleShardSeed};
 
 /// Fréquence de tick par défaut de la simulation, en Hz (spec §6 : 20–60 ticks/s).
 pub fn default_tick_rate_hz() -> u32 {

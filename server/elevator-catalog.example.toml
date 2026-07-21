@@ -1,0 +1,22 @@
+# Catalogue d'ascenseurs (modèle serveur, palier 2). Versionné comme les autres manifestes.
+#
+# La clé `id` est l'EntityID STATIQUE de la cabine, lisible au runtime par le client
+# (ADR 0012 §2.5) — on la LIT, on ne la recalcule jamais (le hash runtime est un compound hash
+# dont l'algorithme n'est pas confirmé).
+#
+# ATTENTION unité : le sondage du 2026-07-20 a relevé GetLiftStartingDelay() = 1 et
+# GetLiftTravelTimeOverride() = 4 SANS unité explicite ; la seconde est présumée. À confirmer en
+# chronométrant un trajet en jeu. Aucune logique serveur n'en dépend — seules ces deux constantes
+# changeraient.
+format_version = 1
+
+[[elevator]]
+id = "9939278384122899325"                # Megabuilding H10, Little China (cabine sondée)
+name = "megabuilding-h10-little-china"    # lisible, logs/debug uniquement
+start_floor = 1                           # étage courant mesuré au sondage
+start_delay_ms = 1000
+travel_time_ms = 4000
+floors = [
+  { index = 0, hidden = false, inactive = false },
+  { index = 1, hidden = false, inactive = false },
+]

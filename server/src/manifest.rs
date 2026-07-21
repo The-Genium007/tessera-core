@@ -107,6 +107,15 @@ pub struct Runtime {
     /// `server_loop.rs`).
     #[serde(default)]
     pub named_npc_manifest_path: Option<String>,
+    /// Chemin (relatif au répertoire du manifeste, même convention que
+    /// `TopologyConfig::authority_artifact`/`named_npc_manifest_path`) vers un catalogue TOML
+    /// d'ascenseurs (modèle serveur nav-indépendant, palier 2) — voir `elevator_catalog.rs`.
+    /// ABSENT = aucun ascenseur simulé sur ce serveur (défaut sûr, comportement historique
+    /// préservé, cf. `Server::new_with_elevators`/`Server::with_elevators` vs `Server::new` dans
+    /// `server_loop.rs`). Orthogonal à `population`/`named_npc_manifest_path` : les ascenseurs ne
+    /// sont PAS mutuellement exclusifs avec les PNJ, contrairement à ces deux-là entre eux.
+    #[serde(default)]
+    pub elevator_catalog_path: Option<String>,
 }
 
 /// Valeur par défaut de `Runtime::redis_url` quand absente du TOML — Redis local, cohérent avec
@@ -846,6 +855,30 @@ mod tests {
         let m = parse_and_validate(&toml).unwrap();
         assert_eq!(m.runtime.population.target_density.get("centre"), Some(&20));
         assert_eq!(m.runtime.population.target_density.get("periph"), Some(&5));
+    }
+
+    // --- elevator_catalog_path : chemin du catalogue d'ascenseurs (modèle serveur, palier 2) ---
+
+    #[test]
+    fn elevator_catalog_path_defaults_to_none() {
+        let m = parse_and_validate(MINIMAL_TOML).unwrap();
+        assert!(m.runtime.elevator_catalog_path.is_none());
+    }
+
+    #[test]
+    fn elevator_catalog_path_is_read_when_declared() {
+        // Insérée sous `[runtime]`, AVANT tout sous-tableau — même piège TOML que
+        // `named_npc_manifest_path` ci-dessous (une clé nue placée après un sous-tableau
+        // `[runtime.xxx]` appartiendrait à ce sous-tableau, pas à `[runtime]`).
+        let toml = MINIMAL_TOML.replace(
+            "[runtime]\n        whitelist = false",
+            "[runtime]\n        elevator_catalog_path = \"elevator-catalog.toml\"\n        whitelist = false",
+        );
+        let m = parse_and_validate(&toml).unwrap();
+        assert_eq!(
+            m.runtime.elevator_catalog_path.as_deref(),
+            Some("elevator-catalog.toml")
+        );
     }
 
     // --- named_npc_manifest_path : chemin du catalogue PNJ nominatif (fondation d'interaction) ---
