@@ -38,6 +38,25 @@ pub fn is_npc_id(id: ClientId) -> bool {
     id >= NPC_ID_RANGE_START
 }
 
+/// Plage réservée aux véhicules, DISTINCTE de la plage PNJ piétons (`NPC_ID_RANGE_START`, compte
+/// vers le haut) et de la plage PNJ nominatifs (compte vers le bas depuis `u64::MAX`, fondation
+/// d'interaction) — un bit de poids fort supplémentaire garantit 2^48 ids d'écart avec la plage
+/// piétons, marge gigantesque à toute échelle réaliste (même raisonnement que la séparation
+/// piétons/nominatifs déjà en place).
+///
+/// # Note de relation avec `is_npc_id`
+/// `VEHICLE_ID_RANGE_START > NPC_ID_RANGE_START`, donc un id véhicule satisfait aussi `is_npc_id`.
+/// Les appelants existants de `is_npc_id` (notamment `tick_npcs`'s calcul de `player_count` en
+/// `server_loop.rs`) doivent être vérifiés à Task 3 pour s'assurer qu'un futur véhicule ne serait
+/// pas accidentellement compté comme "PNJ" dans une logique qui ne l'attend pas — à ce stade,
+/// `is_npc_id` doit soit rester "piétons strictement" ou devenir `is_simulated_entity_id` englobant
+/// (piétons + véhicules).
+pub const VEHICLE_ID_RANGE_START: ClientId = 1 << 49;
+
+pub fn is_vehicle_id(id: ClientId) -> bool {
+    id >= VEHICLE_ID_RANGE_START
+}
+
 fn cell_of(x: f32, y: f32) -> CellCoord {
     (
         (x / CELL_SIZE).floor() as i64,

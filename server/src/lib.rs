@@ -45,6 +45,7 @@ pub mod shard;
 pub mod shutdown;
 pub mod snapshot_merge;
 pub mod transport;
+pub mod vehicle;
 pub mod world;
 pub mod world_clock;
 pub mod write_behind;
