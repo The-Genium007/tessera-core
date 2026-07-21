@@ -467,6 +467,24 @@ impl Server {
                     ..current_pose
                 },
             );
+
+            if let Some(passenger_id) = record.passenger {
+                // Invariant convoi (spec §4, approche A) : la position ABSOLUE du passager suit le
+                // véhicule. Le handoff joueur reste INTOUCHÉ (le passager garde son propre ClientId,
+                // son propre chemin de handoff normal — ce Server ne fait qu'écraser sa Pose, rien
+                // d'autre) — la vertu cardinale de l'approche A (spec §4).
+                let passenger_pose = self.world.pose_of(passenger_id).unwrap_or_default();
+                self.world.set_pose(
+                    passenger_id,
+                    Pose {
+                        x: new_pos.x,
+                        y: new_pos.y,
+                        z: new_pos.z,
+                        ..passenger_pose
+                    },
+                );
+            }
+
             let _ = &record.movement; // v1 : toujours EnRoute pendant le déplacement, Arrete est
                                       // posé/lu par un futur câblage hélage (spec §8, hors périmètre).
 
@@ -642,6 +660,23 @@ impl Server {
                         if let Some(named) = &self.named_npc_registry {
                             if named.manifest_id_of(ei.target()).is_some() {
                                 self.pending_interaction_opens.push((from, ei.target()));
+                            }
+                        }
+                    }
+                    // Nouveau (véhicules autonomes, Task 6) : kind=3=Mount / kind=4=Unmount sur un
+                    // véhicule (spec §3/§4). L'invariant convoi (position du passager écrasée par
+                    // celle du véhicule) est appliqué dans `tick_vehicles`, pas ici — ce bloc ne
+                    // fait que poser/retirer `record.passenger`.
+                    if ei.kind() == 3 {
+                        if let Some(vreg) = &mut self.vehicle_registry {
+                            if let Some(vehicle) = vreg.records.get_mut(&ei.target()) {
+                                let _ = vehicle.mount(from); // échec silencieux si déjà occupé — spec §8 mono-passager
+                            }
+                        }
+                    } else if ei.kind() == 4 {
+                        if let Some(vreg) = &mut self.vehicle_registry {
+                            if let Some(vehicle) = vreg.records.get_mut(&ei.target()) {
+                                vehicle.unmount(from);
                             }
                         }
                     }
@@ -2093,6 +2128,177 @@ mod tests {
         assert!(
             snap.vehicles().map(|v| v.len()).unwrap_or(0) == 0,
             "sans registre véhicule, vehicles doit rester vide"
+        );
+    }
+
+    #[test]
+    fn mounting_a_vehicle_makes_the_passenger_position_follow_it() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(50.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(1000.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(50.0, 0.0, 0.0));
+        let vehicle_id = crate::world::VEHICLE_ID_RANGE_START;
+
+        let mut t = InMemoryTransport::new();
+        // Joueur 1 = futur passager, joueur 2 = observateur.
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        t.take_sent(1);
+        let sent_to_2_before = t.take_sent(2);
+
+        // Position de joueur 1 AVANT montée, vue par l'observateur (doit être (0,0,0), pose par défaut).
+        let pos_before = sent_to_2_before.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            })
+        });
+        assert_eq!(pos_before, Some((0.0, 0.0, 0.0)));
+
+        // Joueur 1 monte dans le véhicule (kind=3=Mount, param=0=premier siège).
+        let mount = encode_entity_interaction(vehicle_id, 3, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: mount,
+        });
+        server.tick(&mut t);
+        t.take_sent(1);
+        t.take_sent(2);
+
+        // Plusieurs ticks : le véhicule avance le long de sa route (a → b).
+        for _ in 0..20 {
+            server.tick(&mut t);
+        }
+        t.take_sent(1);
+        let sent_to_2_after = t.take_sent(2);
+
+        // Position de joueur 1 APRÈS plusieurs ticks, vue par l'observateur : doit avoir bougé
+        // (suit le véhicule), pas être restée figée à (0,0,0).
+        let pos_after = sent_to_2_after.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            })
+        });
+        assert!(pos_after.is_some());
+        assert_ne!(
+            pos_before, pos_after,
+            "la position du passager doit suivre le véhicule après montée, pas rester figée"
+        );
+
+        // Vérification renforcée : la position du passager doit correspondre exactement à celle du
+        // véhicule au même tick (invariant convoi, pas juste "a bougé un peu par hasard"). Les deux
+        // positions doivent être lues dans le MÊME message de snapshot (un message par tick reçu
+        // dans `sent_to_2_after` — comparer une position prise au tick N à une position prise à un
+        // autre tick M donnerait un faux échec, l'un et l'autre bougeant à chaque tick).
+        let last = sent_to_2_after
+            .last()
+            .expect("au moins un snapshot reçu par l'observateur sur les 20 derniers ticks");
+        let env = flatbuffers::root::<ServerEnvelope>(last).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let pos_after_same_tick = snap
+            .players()
+            .unwrap()
+            .iter()
+            .find(|p| p.id() == 1)
+            .map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            });
+        let vehicle_pos_after = snap.vehicles().unwrap().iter().next().map(|v| {
+            let p = v.position().unwrap();
+            (p.x(), p.y(), p.z())
+        });
+        assert_eq!(
+            pos_after_same_tick, vehicle_pos_after,
+            "la position du passager doit être EXACTEMENT celle du véhicule (invariant convoi)"
+        );
+    }
+
+    #[test]
+    fn unmounting_a_vehicle_stops_the_passenger_position_from_following_it() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(50.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(1000.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(50.0, 0.0, 0.0));
+        let vehicle_id = crate::world::VEHICLE_ID_RANGE_START;
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        t.take_sent(1);
+        t.take_sent(2);
+
+        let mount = encode_entity_interaction(vehicle_id, 3, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: mount,
+        });
+        server.tick(&mut t);
+        t.take_sent(1);
+        t.take_sent(2);
+
+        // Quelques ticks montés, puis démonte.
+        for _ in 0..5 {
+            server.tick(&mut t);
+        }
+        t.take_sent(1);
+        t.take_sent(2);
+
+        let unmount = encode_entity_interaction(vehicle_id, 4, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: unmount,
+        });
+        server.tick(&mut t);
+        t.take_sent(1);
+        let sent_to_2_at_unmount = t.take_sent(2);
+        let pos_at_unmount = sent_to_2_at_unmount.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            })
+        });
+
+        // Encore plusieurs ticks : le véhicule continue d'avancer, mais joueur 1 (démonté) doit
+        // rester figé à sa position au moment du démontage.
+        for _ in 0..20 {
+            server.tick(&mut t);
+        }
+        t.take_sent(1);
+        let sent_to_2_later = t.take_sent(2);
+        let pos_later = sent_to_2_later.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            })
+        });
+
+        assert_eq!(
+            pos_at_unmount, pos_later,
+            "après démontage, la position du passager ne doit plus suivre le véhicule"
         );
     }
 }
