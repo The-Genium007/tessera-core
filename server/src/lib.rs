@@ -30,6 +30,7 @@ pub mod named_npc_catalog;
 pub mod named_npc_registry;
 pub mod nav;
 pub mod nav_graph;
+pub mod nav_state;
 pub mod permissions;
 pub mod persistence;
 pub mod player_store_impl;
