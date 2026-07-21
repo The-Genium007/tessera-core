@@ -253,5 +253,10 @@ mod tests {
             .join("elevator-catalog.example.toml");
         let cat = load(&path).expect("elevator-catalog.example.toml doit être valide");
         assert_eq!(cat.len(), 1);
+        assert_eq!(
+            cat.name_of(9939278384122899325),
+            Some("megabuilding-h10-little-china"),
+            "le vrai EntityID mesuré en jeu doit survivre à l'aller-retour depuis le fichier livré"
+        );
     }
 }
