@@ -271,6 +271,9 @@ impl Server {
                 target_floor: state.target_floor.unwrap_or(-1),
                 movement_state: movement,
                 requested_floors: Some(requested_off),
+                // `0` double comme sentinelle « pas de départ en cours » ET comme numéro de tick valide.
+                // C'est sûr ici parce que `self.world.advance_tick()` (dans `tick()` ligne 366) s'exécute
+                // AVANT le code ascenseur — donc `now_tick` ne sera jamais 0 quand on enregistre un vrai départ.
                 depart_tick: state.depart_tick.unwrap_or(0),
                 start_delay_ms: state.start_delay_ms,
                 travel_time_ms: state.travel_time_ms,
@@ -1468,15 +1471,25 @@ mod tests {
         server.tick(&mut t);
 
         let sent = t.take_sent(2);
-        let seen = sent.iter().any(|b| {
-            flatbuffers::root::<ServerEnvelope>(b)
-                .ok()
-                .and_then(|env| env.msg_as_elevator_state_msg())
-                .is_some()
-        });
-        assert!(
-            seen,
-            "un client qui arrive doit recevoir l'état courant des cabines"
+        let last = sent
+            .iter()
+            .rev()
+            .filter_map(|b| {
+                let env = flatbuffers::root::<ServerEnvelope>(b).ok()?;
+                env.msg_as_elevator_state_msg()
+            })
+            .next()
+            .expect("un client qui arrive doit recevoir l'état courant des cabines");
+
+        assert_eq!(
+            last.movement_state(),
+            1,
+            "1 = MovingUp : le client qui rejoint doit apprendre que la cabine est DÉJÀ en mouvement"
+        );
+        assert_eq!(
+            last.target_floor(),
+            1,
+            "et vers quel étage elle se dirige"
         );
     }
 }
