@@ -107,6 +107,10 @@ mod tests {
         let mut v = VehicleRecord::new(1, 1, 8.0);
         v.mount(42).unwrap();
         v.unmount(99); // pas le vrai passager
-        assert_eq!(v.passenger, Some(42), "un imposteur ne peut pas éjecter le vrai passager");
+        assert_eq!(
+            v.passenger,
+            Some(42),
+            "un imposteur ne peut pas éjecter le vrai passager"
+        );
     }
 }
