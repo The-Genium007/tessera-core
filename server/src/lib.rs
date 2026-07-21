@@ -42,6 +42,7 @@ pub mod server_loop;
 pub mod session_log;
 pub mod session_log_html;
 pub mod shard;
+pub mod shard_boundary_bridge;
 pub mod shutdown;
 pub mod snapshot_merge;
 pub mod transport;
