@@ -28,6 +28,7 @@ pub mod npc;
 pub mod npc_catalog;
 pub mod named_npc_catalog;
 pub mod named_npc_registry;
+pub mod nav_graph;
 pub mod permissions;
 pub mod persistence;
 pub mod player_store_impl;
