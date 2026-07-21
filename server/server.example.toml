@@ -80,7 +80,7 @@ visibility_radius = 100.0
 # named_npc_manifest_path = "named-npc-catalog.toml"
 
 # --- Ascenseurs (modèle serveur, palier 2) ---
-# Chemin du catalogue d'ascenseurs. ABSENT ou vide = aucun ascenseur simulé (défaut sûr).
+# Chemin du catalogue d'ascenseurs. ABSENT = aucun ascenseur simulé (défaut sûr).
 # Le catalogue porte l'EntityID statique de chaque cabine, ses étages et ses durées — voir
 # elevator-catalog.example.toml. Le serveur n'accepte JAMAIS un ascenseur annoncé par un client.
 # Orthogonal à runtime.population/named_npc_manifest_path ci-dessus (pas d'exclusion mutuelle) :
