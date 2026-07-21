@@ -16,6 +16,7 @@ use crate::npc::{
 use crate::npc_catalog::NpcCatalog;
 use crate::population_director::PopulationDirector;
 use crate::transport::{ClientId, Transport, TransportEvent};
+use crate::vehicle::VehicleRecord;
 use crate::world::{Pose, World};
 use flatbuffers::FlatBufferBuilder;
 use protocol::*;
@@ -65,6 +66,21 @@ pub struct Server {
     /// via un setter dédié (`set_nav_graph`) plutôt qu'un paramètre de constructeur — la navigation
     /// est un comportement additif, pas une variante de configuration comme catalog/director/registry.
     nav_graph: Option<NavGraph>,
+    /// `None` = aucune simulation véhicule sur ce Shard (comportement historique préservé — tous
+    /// les appels `Server::new`/`new_with_metrics`/`new_with_npcs`/`new_with_named_npcs` existants
+    /// restent inchangés et n'activent jamais les véhicules). `Some(..)` uniquement via
+    /// `Server::new_with_vehicles`, registre VIDE au départ (spawn explicite via `spawn_vehicle`,
+    /// cf. doc de ce constructeur).
+    vehicle_registry: Option<VehicleRegistry>,
+    /// Rapports de position prédictifs (pont Shard→Gateway générique, `shard_boundary_bridge.rs`)
+    /// accumulés par `tick_vehicles` ce tick — (entity_id, x, y, z, speed). Drainé par
+    /// `take_pending_entity_reports`, appelé depuis `shard_main` (`Server`/`server_loop.rs` n'a pas
+    /// de connexion TCP directe au Gateway, seul `shard.rs` possède la socket). Même patron que
+    /// `pending_interaction_opens`/`pending_events`, mais PAS drainé dans `tick()` lui-même : ces
+    /// deux files existantes relaient au client via `transport` (que `tick()` a déjà en main),
+    /// alors qu'un rapport de position part vers le Gateway sur un canal totalement différent
+    /// (la socket TCP interne, hors de portée de `Server`) — d'où un drain externe dédié.
+    pending_entity_reports: Vec<(ClientId, f32, f32, f32, f32)>,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -95,6 +111,18 @@ impl ElevatorRegistry {
     }
 }
 
+/// Regroupe l'état véhicule vivant d'un Shard — sibling de `NpcRegistry`, mais SANS catalogue ni
+/// director : un véhicule n'est pas peuplé automatiquement dans ce noyau (spec véhicules autonomes
+/// §2 « trafic d'ambiance » différé, cf. doc de `Server::new_with_vehicles`), il n'y a donc rien à
+/// réconcilier contre une présence de district comme le fait `PopulationDirector` pour les PNJ.
+struct VehicleRegistry {
+    records: std::collections::HashMap<ClientId, VehicleRecord>,
+    /// Chemin/progression courants par véhicule — même mécanique que `NpcRegistry::nav_states`
+    /// (NavState réutilisé tel quel, cf. Interfaces de cette tâche).
+    nav_states: std::collections::HashMap<ClientId, NavState>,
+    next_vehicle_id: ClientId,
+}
+
 impl Server {
     pub fn new(aoi_radius: f32) -> Self {
         Self {
@@ -110,6 +138,8 @@ impl Server {
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
             nav_graph: None,
+            vehicle_registry: None,
+            pending_entity_reports: Vec::new(),
         }
     }
 
@@ -132,6 +162,8 @@ impl Server {
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
             nav_graph: None,
+            vehicle_registry: None,
+            pending_entity_reports: Vec::new(),
         }
     }
 
@@ -165,6 +197,8 @@ impl Server {
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
             nav_graph: None,
+            vehicle_registry: None,
+            pending_entity_reports: Vec::new(),
         }
     }
 
@@ -214,6 +248,73 @@ impl Server {
             pending_interaction_opens: Vec::new(),
             pending_interaction_results: Vec::new(),
             nav_graph: None,
+            vehicle_registry: None,
+            pending_entity_reports: Vec::new(),
+        }
+    }
+
+    /// Identique à `Server::new`, avec en plus un registre de véhicules actif — VIDE au départ
+    /// (aucun véhicule de trafic d'ambiance spawn automatiquement dans ce noyau ; le spawn se fait
+    /// explicitement via `spawn_vehicle`, appelé soit par un test, soit par un futur câblage
+    /// director-de-trafic hors périmètre de ce plan — spec §2 « trafic d'ambiance » différé, ce
+    /// noyau livre le mécanisme, pas le peuplement automatique). Nouvelle méthode plutôt qu'un
+    /// changement de signature des constructeurs existants : `Server::new`/`new_with_metrics`/
+    /// `new_with_npcs`/`new_with_named_npcs` sont déjà appelés par de nombreux tests existants qui
+    /// ne doivent pas changer pour cette tâche (même raisonnement que chacun d'eux).
+    pub fn new_with_vehicles(aoi_radius: f32) -> Self {
+        Self {
+            world: World::new(),
+            aoi_radius,
+            pending_events: Vec::new(),
+            metrics: None,
+            npc_registry: None,
+            named_npc_registry: None,
+            elevator_registry: None,
+            pending_elevator_broadcasts: Vec::new(),
+            session_registry: SessionRegistry::new(),
+            pending_interaction_opens: Vec::new(),
+            pending_interaction_results: Vec::new(),
+            nav_graph: None,
+            vehicle_registry: Some(VehicleRegistry {
+                records: std::collections::HashMap::new(),
+                nav_states: std::collections::HashMap::new(),
+                next_vehicle_id: crate::world::VEHICLE_ID_RANGE_START,
+            }),
+            pending_entity_reports: Vec::new(),
+        }
+    }
+
+    /// Fait naître un véhicule à `from`, avec une destination initiale `to` déjà planifiée (v1 :
+    /// pas de director de trafic, le spawn est explicite — cf. doc de `new_with_vehicles`).
+    /// No-op silencieux si ce `Server` n'a pas de registre véhicule (`Server::new` et les autres
+    /// constructeurs sans véhicules) — même style que `tick_npcs`/`tick_vehicles` (garde `let
+    /// else` plutôt qu'un panic sur un appel a priori incorrect côté appelant, cohérent avec le
+    /// reste du fichier).
+    pub fn spawn_vehicle(&mut self, archetype: u32, from: NavVec3, to: NavVec3) {
+        let Some(registry) = &mut self.vehicle_registry else {
+            return;
+        };
+        let id = registry.next_vehicle_id;
+        registry.next_vehicle_id += 1;
+        // Vitesse fixée à 8.0 u/s ici (v1 : constante, pas encore par archétype/.aiarch — même
+        // simplification assumée que `NPC_SPEED_UNITS_PER_SEC` côté piéton dans `tick_npcs`).
+        registry
+            .records
+            .insert(id, VehicleRecord::new(id, archetype, 8.0));
+        self.world.add_player(id);
+        self.world.set_pose(
+            id,
+            Pose {
+                x: from.x,
+                y: from.y,
+                z: from.z,
+                ..Default::default()
+            },
+        );
+        if let Some(graph) = &self.nav_graph {
+            if let Some(path) = plan_path(graph, from, to) {
+                registry.nav_states.entry(id).or_default().set_path(path);
+            }
         }
     }
 
@@ -477,6 +578,102 @@ impl Server {
         }
     }
 
+    /// Un pas de navigation véhicule (spec véhicules autonomes §3) — no-op si ce `Server` n'a pas
+    /// de registre véhicule (`Server::new` et les autres constructeurs sans véhicules). Même
+    /// mécanique que la navigation PNJ (`tick_npcs` : NavGraph/plan_path/NavState réutilisés tels
+    /// quels), mais SANS director (aucune réconciliation spawn/despawn ici — spawn explicite via
+    /// `spawn_vehicle` uniquement, cf. sa doc) et avec la vitesse PROPRE du véhicule
+    /// (`record.speed_units_per_sec`) plutôt que la constante `NPC_SPEED_UNITS_PER_SEC` piétonne.
+    fn tick_vehicles(&mut self) {
+        let Some(registry) = &mut self.vehicle_registry else {
+            return;
+        };
+        // Fenêtre prédictive du pont Shard→Gateway (spec véhicules autonomes §5 : "rank_bonus ≈
+        // vitesse × N secondes, N à régler"). Même valeur des deux côtés du pont — ici pour décider
+        // QUAND émettre un rapport (should_report_position), côté Gateway pour dimensionner le
+        // tampon de handoff (predictive_rank_bonus, cf. gateway.rs) — un désaccord entre les deux
+        // ferait émettre un rapport qui arrive trop tôt/tard par rapport au tampon réellement chargé.
+        const BOUNDARY_LOOKAHEAD_SECONDS: f32 = 2.0;
+        let tick_dt = 1.0 / crate::default_tick_rate_hz() as f32;
+        for (id, record) in registry.records.iter_mut() {
+            let Some(nav_state) = registry.nav_states.get_mut(id) else {
+                continue;
+            };
+            if !nav_state.has_path() {
+                continue; // v1 : pas de re-décision de destination automatique (pas de director de
+                          // trafic, cf. spawn_vehicle) — un véhicule arrivé s'arrête, spec §8
+                          // (annulation/nouvelle destination) différé.
+            }
+            let current_pose = self.world.pose_of(*id).unwrap_or_default();
+            let new_pos = nav_state.advance(
+                NavVec3::new(current_pose.x, current_pose.y, current_pose.z),
+                record.speed_units_per_sec * tick_dt,
+            );
+            self.world.set_pose(
+                *id,
+                Pose {
+                    x: new_pos.x,
+                    y: new_pos.y,
+                    z: new_pos.z,
+                    ..current_pose
+                },
+            );
+
+            if let Some(passenger_id) = record.passenger {
+                // Invariant convoi (spec §4, approche A) : la position ABSOLUE du passager suit le
+                // véhicule. Le handoff joueur reste INTOUCHÉ (le passager garde son propre ClientId,
+                // son propre chemin de handoff normal — ce Server ne fait qu'écraser sa Pose, rien
+                // d'autre) — la vertu cardinale de l'approche A (spec §4).
+                let passenger_pose = self.world.pose_of(passenger_id).unwrap_or_default();
+                self.world.set_pose(
+                    passenger_id,
+                    Pose {
+                        x: new_pos.x,
+                        y: new_pos.y,
+                        z: new_pos.z,
+                        ..passenger_pose
+                    },
+                );
+            }
+
+            let _ = &record.movement; // v1 : toujours EnRoute pendant le déplacement, Arrete est
+                                      // posé/lu par un futur câblage hélage (spec §8, hors périmètre).
+
+            // Pont Shard→Gateway générique (shard_boundary_bridge.rs) : un véhicule dont le chemin
+            // planifié entre dans le tampon prédictif d'un shard voisin déclenche un rapport de
+            // position, drainé par `shard_main` et transmis au Gateway pour un vrai handoff — même
+            // mécanique qu'un `PositionUpdate` de client réel (cf. gateway.rs). `next_waypoint`
+            // absent (chemin arrivé/vide) => aucun rapport, cohérent avec `!nav_state.has_path()`
+            // ci-dessus qui a déjà fait `continue` dans ce cas.
+            if let Some(next_waypoint) = nav_state.next_waypoint() {
+                let current = NavVec3::new(new_pos.x, new_pos.y, new_pos.z);
+                if crate::shard_boundary_bridge::should_report_position(
+                    current,
+                    next_waypoint,
+                    record.speed_units_per_sec,
+                    BOUNDARY_LOOKAHEAD_SECONDS,
+                ) {
+                    self.pending_entity_reports.push((
+                        *id,
+                        new_pos.x,
+                        new_pos.y,
+                        new_pos.z,
+                        record.speed_units_per_sec,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Rapports de position prédictifs à transmettre au Gateway ce tick (pont Shard→Gateway,
+    /// primitive générique — cf. `shard_boundary_bridge.rs`). Drainé par `shard_main`, qui les
+    /// encode (`internal_net::encode_entity_position_report`) et les écrit sur la socket TCP
+    /// interne existante vers le Gateway — `Server`/`server_loop.rs` n'a pas de connexion TCP
+    /// directe au Gateway, seul `shard.rs::shard_main` possède la socket.
+    pub fn take_pending_entity_reports(&mut self) -> Vec<(ClientId, f32, f32, f32, f32)> {
+        std::mem::take(&mut self.pending_entity_reports)
+    }
+
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
     pub fn tick<T: Transport>(&mut self, transport: &mut T) {
         let tick_start = std::time::Instant::now();
@@ -539,6 +736,7 @@ impl Server {
                 transport.send(id, &bytes);
             }
         }
+        self.tick_vehicles();
         // Réclame les sessions d'interaction jamais résolues (client qui ouvre puis se déconnecte
         // sans jamais répondre) — trouvé en revue finale de branche (fondation d'interaction) :
         // SessionRegistry::expire_stale existait et était testé (Task 1) mais n'était jamais
@@ -666,6 +864,23 @@ impl Server {
                             }
                         }
                     }
+                    // Nouveau (véhicules autonomes, Task 6) : kind=3=Mount / kind=4=Unmount sur un
+                    // véhicule (spec §3/§4). L'invariant convoi (position du passager écrasée par
+                    // celle du véhicule) est appliqué dans `tick_vehicles`, pas ici — ce bloc ne
+                    // fait que poser/retirer `record.passenger`.
+                    if ei.kind() == 3 {
+                        if let Some(vreg) = &mut self.vehicle_registry {
+                            if let Some(vehicle) = vreg.records.get_mut(&ei.target()) {
+                                let _ = vehicle.mount(from); // échec silencieux si déjà occupé — spec §8 mono-passager
+                            }
+                        }
+                    } else if ei.kind() == 4 {
+                        if let Some(vreg) = &mut self.vehicle_registry {
+                            if let Some(vehicle) = vreg.records.get_mut(&ei.target()) {
+                                vehicle.unmount(from);
+                            }
+                        }
+                    }
                 }
             }
             ClientMsg::InteractionChoice => {
@@ -757,14 +972,39 @@ impl Server {
                 ))
             })
             .collect();
+        let vehicle_states: Vec<_> = self
+            .vehicle_registry
+            .iter()
+            .flat_map(|r| r.records.values())
+            .filter_map(|record| {
+                let pose = self.world.pose_of(record.id)?;
+                Some(VehicleState::create(
+                    b,
+                    &VehicleStateArgs {
+                        id: record.id,
+                        archetype: record.archetype,
+                        position: Some(&Vec3::new(pose.x, pose.y, pose.z)),
+                        yaw: pose.yaw,
+                        // Quantization simple centiunités/s (choix v1, raffinable au gel consolidé
+                        // si une meilleure précision s'avère nécessaire) — cohérent avec l'esprit
+                        // de quantization déjà prévu pour le protocole (cf. commentaire schéma
+                        // VehicleState, protocol.fbs).
+                        speed: (record.speed_units_per_sec * 100.0).round() as u16,
+                        passenger: record.passenger.unwrap_or(0),
+                    },
+                ))
+            })
+            .collect();
         let players = b.create_vector(&states);
         let npcs = b.create_vector(&npc_states);
+        let vehicles = b.create_vector(&vehicle_states);
         let snap = Snapshot::create(
             b,
             &SnapshotArgs {
                 tick: self.world.tick(),
                 players: Some(players),
                 npcs: Some(npcs),
+                vehicles: Some(vehicles),
             },
         );
         let env = ServerEnvelope::create(
@@ -1967,6 +2207,160 @@ mod tests {
     }
 
     #[test]
+    fn a_vehicle_with_a_nav_graph_moves_along_its_route_over_several_ticks() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(50.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(50.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(50.0, 0.0, 0.0));
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        let first = t.take_sent(1).iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.vehicles()?.iter().next().map(|v| {
+                let p = v.position().unwrap();
+                (p.x(), p.y())
+            })
+        });
+
+        for _ in 0..20 {
+            server.tick(&mut t);
+        }
+        let later = t.take_sent(1).iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.vehicles()?.iter().next().map(|v| {
+                let p = v.position().unwrap();
+                (p.x(), p.y())
+            })
+        });
+
+        assert!(first.is_some() && later.is_some());
+        assert_ne!(
+            first, later,
+            "le véhicule doit avoir progressé le long de sa route"
+        );
+    }
+
+    #[test]
+    fn a_vehicle_close_to_its_next_waypoint_pushes_a_pending_entity_report() {
+        // Pont Shard→Gateway (Task 5) : un véhicule dont le prochain waypoint est à portée du
+        // tampon prédictif (vitesse 8.0 u/s * 2s lookahead = 16 unités, cf.
+        // shard_boundary_bridge::should_report_position) doit pousser un rapport de position dans
+        // `pending_entity_reports`, drainable via `take_pending_entity_reports`.
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(10.0, 0.0, 0.0)); // < 16 unités : dans le tampon dès le spawn
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(50.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(10.0, 0.0, 0.0));
+
+        let mut t = InMemoryTransport::new();
+        server.tick(&mut t);
+
+        let reports = server.take_pending_entity_reports();
+        assert!(
+            !reports.is_empty(),
+            "un véhicule à moins de 16 unités de son prochain waypoint doit émettre un rapport"
+        );
+        let (entity_id, _x, _y, _z, speed) = reports[0];
+        assert_eq!(entity_id, crate::world::VEHICLE_ID_RANGE_START);
+        assert_eq!(speed, 8.0);
+    }
+
+    #[test]
+    fn a_vehicle_far_from_its_next_waypoint_pushes_no_pending_entity_report() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(1000.0, 0.0, 0.0)); // très loin du tampon (16 unités)
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(50.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(
+            1,
+            NavVec3::new(0.0, 0.0, 0.0),
+            NavVec3::new(1000.0, 0.0, 0.0),
+        );
+
+        let mut t = InMemoryTransport::new();
+        server.tick(&mut t);
+
+        assert!(
+            server.take_pending_entity_reports().is_empty(),
+            "un véhicule loin de son prochain waypoint ne doit émettre aucun rapport"
+        );
+    }
+
+    #[test]
+    fn take_pending_entity_reports_drains_and_does_not_repeat_across_ticks() {
+        // std::mem::take doit vider la file : un 2e appel sans nouveau tick ne doit rien renvoyer.
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(10.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(50.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(10.0, 0.0, 0.0));
+
+        let mut t = InMemoryTransport::new();
+        server.tick(&mut t);
+
+        assert!(!server.take_pending_entity_reports().is_empty());
+        assert!(
+            server.take_pending_entity_reports().is_empty(),
+            "un 2e drain sans nouveau tick ne doit rien renvoyer (file déjà vidée)"
+        );
+    }
+
+    #[test]
+    fn a_server_without_vehicles_never_pushes_pending_entity_reports() {
+        // Server::new (sans registre véhicule) : tick_vehicles est un no-op, donc aucun rapport
+        // ne doit jamais apparaître, quel que soit le nombre de ticks.
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        for _ in 0..5 {
+            server.tick(&mut t);
+        }
+        assert!(server.take_pending_entity_reports().is_empty());
+    }
+
+    #[test]
+    fn a_server_without_vehicles_never_adds_any_vehicle_state_to_the_snapshot() {
+        // Comportement historique préservé : Server::new (sans véhicules) ne doit jamais faire
+        // apparaître de VehicleState dans un Snapshot.
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        assert!(
+            snap.vehicles().map(|v| v.len()).unwrap_or(0) == 0,
+            "sans registre véhicule, vehicles doit rester vide"
+        );
+    }
+
+    #[test]
     fn a_configured_elevator_is_broadcast_and_moves_on_a_client_call() {
         use crate::elevator_catalog::parse_and_validate;
 
@@ -2270,6 +2664,177 @@ mod tests {
             saw_elevator,
             "le même Server doit AUSSI diffuser l'état de l'ascenseur configuré — les deux \
              registres doivent coexister, pas s'exclure"
+        );
+    }
+
+    #[test]
+    fn mounting_a_vehicle_makes_the_passenger_position_follow_it() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(50.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(1000.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(50.0, 0.0, 0.0));
+        let vehicle_id = crate::world::VEHICLE_ID_RANGE_START;
+
+        let mut t = InMemoryTransport::new();
+        // Joueur 1 = futur passager, joueur 2 = observateur.
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        t.take_sent(1);
+        let sent_to_2_before = t.take_sent(2);
+
+        // Position de joueur 1 AVANT montée, vue par l'observateur (doit être (0,0,0), pose par défaut).
+        let pos_before = sent_to_2_before.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            })
+        });
+        assert_eq!(pos_before, Some((0.0, 0.0, 0.0)));
+
+        // Joueur 1 monte dans le véhicule (kind=3=Mount, param=0=premier siège).
+        let mount = encode_entity_interaction(vehicle_id, 3, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: mount,
+        });
+        server.tick(&mut t);
+        t.take_sent(1);
+        t.take_sent(2);
+
+        // Plusieurs ticks : le véhicule avance le long de sa route (a → b).
+        for _ in 0..20 {
+            server.tick(&mut t);
+        }
+        t.take_sent(1);
+        let sent_to_2_after = t.take_sent(2);
+
+        // Position de joueur 1 APRÈS plusieurs ticks, vue par l'observateur : doit avoir bougé
+        // (suit le véhicule), pas être restée figée à (0,0,0).
+        let pos_after = sent_to_2_after.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            })
+        });
+        assert!(pos_after.is_some());
+        assert_ne!(
+            pos_before, pos_after,
+            "la position du passager doit suivre le véhicule après montée, pas rester figée"
+        );
+
+        // Vérification renforcée : la position du passager doit correspondre exactement à celle du
+        // véhicule au même tick (invariant convoi, pas juste "a bougé un peu par hasard"). Les deux
+        // positions doivent être lues dans le MÊME message de snapshot (un message par tick reçu
+        // dans `sent_to_2_after` — comparer une position prise au tick N à une position prise à un
+        // autre tick M donnerait un faux échec, l'un et l'autre bougeant à chaque tick).
+        let last = sent_to_2_after
+            .last()
+            .expect("au moins un snapshot reçu par l'observateur sur les 20 derniers ticks");
+        let env = flatbuffers::root::<ServerEnvelope>(last).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let pos_after_same_tick = snap
+            .players()
+            .unwrap()
+            .iter()
+            .find(|p| p.id() == 1)
+            .map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            });
+        let vehicle_pos_after = snap.vehicles().unwrap().iter().next().map(|v| {
+            let p = v.position().unwrap();
+            (p.x(), p.y(), p.z())
+        });
+        assert_eq!(
+            pos_after_same_tick, vehicle_pos_after,
+            "la position du passager doit être EXACTEMENT celle du véhicule (invariant convoi)"
+        );
+    }
+
+    #[test]
+    fn unmounting_a_vehicle_stops_the_passenger_position_from_following_it() {
+        use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
+
+        let mut graph = NavGraph::new();
+        let a = graph.add_node(NavVec3::new(0.0, 0.0, 0.0));
+        let b = graph.add_node(NavVec3::new(50.0, 0.0, 0.0));
+        graph.add_edge(a, b);
+
+        let mut server = Server::new_with_vehicles(1000.0);
+        server.set_nav_graph(graph);
+        server.spawn_vehicle(1, NavVec3::new(0.0, 0.0, 0.0), NavVec3::new(50.0, 0.0, 0.0));
+        let vehicle_id = crate::world::VEHICLE_ID_RANGE_START;
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        t.take_sent(1);
+        t.take_sent(2);
+
+        let mount = encode_entity_interaction(vehicle_id, 3, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: mount,
+        });
+        server.tick(&mut t);
+        t.take_sent(1);
+        t.take_sent(2);
+
+        // Quelques ticks montés, puis démonte.
+        for _ in 0..5 {
+            server.tick(&mut t);
+        }
+        t.take_sent(1);
+        t.take_sent(2);
+
+        let unmount = encode_entity_interaction(vehicle_id, 4, 0);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: unmount,
+        });
+        server.tick(&mut t);
+        t.take_sent(1);
+        let sent_to_2_at_unmount = t.take_sent(2);
+        let pos_at_unmount = sent_to_2_at_unmount.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            })
+        });
+
+        // Encore plusieurs ticks : le véhicule continue d'avancer, mais joueur 1 (démonté) doit
+        // rester figé à sa position au moment du démontage.
+        for _ in 0..20 {
+            server.tick(&mut t);
+        }
+        t.take_sent(1);
+        let sent_to_2_later = t.take_sent(2);
+        let pos_later = sent_to_2_later.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
+                let pos = p.position().unwrap();
+                (pos.x(), pos.y(), pos.z())
+            })
+        });
+
+        assert_eq!(
+            pos_at_unmount, pos_later,
+            "après démontage, la position du passager ne doit plus suivre le véhicule"
         );
     }
 }

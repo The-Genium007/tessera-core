@@ -33,6 +33,14 @@ impl NavState {
         !self.path.is_empty() && self.next_index >= self.path.len()
     }
 
+    /// Position du PROCHAIN waypoint visé (pas encore atteint), `None` si le chemin est vide ou
+    /// terminé. Utilisé par le pont Shard→Gateway (`shard_boundary_bridge::should_report_position`,
+    /// spec véhicules autonomes §5) pour détecter qu'une entité approche du tampon d'un shard
+    /// voisin — même segment que celui que `advance` est en train de parcourir.
+    pub fn next_waypoint(&self) -> Option<Vec3> {
+        self.path.get(self.next_index).map(|wp| wp.position)
+    }
+
     /// Avance de `distance` unités le long du chemin depuis `current_position`, en peut-être
     /// franchissant plusieurs waypoints proches en un seul appel (vitesse élevée + waypoints
     /// rapprochés — spec ne l'exclut pas, un tick à 20 Hz avec un PNJ rapide peut couvrir plusieurs
@@ -127,6 +135,29 @@ mod tests {
         let mut nav = NavState::new();
         let pos = nav.advance(Vec3::new(1.0, 2.0, 3.0), 100.0);
         assert_eq!(pos, Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn next_waypoint_is_none_on_a_fresh_nav_state() {
+        assert_eq!(NavState::new().next_waypoint(), None);
+    }
+
+    #[test]
+    fn next_waypoint_tracks_progression_along_the_path() {
+        let mut nav = NavState::new();
+        nav.set_path(vec![wp(5.0, 0.0, 0.0), wp(5.0, 5.0, 0.0)]);
+        assert_eq!(nav.next_waypoint(), Some(Vec3::new(5.0, 0.0, 0.0)));
+        nav.advance(Vec3::new(0.0, 0.0, 0.0), 5.0); // atteint le 1er waypoint
+        assert_eq!(nav.next_waypoint(), Some(Vec3::new(5.0, 5.0, 0.0)));
+    }
+
+    #[test]
+    fn next_waypoint_is_none_once_the_path_has_fully_arrived() {
+        let mut nav = NavState::new();
+        nav.set_path(vec![wp(5.0, 0.0, 0.0)]);
+        nav.advance(Vec3::new(0.0, 0.0, 0.0), 1000.0);
+        assert!(nav.has_arrived());
+        assert_eq!(nav.next_waypoint(), None);
     }
 
     #[test]

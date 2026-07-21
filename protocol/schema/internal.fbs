@@ -12,7 +12,17 @@ table ServerSend { client_id:ulong; payload:[ubyte]; }
 table RouteRequest { client_id:ulong; x:float; y:float; z:float; }
 table RouteReply { shard_addr:string; }
 
-union InternalMsg { ClientEvent, ServerSend, RouteRequest, RouteReply }
+// Shard -> Gateway : une entité SIMULÉE côté Shard (véhicule aujourd'hui, PNJ piéton demain —
+// primitive générique, cf. commentaire du module shard_boundary_bridge.rs côté Rust) a atteint
+// cette position. Le Gateway calcule son placement (topology.locate, comme pour un vrai
+// PositionUpdate client) et pilote son handoff via le MÊME ShardLoader/write_to_shard que pour un
+// client réel — zéro nouvelle logique de placement, seulement une nouvelle SOURCE d'événement.
+// `speed` permet au Gateway de calculer un rank_bonus proportionnel à la vitesse pour le tampon
+// prédictif (spec véhicules §5) — 0 pour une entité qui ne bouge pas / dont la vitesse est hors
+// périmètre (ex. un futur PNJ piéton, vitesse basse, tampon standard suffisant).
+table EntityPositionReport { entity_id:ulong; x:float; y:float; z:float; speed:float; }
+
+union InternalMsg { ClientEvent, ServerSend, RouteRequest, RouteReply, EntityPositionReport }
 table InternalEnvelope { msg:InternalMsg; }
 
 root_type InternalEnvelope;

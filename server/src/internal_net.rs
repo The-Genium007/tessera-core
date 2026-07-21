@@ -5,8 +5,9 @@ use crate::framing::{encode_frame, FrameReader};
 use crate::transport::{ClientId, Transport, TransportEvent};
 use flatbuffers::FlatBufferBuilder;
 use protocol::internal::{
-    ClientEvent, ClientEventArgs, EventKind, InternalEnvelope, InternalEnvelopeArgs, InternalMsg,
-    RouteReply, RouteReplyArgs, RouteRequest, RouteRequestArgs, ServerSend, ServerSendArgs,
+    ClientEvent, ClientEventArgs, EntityPositionReport, EntityPositionReportArgs, EventKind,
+    InternalEnvelope, InternalEnvelopeArgs, InternalMsg, RouteReply, RouteReplyArgs, RouteRequest,
+    RouteRequestArgs, ServerSend, ServerSendArgs,
 };
 use std::collections::VecDeque;
 
@@ -114,6 +115,43 @@ pub fn decode_route_reply(body: &[u8]) -> Option<String> {
     let env = flatbuffers::root::<InternalEnvelope>(body).ok()?;
     let rr = env.msg_as_route_reply()?;
     Some(rr.shard_addr()?.to_string())
+}
+
+/// `EntityPositionReport` framé (Shard -> Gateway). Primitive générique de pont cross-shard pour
+/// toute entité simulée côté Shard — voir `shard_boundary_bridge.rs` pour l'utilisation.
+pub fn encode_entity_position_report(
+    entity_id: u64,
+    x: f32,
+    y: f32,
+    z: f32,
+    speed: f32,
+) -> Vec<u8> {
+    let mut b = FlatBufferBuilder::new();
+    let epr = EntityPositionReport::create(
+        &mut b,
+        &EntityPositionReportArgs {
+            entity_id,
+            x,
+            y,
+            z,
+            speed,
+        },
+    );
+    let env = InternalEnvelope::create(
+        &mut b,
+        &InternalEnvelopeArgs {
+            msg_type: InternalMsg::EntityPositionReport,
+            msg: Some(epr.as_union_value()),
+        },
+    );
+    b.finish(env, None);
+    encode_frame(b.finished_data())
+}
+
+pub fn decode_entity_position_report(body: &[u8]) -> Option<(u64, f32, f32, f32, f32)> {
+    let env = flatbuffers::root::<InternalEnvelope>(body).ok()?;
+    let epr = env.msg_as_entity_position_report()?;
+    Some((epr.entity_id(), epr.x(), epr.y(), epr.z(), epr.speed()))
 }
 
 /// Transport branché sur le lien interne TCP. Le Shard l'utilise via `Server::tick`.
@@ -308,6 +346,18 @@ mod tests {
         assert_eq!(
             decode_route_reply(&r.next_frame().unwrap()),
             Some("127.0.0.1:27030".to_string())
+        );
+    }
+
+    #[test]
+    fn entity_position_report_round_trip() {
+        use crate::framing::FrameReader;
+        let framed = encode_entity_position_report(42, 1.0, 2.0, 3.0, 8.5);
+        let mut r = FrameReader::new();
+        r.push(&framed);
+        assert_eq!(
+            decode_entity_position_report(&r.next_frame().unwrap()),
+            Some((42, 1.0, 2.0, 3.0, 8.5))
         );
     }
 }

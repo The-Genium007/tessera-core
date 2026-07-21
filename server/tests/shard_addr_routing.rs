@@ -54,7 +54,7 @@ fn client_position(x: f32, y: f32) -> Vec<u8> {
 async fn two_players_at_the_same_spot_see_each_other_through_the_real_shard_addr() {
     let shard_addr = "127.0.0.1:27131";
     tokio::spawn(async move {
-        server::shard_main(shard_addr, 1000.0, "127.0.0.1:0", None, None, None)
+        server::shard_main(shard_addr, 1000.0, "127.0.0.1:0", None, None, None, None)
             .await
             .unwrap()
     });
@@ -120,7 +120,14 @@ async fn two_players_at_the_same_spot_see_each_other_through_the_real_shard_addr
             tokio::time::Instant::now() < deadline,
             "timeout : aucun snapshot mutuel reçu (latest = {latest:?})"
         );
-        read_from_shards(&mut shards, &mut latest, 0, &mut snapshot_ticks).await;
+        read_from_shards(
+            &mut shards,
+            &mut latest,
+            0,
+            &mut snapshot_ticks,
+            &mut Vec::new(),
+        )
+        .await;
         if others_seen_by(&latest, 1).contains(&2) && others_seen_by(&latest, 2).contains(&1) {
             break;
         }
