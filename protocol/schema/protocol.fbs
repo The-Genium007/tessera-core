@@ -36,7 +36,17 @@ table PlayerState { id:ulong; position:Vec3; yaw:float; locomotion:ubyte; move_d
 table NpcState { id:ulong; archetype:uint; position:Vec3; yaw:float;
                  locomotion:ubyte; move_dir:ubyte; flags:ubyte; sustained:uint; behavior:ubyte; }
 
-table Snapshot { tick:ulong; players:[PlayerState]; npcs:[NpcState]; }
+// Véhicule autonome orchestré serveur (spec véhicules autonomes §1/§3). PAS le triplet biped d'A
+// (locomotion/move_dir/flags/sustained, pensé pour un PNJ/joueur humain) — un véhicule a une
+// `speed` scalaire (magnitude, direction = `yaw`) permettant l'interpolation client sans
+// dégradation à la perte de paquet (spec §3). Table séparée de `NpcState`, pas une extension :
+// sémantiquement différente (pas de locomotion piétonne), cohérent avec le principe canal
+// cosmétique/état canonique déjà établi (fondation PNJ). `speed:ushort` = quantifiée (spec §3),
+// pas `float` — cohérent avec l'esprit de quantization déjà prévu pour le gel consolidé (`QVec3`).
+table VehicleState { id:ulong; archetype:uint; position:Vec3; yaw:float; speed:ushort;
+                     passenger:ulong; }
+
+table Snapshot { tick:ulong; players:[PlayerState]; npcs:[NpcState]; vehicles:[VehicleState]; }
 
 // Client -> serveur, one-shot (saut, tir, reload, dodge, et émote one-shot type coucou).
 // action = enum extensible ; param = contexte (arme, id émote one-shot...).
@@ -46,10 +56,14 @@ table PlayerActionReport { action:ubyte; param:uint; }
 table EmoteReport { emote:uint; start:bool; }
 
 // Rapport d'interaction client -> serveur : « le joueur a fait X sur l'entité #N » (spec modèle
-// serveur §1). kind : 0=Menace/attaque 1=Parle 2=Interagit (extensible) ; param = contexte
-// (dégâts, id dialogue…). Arbitré par le serveur (NpcRecord::apply_interaction, npc.rs) —
-// anti-triche gratuit : un client ne peut jamais forcer directement l'état comportemental d'un PNJ,
-// seulement RAPPORTER une interaction que le serveur choisit ou non de traduire en transition FSM.
+// serveur §1). kind : 0=Menace/attaque 1=Parle 2=Interagit 3=Mount 4=Unmount (extensible) ;
+// param = contexte (dégâts, id dialogue…), sauf pour Mount/Unmount où param = index de siège désiré
+// (0 = conducteur/premier siège) — spec véhicules autonomes §3 : PlayerActionReport.param (32b) est
+// trop court pour un id d'entité 64b, le mount passe donc par EntityInteraction, dont `target:ulong`
+// porte déjà l'id du véhicule visé ; `param:uint` porte le siège, pas un id. Arbitré par le serveur
+// (NpcRecord::apply_interaction, npc.rs) — anti-triche gratuit : un client ne peut jamais forcer
+// directement l'état comportemental d'un PNJ, seulement RAPPORTER une interaction que le serveur
+// choisit ou non de traduire en transition FSM.
 table EntityInteraction { target:ulong; kind:ubyte; param:uint; }
 
 // Enveloppe de session d'interaction (fondation d'interaction, palier 2, Phase 3.1). session_id

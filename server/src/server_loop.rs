@@ -554,6 +554,9 @@ impl Server {
                 tick: self.world.tick(),
                 players: Some(players),
                 npcs: Some(npcs),
+                // Câblage réel du registre de véhicules = Task 5 (cette task ne fait que le
+                // schéma). VehicleState/VehicleStateArgs sont déjà disponibles via `protocol::*`.
+                vehicles: None,
             },
         );
         let env = ServerEnvelope::create(

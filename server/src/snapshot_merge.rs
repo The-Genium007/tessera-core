@@ -66,6 +66,10 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
             // n'ont pas de présence en zone tampon multi-shard à ce stade (fondation protocole,
             // Task 5 ; câblage réel à Task 6).
             npcs: None,
+            // Idem : les véhicules autonomes n'ont pas de présence en zone tampon multi-shard à ce
+            // stade (fondation protocole, Task 2 de la spec véhicules autonomes ; câblage réel du
+            // vecteur `vehicles` = Task 5, fusion inter-shard = un futur plan).
+            vehicles: None,
         },
     );
     let env = ServerEnvelope::create(
@@ -112,6 +116,7 @@ mod tests {
                 tick,
                 players: Some(pv),
                 npcs: None,
+                vehicles: None,
             },
         );
         let env = ServerEnvelope::create(
