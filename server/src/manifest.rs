@@ -56,6 +56,12 @@ pub struct Identity {
     /// "dev" | "playtest" | "release" — défaut "release" (comportement le moins alarmant).
     #[serde(default = "default_server_channel")]
     pub channel: ServerChannel,
+    /// URL du manifeste extended de ce serveur (`extended.packages.toml`, spec architecture mods
+    /// §4.1) — mods RP additionnels décidés par l'opérateur, distinct du modset core signé
+    /// Tessera. `None` = ce serveur n'a pas de tier extended (comportement historique préservé
+    /// pour tout manifeste opérateur existant qui ne connaît pas encore ce champ).
+    #[serde(default)]
+    pub extended_manifest_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -32,6 +32,8 @@ pub struct DirectoryEntry {
     pub kind: String,
     pub whitelist: bool,
     pub channel: String,
+    #[serde(rename = "extendedManifestUrl")]
+    pub extended_manifest_url: Option<String>,
     #[serde(rename = "launchArgs")]
     pub launch_args: Vec<String>,
 }
@@ -78,6 +80,7 @@ pub fn derive_entry(m: &Manifest, attested_official: bool) -> DirectoryEntry {
             ServerChannel::Playtest => "playtest".to_string(),
             ServerChannel::Release => "release".to_string(),
         },
+        extended_manifest_url: m.identity.extended_manifest_url.clone(),
         launch_args: vec![
             "-skipStartScreen".to_string(),
             format!("--cyberverse-server-address={ip}"),
@@ -120,6 +123,7 @@ mod tests {
             "kind": "community",
             "whitelist": false,
             "channel": "release",
+            "extendedManifestUrl": null,
             "launchArgs": [
                 "-skipStartScreen",
                 "--cyberverse-server-address=51.38.189.234",
@@ -162,5 +166,23 @@ mod tests {
         // l'attestation plafonne, elle n'élève jamais.
         let entry = derive_entry(&example_manifest(), true);
         assert_eq!(entry.kind, "community");
+    }
+
+    #[test]
+    fn derive_entry_propagates_extended_manifest_url_when_present() {
+        let mut manifest = example_manifest();
+        manifest.identity.extended_manifest_url =
+            Some("https://example.com/extended.packages.toml".to_string());
+        let entry = derive_entry(&manifest, false);
+        assert_eq!(
+            entry.extended_manifest_url,
+            Some("https://example.com/extended.packages.toml".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_entry_leaves_extended_manifest_url_none_when_absent() {
+        let entry = derive_entry(&example_manifest(), false);
+        assert_eq!(entry.extended_manifest_url, None);
     }
 }
