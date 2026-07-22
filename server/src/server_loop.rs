@@ -422,6 +422,15 @@ impl Server {
         self.degradation_tier
     }
 
+    /// Force directement le palier de dégradation — permet de tester le CÂBLAGE du plafond de
+    /// voisins/fréquence dégressive dans `encode_snapshot_for` sans simuler une vraie charge CPU
+    /// soutenue (le déclenchement du palier lui-même est déjà testé isolément, cf.
+    /// `degradation_tier_for_test` + `inject_tick_durations_for_test` ci-dessus).
+    #[cfg(test)]
+    pub(crate) fn force_degradation_tier_for_test(&mut self, tier: crate::degradation::DegradationTier) {
+        self.degradation_tier = tier;
+    }
+
     /// Injecte directement le contenu de la fenêtre glissante de durées de tick — permet de
     /// simuler une charge soutenue sans dépendre d'un vrai busy-loop (fragile en CI), même patron
     /// que les autres accesseurs `_for_test` de ce fichier.
@@ -1144,10 +1153,59 @@ impl Server {
     }
 
     fn encode_snapshot_for(&self, viewer: ClientId, b: &mut FlatBufferBuilder) -> Vec<u8> {
+        let viewer_pose = self.world.pose_of(viewer).unwrap_or_default();
+        let distance_to_viewer = |x: f32, y: f32| -> f32 {
+            let dx = x - viewer_pose.x;
+            let dy = y - viewer_pose.y;
+            (dx * dx + dy * dy).sqrt()
+        };
+
+        // Trois catégories fusionnées en une seule liste (id, distance) pour appliquer le plafond de
+        // voisins et la dégression sur le TOTAL visible, pas par catégorie (spec tenue-en-charge §3 :
+        // « k plus proches voisins », pas « k plus proches par type »). Le `kind` (0=joueur/1=PNJ/
+        // 2=véhicule) n'est pas utilisé après filtrage ici (les trois builders ci-dessous refiltrent
+        // chacun sur `retained`), mais documente l'origine de chaque entrée fusionnée.
+        let mut candidates: Vec<(ClientId, f32, u8)> = self
+            .world
+            .snapshot_for(viewer, self.aoi_radius)
+            .into_iter()
+            .map(|(id, pose)| (id, distance_to_viewer(pose.x, pose.y), 0u8))
+            .collect();
+        candidates.extend(self.npc_registry.iter().flat_map(|r| r.records.values()).filter_map(
+            |record| {
+                let pose = self.world.pose_of(record.id)?;
+                Some((record.id, distance_to_viewer(pose.x, pose.y), 1u8))
+            },
+        ));
+        candidates.extend(self.vehicle_registry.iter().flat_map(|r| r.records.values()).filter_map(
+            |record| {
+                let pose = self.world.pose_of(record.id)?;
+                Some((record.id, distance_to_viewer(pose.x, pose.y), 2u8))
+            },
+        ));
+        candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+
+        let policy = crate::degradation::DegradationPolicy::default();
+        let capped = policy.cap_neighbors(candidates, self.degradation_tier);
+        let tick = self.world.tick();
+        let retained: std::collections::HashSet<ClientId> = capped
+            .into_iter()
+            .filter(|(_, distance, _)| {
+                crate::degradation::should_include_this_tick(
+                    *distance,
+                    self.aoi_radius,
+                    tick,
+                    self.degradation_tier,
+                )
+            })
+            .map(|(id, _, _)| id)
+            .collect();
+
         let states: Vec<_> = self
             .world
             .snapshot_for(viewer, self.aoi_radius)
             .into_iter()
+            .filter(|(id, _)| retained.contains(id))
             .map(|(id, pose)| {
                 let pos = Vec3::new(pose.x, pose.y, pose.z);
                 PlayerState::create(
@@ -1168,6 +1226,7 @@ impl Server {
             .npc_registry
             .iter()
             .flat_map(|r| r.records.values())
+            .filter(|record| retained.contains(&record.id))
             .filter_map(|record| {
                 let pose = self.world.pose_of(record.id)?;
                 Some(NpcState::create(
@@ -1190,6 +1249,7 @@ impl Server {
             .vehicle_registry
             .iter()
             .flat_map(|r| r.records.values())
+            .filter(|record| retained.contains(&record.id))
             .filter_map(|record| {
                 let pose = self.world.pose_of(record.id)?;
                 Some(VehicleState::create(
@@ -3355,6 +3415,53 @@ mod tests {
             server.degradation_tier_for_test(),
             crate::degradation::DegradationTier::Degraded,
             "199 ticks lents + le p99 de la fenêtre doit rester au-dessus du seuil d'entrée"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_in_degraded_tier_caps_the_number_of_visible_players() {
+        let mut server = Server::new(1000.0); // AoI large pour que tous les joueurs soient candidats
+        let mut t = InMemoryTransport::new();
+        // Force le palier Degraded directement (accesseur de test, Task 1) plutôt que de simuler une
+        // vraie charge CPU dans ce test — teste le CÂBLAGE du plafond, pas le déclenchement du palier
+        // (déjà testé isolément par Task 1).
+        server.force_degradation_tier_for_test(crate::degradation::DegradationTier::Degraded);
+
+        // Un joueur observateur + 70 autres joueurs (> le plafond par défaut de 60).
+        t.inject(TransportEvent::Connected(1));
+        for id in 2..=71 {
+            t.inject(TransportEvent::Connected(id));
+        }
+        server.tick(&mut t);
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let visible_count = snap.players().map(|p| p.len()).unwrap_or(0);
+        assert!(
+            visible_count <= 60,
+            "en mode Degraded, le nombre de joueurs visibles doit être plafonné à neighbor_cap (60), \
+             vu {visible_count}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_in_normal_tier_is_not_capped_even_with_many_players() {
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        for id in 2..=71 {
+            t.inject(TransportEvent::Connected(id));
+        }
+        server.tick(&mut t);
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let visible_count = snap.players().map(|p| p.len()).unwrap_or(0);
+        assert_eq!(
+            visible_count, 70,
+            "en mode Normal (par défaut), aucun plafond ne doit s'appliquer"
         );
     }
 }
