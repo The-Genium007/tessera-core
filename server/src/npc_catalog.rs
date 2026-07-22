@@ -24,6 +24,13 @@ struct RawArchetype {
     name: String,
     briques: Vec<String>,
     combat: Option<RawCombat>,
+    /// Étiquettes de curation (démographie/faction), dérivées du nom d'archétype CDPR à
+    /// l'assemblage du catalogue (`corpo`, `homeless`, `child`, `nightlife`…). Servent à la liste
+    /// de rejet de l'opérateur (`PopulationDirector::with_excluded_tags`, spec ambiance §4). Défaut
+    /// vide : un archétype sans tags n'est jamais exclu et reste rétro-compatible avec les
+    /// catalogues antérieurs à cette curation.
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 /// Paramètres de combat d'un archétype PNJ (spec PNJ hostiles §4.2) — `None` sur
@@ -49,6 +56,8 @@ pub struct NpcArchetypeConfig {
     pub name: String,
     pub briques: Vec<String>,
     pub combat: Option<NpcCombatConfig>,
+    /// Étiquettes de curation (cf. `RawArchetype::tags`). Vide = jamais exclu.
+    pub tags: Vec<String>,
 }
 
 /// `Clone` : `shard_main` (Task 7) reconstruit un `Server::new_with_npcs` frais à chaque
@@ -67,6 +76,18 @@ impl NpcCatalog {
 
     pub fn archetype_ids(&self) -> Vec<u32> {
         self.archetypes.keys().copied().collect()
+    }
+
+    /// Ids des archétypes qui ne portent AUCUN tag exclu — le pool réellement spawnnable une fois
+    /// la liste de rejet de l'opérateur appliquée (spec ambiance §4). Un archétype sans tags n'est
+    /// jamais exclu. `excluded` vide => tous les archétypes sont éligibles (comportement d'avant
+    /// la curation, préservé).
+    pub fn eligible_archetype_ids(&self, excluded: &std::collections::HashSet<String>) -> Vec<u32> {
+        self.archetypes
+            .iter()
+            .filter(|(_, a)| !a.tags.iter().any(|t| excluded.contains(t)))
+            .map(|(id, _)| *id)
+            .collect()
     }
 }
 
@@ -152,6 +173,7 @@ pub fn parse_and_validate(toml_str: &str) -> Result<NpcCatalog, NpcCatalogError>
                     name: a.name,
                     briques: a.briques,
                     combat,
+                    tags: a.tags,
                 },
             )
             .is_some()
@@ -267,6 +289,64 @@ mod tests {
         assert_eq!(combat.hp, 100);
         assert_eq!(combat.degats_max_par_rapport, 40);
         assert_eq!(combat.cadence_min_ms, 500);
+    }
+
+    #[test]
+    fn an_archetype_without_tags_defaults_to_an_empty_list() {
+        // Rétro-compat : les catalogues d'avant la curation n'ont pas de champ `tags`.
+        let cat = parse_and_validate(VALID).unwrap();
+        assert!(cat.archetype(1).unwrap().tags.is_empty());
+    }
+
+    #[test]
+    fn an_archetype_carries_its_declared_tags() {
+        let toml = r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "corpo-cafe"
+            briques = ["flaner-sur-place"]
+            tags = ["corpo", "adulte"]
+        "#;
+        let cat = parse_and_validate(toml).unwrap();
+        assert_eq!(cat.archetype(1).unwrap().tags, vec!["corpo", "adulte"]);
+    }
+
+    #[test]
+    fn eligible_ids_exclude_archetypes_carrying_an_excluded_tag() {
+        let toml = r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "corpo"
+            briques = ["flaner-sur-place"]
+            tags = ["corpo"]
+            [[archetype]]
+            id = 2
+            name = "sdf"
+            briques = ["flaner-sur-place"]
+            tags = ["homeless"]
+            [[archetype]]
+            id = 3
+            name = "neutre-sans-tag"
+            briques = ["flaner-sur-place"]
+        "#;
+        let cat = parse_and_validate(toml).unwrap();
+        let excluded = std::collections::HashSet::from(["homeless".to_string()]);
+        let mut eligible = cat.eligible_archetype_ids(&excluded);
+        eligible.sort();
+        assert_eq!(
+            eligible,
+            vec![1, 3],
+            "l'archétype 'homeless' est exclu ; le corpo et le sans-tag restent"
+        );
+    }
+
+    #[test]
+    fn no_exclusion_leaves_every_archetype_eligible() {
+        let cat = parse_and_validate(VALID).unwrap();
+        let eligible = cat.eligible_archetype_ids(&std::collections::HashSet::new());
+        assert_eq!(eligible, vec![1], "aucune exclusion => tout est éligible");
     }
 
     #[test]

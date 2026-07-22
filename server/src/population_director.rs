@@ -4,7 +4,7 @@
 //! le réseau ; produit une liste d'actions que l'appelant applique (Task 6).
 
 use crate::npc_catalog::NpcCatalog;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DirectorAction {
@@ -23,11 +23,26 @@ pub enum DirectorAction {
 pub struct PopulationDirector {
     /// Densité cible par code de district (config manifeste, cf. Task 7 — `[runtime.population]`).
     target_density: HashMap<String, u32>,
+    /// Liste de REJET de l'opérateur : tout archétype portant l'un de ces tags n'est jamais
+    /// spawné (spec ambiance §4, modèle « permissif par défaut avec exclusions »). Vide par
+    /// défaut => tout le catalogue est spawnable, comportement d'avant la curation préservé.
+    excluded_tags: HashSet<String>,
 }
 
 impl PopulationDirector {
     pub fn new(target_density: HashMap<String, u32>) -> Self {
-        Self { target_density }
+        Self {
+            target_density,
+            excluded_tags: HashSet::new(),
+        }
+    }
+
+    /// Ajoute la liste de rejet de l'opérateur (`[runtime.population] exclure_tags`). Builder
+    /// plutôt qu'un paramètre de `new` : les ~18 appelants existants de `new` restent intacts, et
+    /// un déploiement sans curation ne change pas de comportement.
+    pub fn with_excluded_tags(mut self, excluded_tags: HashSet<String>) -> Self {
+        self.excluded_tags = excluded_tags;
+        self
     }
 
     /// Compare la population actuelle par district à la cible et produit les actions nécessaires.
@@ -57,11 +72,17 @@ impl PopulationDirector {
                 continue;
             }
             if current < target {
-                // Un seul archétype disponible retenu ici (le premier du catalogue, par id
-                // croissant) — la répartition pondérée par archétype est un raffinement futur hors
-                // périmètre de cette fondation (spec §5 : catalogue non exhaustif "à cataloguer
-                // plus tard").
-                if let Some(&archetype_id) = catalog.archetype_ids().iter().min() {
+                // On tire parmi les archétypes ÉLIGIBLES (la liste de rejet appliquée), et non
+                // parmi tout le catalogue. Le choix reste déterministe — le plus petit id éligible
+                // — la répartition PONDÉRÉE par archétype restant un raffinement futur (spec §5).
+                // Si l'opérateur a tout exclu, aucun archétype n'est éligible : on ne spawn rien,
+                // silencieusement (une config qui vide son propre pool est un choix de l'opérateur,
+                // pas une erreur du director — pur, sans I/O, il ne peut pas logguer).
+                if let Some(&archetype_id) = catalog
+                    .eligible_archetype_ids(&self.excluded_tags)
+                    .iter()
+                    .min()
+                {
                     for _ in current..target {
                         actions.push(DirectorAction::Spawn {
                             district: district.clone(),
@@ -169,5 +190,83 @@ mod tests {
         let existing = HashMap::new();
         let actions = director.reconcile(&test_catalog(), &players, &existing);
         assert!(actions.is_empty());
+    }
+
+    fn tagged_catalog() -> NpcCatalog {
+        // id 1 = ambiant neutre (spawnable), id 2 = enfant (rejetable). Ids choisis pour que
+        // l'exclusion CHANGE le résultat : sans exclusion le min est 1, mais on vérifie qu'exclure
+        // le 1 force le repli sur le 2 — sinon le test passerait par coïncidence du min.
+        parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "corpo"
+            briques = ["flaner-sur-place"]
+            tags = ["corpo"]
+            [[archetype]]
+            id = 2
+            name = "enfant"
+            briques = ["flaner-sur-place"]
+            tags = ["child"]
+            "#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_excluded_tag_removes_that_archetype_from_the_spawn_pool() {
+        // On exclut "corpo" (id 1, le plus petit) : les spawns doivent basculer sur l'enfant (id 2),
+        // preuve que la sélection tire dans le pool ÉLIGIBLE et pas dans le catalogue entier.
+        let director = PopulationDirector::new(HashMap::from([("centre".to_string(), 3)]))
+            .with_excluded_tags(HashSet::from(["corpo".to_string()]));
+        let players = HashMap::from([("centre".to_string(), 1)]);
+        let existing = HashMap::new();
+        let actions = director.reconcile(&tagged_catalog(), &players, &existing);
+        assert_eq!(actions.len(), 3);
+        assert!(
+            actions.iter().all(|a| matches!(
+                a,
+                DirectorAction::Spawn {
+                    archetype_id: 2,
+                    ..
+                }
+            )),
+            "l'archétype corpo étant exclu, tous les spawns doivent être l'enfant (id 2)"
+        );
+    }
+
+    #[test]
+    fn excluding_every_available_tag_produces_no_spawn() {
+        // Piège de config : l'opérateur exclut tout son propre pool. Le district reste sous sa
+        // cible mais rien n'est spawné — pas d'action, pas de panique, pas de despawn parasite.
+        let director = PopulationDirector::new(HashMap::from([("centre".to_string(), 5)]))
+            .with_excluded_tags(HashSet::from(["corpo".to_string(), "child".to_string()]));
+        let players = HashMap::from([("centre".to_string(), 1)]);
+        let existing = HashMap::new();
+        let actions = director.reconcile(&tagged_catalog(), &players, &existing);
+        assert!(
+            actions.is_empty(),
+            "pool entièrement exclu => aucun spawn, et aucune autre action"
+        );
+    }
+
+    #[test]
+    fn no_exclusion_preserves_the_pre_curation_behaviour() {
+        // Sans liste de rejet, le director doit se comporter exactement comme avant : min id.
+        let director = PopulationDirector::new(HashMap::from([("centre".to_string(), 2)]));
+        let players = HashMap::from([("centre".to_string(), 1)]);
+        let existing = HashMap::new();
+        let actions = director.reconcile(&tagged_catalog(), &players, &existing);
+        assert!(
+            actions.iter().all(|a| matches!(
+                a,
+                DirectorAction::Spawn {
+                    archetype_id: 1,
+                    ..
+                }
+            )),
+            "aucune exclusion => plus petit id (1), comportement d'avant la curation"
+        );
     }
 }
