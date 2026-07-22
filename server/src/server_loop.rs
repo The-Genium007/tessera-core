@@ -96,6 +96,15 @@ pub struct Server {
     /// séparation des responsabilités que `pending_entity_reports` (le pont véhicules) : `Server`/
     /// `server_loop.rs` n'a aucune I/O directe, seul `shard.rs::shard_main` en a une.
     pending_combat_events: Vec<(ClientId, u32, ClientId, u64)>,
+    /// Fenêtre glissante des N dernières durées de tick (micros) — indépendante de `metrics`
+    /// (`Option<Arc<Metrics>>`, câblé pour Prometheus séparément) : la dégradation est un mécanisme de
+    /// sécurité qui doit fonctionner même sur un `Server` sans metrics configurées. Capacité bornée à
+    /// `TICK_DURATION_WINDOW_SIZE` (`VecDeque::pop_front` quand pleine, cf. `Server::tick`).
+    tick_duration_window: std::collections::VecDeque<u64>,
+    /// Palier de dégradation courant (spec tenue-en-charge §3, `degradation.rs`) — maintenu par
+    /// hystérésis à chaque tick via `DegradationPolicy::tier_for_p99`. Défaut `Normal` : un `Server`
+    /// qui vient de démarrer (aucun tick mesuré) n'est jamais dégradé par défaut.
+    degradation_tier: crate::degradation::DegradationTier,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -157,6 +166,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -183,6 +194,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -220,6 +233,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -290,6 +305,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -323,6 +340,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -394,6 +413,33 @@ impl Server {
     #[cfg(test)]
     pub(crate) fn heat(&self) -> u32 {
         self.heat_tracker.map(|t| t.heat).unwrap_or(0)
+    }
+
+    /// Palier de dégradation courant — accesseur de test minimal (`degradation_tier` reste privé),
+    /// même patron que `heat()` ci-dessus.
+    #[cfg(test)]
+    pub(crate) fn degradation_tier_for_test(&self) -> crate::degradation::DegradationTier {
+        self.degradation_tier
+    }
+
+    /// Force directement le palier de dégradation — permet de tester le CÂBLAGE du plafond de
+    /// voisins/fréquence dégressive dans `encode_snapshot_for` sans simuler une vraie charge CPU
+    /// soutenue (le déclenchement du palier lui-même est déjà testé isolément, cf.
+    /// `degradation_tier_for_test` + `inject_tick_durations_for_test` ci-dessus).
+    #[cfg(test)]
+    pub(crate) fn force_degradation_tier_for_test(
+        &mut self,
+        tier: crate::degradation::DegradationTier,
+    ) {
+        self.degradation_tier = tier;
+    }
+
+    /// Injecte directement le contenu de la fenêtre glissante de durées de tick — permet de
+    /// simuler une charge soutenue sans dépendre d'un vrai busy-loop (fragile en CI), même patron
+    /// que les autres accesseurs `_for_test` de ce fichier.
+    #[cfg(test)]
+    pub(crate) fn inject_tick_durations_for_test(&mut self, durations: Vec<u64>) {
+        self.tick_duration_window = durations.into_iter().collect();
     }
 
     /// Attache un graphe de navigation après construction. Sans appel, `tick_npcs` continue de
@@ -936,8 +982,20 @@ impl Server {
                 transport.send(neighbor_id, b.finished_data());
             }
         }
+        let elapsed_micros = tick_start.elapsed().as_micros() as u64;
+        // Fenêtre glissante + palier de dégradation (spec tenue-en-charge §3) — indépendant de
+        // `self.metrics` (`Option<Arc<Metrics>>`, câblé séparément pour Prometheus) : ce mécanisme
+        // de sécurité doit fonctionner même sur un `Server` sans metrics configurées.
+        if self.tick_duration_window.len() >= TICK_DURATION_WINDOW_SIZE {
+            self.tick_duration_window.pop_front();
+        }
+        self.tick_duration_window.push_back(elapsed_micros);
+        if let Some(p99) = p99_of(&self.tick_duration_window) {
+            let policy = crate::degradation::DegradationPolicy::default();
+            self.degradation_tier = policy.tier_for_p99(p99, self.degradation_tier);
+        }
         if let Some(metrics) = &self.metrics {
-            metrics.record_tick_duration_micros(tick_start.elapsed().as_micros() as u64);
+            metrics.record_tick_duration_micros(elapsed_micros);
         }
     }
 
@@ -1098,10 +1156,95 @@ impl Server {
     }
 
     fn encode_snapshot_for(&self, viewer: ClientId, b: &mut FlatBufferBuilder) -> Vec<u8> {
+        let viewer_pose = self.world.pose_of(viewer).unwrap_or_default();
+        let distance_to_viewer = |x: f32, y: f32| -> f32 {
+            let dx = x - viewer_pose.x;
+            let dy = y - viewer_pose.y;
+            (dx * dx + dy * dy).sqrt()
+        };
+
+        // Trois catégories fusionnées en une seule liste (id, distance) pour appliquer le plafond de
+        // voisins et la dégression sur le TOTAL visible, pas par catégorie (spec tenue-en-charge §3 :
+        // « k plus proches voisins », pas « k plus proches par type »). Le `kind` (0=joueur/1=PNJ/
+        // 2=véhicule) n'est pas utilisé après filtrage ici (les trois builders ci-dessous refiltrent
+        // chacun sur `retained`), mais documente l'origine de chaque entrée fusionnée.
+        //
+        // Bug préexistant DÉCOUVERT (pas introduit) par cette tâche, corrigé ici : `World.players`
+        // est le stockage partagé joueurs+PNJ de foule+véhicules+PNJ nominatifs (même `add_player`,
+        // cf. fondations PNJ) — sans un filtre d'exclusion, chaque PNJ de foule/véhicule apparaissait
+        // DÉJÀ DEUX FOIS dans le snapshot avant ce plan (une fois comme `PlayerState` via
+        // `world.snapshot_for` brut, une fois comme `NpcState`/`VehicleState` via son registre
+        // dédié) — jamais détecté faute de test vérifiant que `players()` les exclut. Révélé par le
+        // nouveau test `a_snapshot_in_degraded_tier_caps_the_total_across_players_and_npcs_not_per_category`.
+        //
+        // Exclusion PAR APPARTENANCE À UN REGISTRE (pas par plage d'id via `is_npc_id`/
+        // `is_vehicle_id`) : une première tentative filtrait par `is_npc_id(id)` (`id >=
+        // NPC_ID_RANGE_START`, SANS borne supérieure, cf. `world.rs`) — mais les PNJ NOMINATIFS
+        // (fondation d'interaction) comptent À REBOURS depuis `u64::MAX`, donc leurs ids sont
+        // eux aussi `>= NPC_ID_RANGE_START` et se faisaient exclure à tort par ce filtre, alors
+        // qu'un PNJ nominatif N'A PAS de `NpcRecord`/registre séparé dans cette fondation et DOIT
+        // rester visible via `PlayerState` (cf. test préexistant
+        // `interacting_with_a_named_npc_opens_a_session_and_a_choice_resolves_it`, qui a détecté
+        // cette régression). L'appartenance réelle à `self.npc_registry`/`self.vehicle_registry`
+        // est le seul critère fiable : un PNJ nominatif n'appartient à aucun des deux, donc n'est
+        // jamais exclu par ce filtre, quelle que soit sa plage d'id.
+        let is_crowd_npc_or_vehicle = |id: ClientId| -> bool {
+            self.npc_registry
+                .as_ref()
+                .is_some_and(|r| r.records.contains_key(&id))
+                || self
+                    .vehicle_registry
+                    .as_ref()
+                    .is_some_and(|r| r.records.contains_key(&id))
+        };
+        let mut candidates: Vec<(ClientId, f32, u8)> = self
+            .world
+            .snapshot_for(viewer, self.aoi_radius)
+            .into_iter()
+            .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id))
+            .map(|(id, pose)| (id, distance_to_viewer(pose.x, pose.y), 0u8))
+            .collect();
+        candidates.extend(
+            self.npc_registry
+                .iter()
+                .flat_map(|r| r.records.values())
+                .filter_map(|record| {
+                    let pose = self.world.pose_of(record.id)?;
+                    Some((record.id, distance_to_viewer(pose.x, pose.y), 1u8))
+                }),
+        );
+        candidates.extend(
+            self.vehicle_registry
+                .iter()
+                .flat_map(|r| r.records.values())
+                .filter_map(|record| {
+                    let pose = self.world.pose_of(record.id)?;
+                    Some((record.id, distance_to_viewer(pose.x, pose.y), 2u8))
+                }),
+        );
+        candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+
+        let policy = crate::degradation::DegradationPolicy::default();
+        let capped = policy.cap_neighbors(candidates, self.degradation_tier);
+        let tick = self.world.tick();
+        let retained: std::collections::HashSet<ClientId> = capped
+            .into_iter()
+            .filter(|(_, distance, _)| {
+                crate::degradation::should_include_this_tick(
+                    *distance,
+                    self.aoi_radius,
+                    tick,
+                    self.degradation_tier,
+                )
+            })
+            .map(|(id, _, _)| id)
+            .collect();
+
         let states: Vec<_> = self
             .world
             .snapshot_for(viewer, self.aoi_radius)
             .into_iter()
+            .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id) && retained.contains(id))
             .map(|(id, pose)| {
                 let pos = Vec3::new(pose.x, pose.y, pose.z);
                 PlayerState::create(
@@ -1122,6 +1265,7 @@ impl Server {
             .npc_registry
             .iter()
             .flat_map(|r| r.records.values())
+            .filter(|record| retained.contains(&record.id))
             .filter_map(|record| {
                 let pose = self.world.pose_of(record.id)?;
                 Some(NpcState::create(
@@ -1144,6 +1288,7 @@ impl Server {
             .vehicle_registry
             .iter()
             .flat_map(|r| r.records.values())
+            .filter(|record| retained.contains(&record.id))
             .filter_map(|record| {
                 let pose = self.world.pose_of(record.id)?;
                 Some(VehicleState::create(
@@ -1195,6 +1340,31 @@ fn pseudo_random_unit(seed: ClientId, tick: u64) -> f32 {
         .wrapping_mul(2654435761)
         .wrapping_add(tick.wrapping_mul(0x9E3779B97F4A7C15));
     ((mixed >> 40) as f32) / (1u64 << 24) as f32 % 1.0
+}
+
+/// Capacité de la fenêtre glissante de durées de tick utilisée pour approcher un p99 en runtime
+/// (spec tenue-en-charge §3 : "seuils à hystérésis pilotés par le p99 du tick"). 200 ticks = 10s de
+/// fenêtre glissante à 20Hz (cadence par défaut du projet, cf. `default_tick_rate_hz`) — assez pour
+/// lisser un pic ponctuel sans réagir à un seul tick isolé, assez court pour redescendre vite si la
+/// charge retombe réellement. Valeur v1, non calibrée sur mesure réelle (même statut que les
+/// constantes de `DegradationPolicy::default()`, cf. Global Constraints).
+const TICK_DURATION_WINDOW_SIZE: usize = 200;
+
+/// Calcule un p99 approché par tri complet de la fenêtre (pas un algorithme de streaming à la
+/// t-digest — à cette taille de fenêtre (200), un tri est largement assez rapide pour tourner une
+/// fois par tick sans impact mesurable sur le budget de tick). `None` si la fenêtre est vide (aucun
+/// tick mesuré encore — cas du tout premier tick).
+fn p99_of(window: &std::collections::VecDeque<u64>) -> Option<u64> {
+    if window.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<u64> = window.iter().copied().collect();
+    sorted.sort_unstable();
+    // Index du 99e percentile sur une liste triée de longueur n : ceil(0.99 * n) - 1, borné à
+    // n-1 pour éviter un débordement quand n est petit (ex. n=1 -> index 0).
+    let index = ((sorted.len() as f64 * 0.99).ceil() as usize).saturating_sub(1);
+    let index = index.min(sorted.len() - 1);
+    Some(sorted[index])
 }
 
 #[cfg(test)]
@@ -1335,6 +1505,59 @@ mod tests {
             snap.npcs().map(|v| v.len()).unwrap_or(0) > 0,
             "un director configuré avec un joueur présent doit finir par faire apparaître au moins un PNJ"
         );
+    }
+
+    #[test]
+    fn a_crowd_npc_never_appears_twice_as_both_playerstate_and_npcstate() {
+        // Bug préexistant découvert en revue de la Task 2 du plan câblage-dégradation (pas
+        // introduit par cette tâche) : `World.players` est le stockage PARTAGÉ joueurs+PNJ de
+        // foule+véhicules (même `add_player`, cf. fondations PNJ/véhicules) — sans exclusion
+        // explicite, un PNJ de foule apparaissait DÉJÀ deux fois dans un snapshot : une fois comme
+        // `PlayerState` (via `world.snapshot_for` brut, qui ne distingue pas joueurs/PNJ), une
+        // fois comme `NpcState` (via `npc_registry`, le chemin voulu). Ce test verrouille
+        // directement la propriété corrigée, indépendamment du mécanisme de dégradation qui l'a
+        // révélée par accident.
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur-de-rue"
+            briques = ["flaner-sur-place"]
+            "#,
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(1000.0, catalog, director);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        server.tick(&mut t); // laisse le director spawn le PNJ visé
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let npc_ids: Vec<u64> = snap
+            .npcs()
+            .map(|v| v.iter().map(|n| n.id()).collect())
+            .unwrap_or_default();
+        assert!(!npc_ids.is_empty(), "au moins un PNJ doit avoir spawné");
+        let player_ids: Vec<u64> = snap
+            .players()
+            .map(|v| v.iter().map(|p| p.id()).collect())
+            .unwrap_or_default();
+        for npc_id in &npc_ids {
+            assert!(
+                !player_ids.contains(npc_id),
+                "le PNJ {npc_id} ne doit JAMAIS apparaître aussi dans players() — sinon il est \
+                 compté/rendu deux fois côté client"
+            );
+        }
     }
 
     #[test]
@@ -3249,5 +3472,183 @@ mod tests {
             pos_at_unmount, pos_later,
             "après démontage, la position du passager ne doit plus suivre le véhicule"
         );
+    }
+
+    #[test]
+    fn degradation_tier_becomes_degraded_after_a_sustained_run_of_slow_ticks() {
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        // 200 ticks rapides (aucune charge réelle simulée dans ce test unitaire — ce test vérifie le
+        // MÉCANISME de fenêtre/hystérésis, pas une vraie charge CPU) ne suffisent PAS à franchir le
+        // seuil de 40ms tout seuls (un tick de InMemoryTransport est de l'ordre de la microseconde) —
+        // ce test vérifie donc plutôt l'accesseur de test et le comportement par défaut (Normal tant
+        // qu'aucune lenteur réelle n'est mesurée). Un test de franchissement RÉEL du seuil nécessiterait
+        // d'injecter artificiellement des durées dans la fenêtre — accesseur de test dédié ci-dessous.
+        for _ in 0..250 {
+            server.tick(&mut t);
+        }
+        assert_eq!(
+            server.degradation_tier_for_test(),
+            crate::degradation::DegradationTier::Normal,
+            "un Server qui tourne normalement (aucune lenteur réelle) ne doit jamais passer Degraded"
+        );
+    }
+
+    #[test]
+    fn degradation_tier_responds_to_an_injected_slow_tick_window() {
+        let mut server = Server::new(50.0);
+        // Accès de test direct à la fenêtre pour simuler une charge sans dépendre d'un vrai busy-loop
+        // (fragile en CI) — injecte 200 durées toutes au-dessus du seuil d'entrée (40ms).
+        server.inject_tick_durations_for_test(vec![45_000; 200]);
+        let mut t = InMemoryTransport::new();
+        server.tick(&mut t); // un tick réel (rapide) s'ajoute à la fenêtre pleine, éjecte la plus vieille
+        assert_eq!(
+            server.degradation_tier_for_test(),
+            crate::degradation::DegradationTier::Degraded,
+            "199 ticks lents + le p99 de la fenêtre doit rester au-dessus du seuil d'entrée"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_in_degraded_tier_caps_the_total_across_players_and_npcs_not_per_category() {
+        // Trouvé en revue de Task 2 : le test existant ci-dessous (joueurs uniquement) ne prouve
+        // pas que le plafond de voisins porte sur le TOTAL fusionné (joueurs + PNJ + véhicules),
+        // pas 60 par catégorie séparément — un vrai bug de régression (ex. un futur refactor qui
+        // réintroduirait un plafond par catégorie) ne serait pas détecté par la seule suite
+        // précédente. Ce test utilise joueurs + PNJ (un seul `Server` ne peut avoir PNJ ET
+        // véhicules actifs à la fois — `new_with_npcs`/`new_with_vehicles` sont mutuellement
+        // exclusifs, cf. constructeurs de `Server` — donc joueurs+PNJ suffit à prouver la fusion
+        // multi-catégorie sans ajouter un nouveau constructeur combiné hors périmètre ici).
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur-de-rue"
+            briques = ["flaner-sur-place"]
+            "#,
+        )
+        .unwrap();
+        // Ratio élevé (40 PNJ par joueur présent) pour obtenir facilement 40 PNJ en un director
+        // qui réagit à un seul joueur connecté — cf. pattern de
+        // `a_server_with_npcs_configured_spawns_and_reports_npcs_in_the_snapshot`.
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 40)]));
+        let mut server = Server::new_with_npcs(1000.0, catalog, director);
+        server.force_degradation_tier_for_test(crate::degradation::DegradationTier::Degraded);
+
+        let mut t = InMemoryTransport::new();
+        // Joueur observateur + 39 autres joueurs (40 joueurs au total) + jusqu'à 40 PNJ (spawnés
+        // par le director sur plusieurs ticks) — 40+40 = 80 entités candidates, > le plafond de 60.
+        t.inject(TransportEvent::Connected(1));
+        for id in 2..=40 {
+            t.inject(TransportEvent::Connected(id));
+        }
+        server.tick(&mut t);
+        // Ticks supplémentaires pour laisser le director spawn tous les PNJ visés (le director ne
+        // spawn pas nécessairement tout en un seul tick — cf. commentaire de `tick_npcs`).
+        for _ in 0..5 {
+            server.tick(&mut t);
+        }
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let visible_players = snap.players().map(|p| p.len()).unwrap_or(0);
+        let visible_npcs = snap.npcs().map(|n| n.len()).unwrap_or(0);
+        let total_visible = visible_players + visible_npcs;
+        assert!(
+            total_visible <= 60,
+            "le plafond de 60 doit porter sur le TOTAL joueurs+PNJ fusionné, pas 60 par catégorie \
+             séparément — vu {visible_players} joueurs + {visible_npcs} PNJ = {total_visible}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_in_degraded_tier_caps_the_number_of_visible_players() {
+        let mut server = Server::new(1000.0); // AoI large pour que tous les joueurs soient candidats
+        let mut t = InMemoryTransport::new();
+        // Force le palier Degraded directement (accesseur de test, Task 1) plutôt que de simuler une
+        // vraie charge CPU dans ce test — teste le CÂBLAGE du plafond, pas le déclenchement du palier
+        // (déjà testé isolément par Task 1).
+        server.force_degradation_tier_for_test(crate::degradation::DegradationTier::Degraded);
+
+        // Un joueur observateur + 70 autres joueurs (> le plafond par défaut de 60).
+        t.inject(TransportEvent::Connected(1));
+        for id in 2..=71 {
+            t.inject(TransportEvent::Connected(id));
+        }
+        server.tick(&mut t);
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let visible_count = snap.players().map(|p| p.len()).unwrap_or(0);
+        assert!(
+            visible_count <= 60,
+            "en mode Degraded, le nombre de joueurs visibles doit être plafonné à neighbor_cap (60), \
+             vu {visible_count}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_in_normal_tier_is_not_capped_even_with_many_players() {
+        let mut server = Server::new(1000.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        for id in 2..=71 {
+            t.inject(TransportEvent::Connected(id));
+        }
+        server.tick(&mut t);
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let visible_count = snap.players().map(|p| p.len()).unwrap_or(0);
+        assert_eq!(
+            visible_count, 70,
+            "en mode Normal (par défaut), aucun plafond ne doit s'appliquer"
+        );
+    }
+}
+
+#[cfg(test)]
+mod degradation_window_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn p99_of_an_empty_window_is_none() {
+        let window: VecDeque<u64> = VecDeque::new();
+        assert_eq!(p99_of(&window), None);
+    }
+
+    #[test]
+    fn p99_of_a_single_value_window_is_that_value() {
+        let window: VecDeque<u64> = VecDeque::from([5000]);
+        assert_eq!(p99_of(&window), Some(5000));
+    }
+
+    #[test]
+    fn p99_of_a_hundred_values_returns_the_99th_percentile() {
+        // 100 valeurs 1..=100 (micros) — le p99 attendu est la 99e plus petite valeur triée, soit
+        // 99 (index 98 en base 0 sur 100 éléments triés — cohérent avec la convention "au moins
+        // 99% des valeurs sont <= au résultat").
+        let window: VecDeque<u64> = (1..=100).collect();
+        assert_eq!(p99_of(&window), Some(99));
+    }
+
+    #[test]
+    fn p99_of_is_order_independent() {
+        // La fenêtre n'est pas nécessairement triée par ordre d'arrivée — p99_of doit trier
+        // lui-même, pas supposer un ordre.
+        let mut window: VecDeque<u64> = (1..=100).collect();
+        // Mélange grossier : inverse la fenêtre.
+        window.make_contiguous().reverse();
+        assert_eq!(p99_of(&window), Some(99));
     }
 }
