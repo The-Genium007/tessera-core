@@ -90,6 +90,12 @@ pub struct Server {
     /// encore chargée depuis TOML ici : `tick_npcs` applique des valeurs fixes (montant/decay),
     /// raffinement de configuration différé, documenté sur `new_with_police_escalation`.
     heat_tracker: Option<crate::escalade_police::HeatTracker>,
+    /// Événements de transition PV=0 (spec PNJ hostiles §2 : "signal net, horodaté, archivable" pour
+    /// la télémétrie shadow-flag) — `(npc_id, archetype, killer, timestamp_ms)`. Drainé par
+    /// `shard_main`, qui les écrit en JSONL via `hostile_telemetry::append_combat_event` — même
+    /// séparation des responsabilités que `pending_entity_reports` (le pont véhicules) : `Server`/
+    /// `server_loop.rs` n'a aucune I/O directe, seul `shard.rs::shard_main` en a une.
+    pending_combat_events: Vec<(ClientId, u32, ClientId, u64)>,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -150,6 +156,7 @@ impl Server {
             vehicle_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
+            pending_combat_events: Vec::new(),
         }
     }
 
@@ -175,6 +182,7 @@ impl Server {
             vehicle_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
+            pending_combat_events: Vec::new(),
         }
     }
 
@@ -211,6 +219,7 @@ impl Server {
             vehicle_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
+            pending_combat_events: Vec::new(),
         }
     }
 
@@ -280,6 +289,7 @@ impl Server {
             vehicle_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
+            pending_combat_events: Vec::new(),
         }
     }
 
@@ -312,6 +322,7 @@ impl Server {
             }),
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
+            pending_combat_events: Vec::new(),
         }
     }
 
@@ -776,6 +787,12 @@ impl Server {
         std::mem::take(&mut self.pending_entity_reports)
     }
 
+    /// Événements de transition PV=0 à transmettre en télémétrie ce tick (cf. doc de
+    /// `pending_combat_events`). Drainé par `shard_main`.
+    pub fn take_pending_combat_events(&mut self) -> Vec<(ClientId, u32, ClientId, u64)> {
+        std::mem::take(&mut self.pending_combat_events)
+    }
+
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
     pub fn tick<T: Transport>(&mut self, transport: &mut T) {
         let tick_start = std::time::Instant::now();
@@ -1015,7 +1032,19 @@ impl Server {
                                 {
                                     let now_ms = self.world.tick()
                                         * (1000 / crate::default_tick_rate_hz() as u64);
-                                    record.apply_damage(from, archetype, ei.param(), now_ms);
+                                    let archetype_id = record.archetype;
+                                    // Task 4bis : capture le retour de apply_damage (ignoré jusqu'ici)
+                                    // pour pousser un événement de télémétrie combat sur la transition
+                                    // réelle vers ATerre (spec PNJ hostiles §2). Drainé par
+                                    // shard_main (shard.rs), qui écrit le JSONL — Server reste pur.
+                                    if record.apply_damage(from, archetype, ei.param(), now_ms) {
+                                        self.pending_combat_events.push((
+                                            ei.target(),
+                                            archetype_id,
+                                            from,
+                                            now_ms,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1371,6 +1400,85 @@ mod tests {
                 crate::npc::EntityBehavior::ATerre
             )),
             "un rapport de dégâts kind=5 >= hp doit faire passer le PNJ à ATerre via apply_damage"
+        );
+    }
+
+    #[test]
+    fn a_lethal_kind_5_report_pushes_a_pending_combat_event() {
+        // Task 4bis : la transition ATerre doit pousser un événement dans la file
+        // `pending_combat_events`, drainée par `shard_main` (shard.rs) pour l'écriture JSONL réelle
+        // via `hostile_telemetry::append_combat_event` (Task 4). Même patron que
+        // `pending_entity_reports` (pont véhicules) : `Server`/`server_loop.rs` reste pur, ne fait
+        // qu'accumuler.
+        let catalog = crate::npc_catalog::parse_and_validate(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"t\"\nbriques = [\"errer\"]\n\
+             [archetype.combat]\nhp = 40\ndegats_max_par_rapport = 100\ncadence_min_ms = 0\n",
+        )
+        .unwrap();
+        let director =
+            crate::population_director::PopulationDirector::new(std::collections::HashMap::from([
+                ("default".to_string(), 1),
+            ]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t); // laisse le director spawn le PNJ
+        t.take_sent(1);
+
+        let npc_id = crate::world::NPC_ID_RANGE_START;
+        let hit = encode_entity_interaction(npc_id, 5, 100); // dégâts >= hp -> transition ATerre
+        t.inject(TransportEvent::Message {
+            from: 42,
+            data: hit,
+        });
+        server.tick(&mut t);
+
+        let events = server.take_pending_combat_events();
+        assert_eq!(
+            events.len(),
+            1,
+            "une transition ATerre doit pousser exactement un événement"
+        );
+        let (event_npc_id, archetype, killer, _timestamp_ms) = events[0];
+        assert_eq!(event_npc_id, npc_id);
+        assert_eq!(archetype, 1);
+        assert_eq!(
+            killer, 42,
+            "killer doit être l'attaquant réel (from), pas le npc_id"
+        );
+
+        // Un second drain sans nouvel événement ne doit rien renvoyer (comportement mem::take).
+        assert!(server.take_pending_combat_events().is_empty());
+    }
+
+    #[test]
+    fn a_non_lethal_kind_5_report_pushes_no_combat_event() {
+        let catalog = crate::npc_catalog::parse_and_validate(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"t\"\nbriques = [\"errer\"]\n\
+             [archetype.combat]\nhp = 1000\ndegats_max_par_rapport = 40\ncadence_min_ms = 0\n",
+        )
+        .unwrap();
+        let director =
+            crate::population_director::PopulationDirector::new(std::collections::HashMap::from([
+                ("default".to_string(), 1),
+            ]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        let npc_id = crate::world::NPC_ID_RANGE_START;
+        let hit = encode_entity_interaction(npc_id, 5, 40); // dégâts << hp -> pas de transition
+        t.inject(TransportEvent::Message {
+            from: 42,
+            data: hit,
+        });
+        server.tick(&mut t);
+
+        assert!(
+            server.take_pending_combat_events().is_empty(),
+            "un rapport de dégâts non-létal ne doit jamais pousser d'événement combat"
         );
     }
 
