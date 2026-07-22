@@ -16,3 +16,12 @@ briques = ["rester-statique"]
 id = 3
 name = "vendeur"
 briques = ["rester-statique", "vendre", "fuir-si-menace"]
+
+[[archetype]]
+id = 4
+name = "gang-membre"
+briques = ["attaquer-cible"]
+[archetype.combat]
+hp = 100
+degats_max_par_rapport = 40
+cadence_min_ms = 500

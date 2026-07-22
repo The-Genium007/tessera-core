@@ -35,6 +35,16 @@ pub struct NpcRecord {
     pub archetype: u32,
     pub owner: ClientId, // 0 = personne (hiberné) — cf. spec ownership §4
     pub behavior: EntityBehavior,
+    /// PV actuels du PNJ — `None` = increvable (archétype sans `NpcCombatConfig`, cf.
+    /// `NpcArchetypeConfig::combat`). `Some(0)` n'existe jamais comme état stable : dès que les PV
+    /// atteignent 0, `apply_damage` bascule immédiatement `behavior` à `ATerre` dans le MÊME appel
+    /// (spec §1 : "bascule le FSM en à-terre/mort à zéro").
+    pub hp: Option<u32>,
+    /// Horodatage (ms depuis un epoch arbitraire cohérent avec l'appelant, cf. `now_ms` du
+    /// paramètre d'`apply_damage`) du dernier rapport de dégâts ACCEPTÉ par (attaquant, cette
+    /// cible) — anti-spam de cadence (spec §2). Absence de clé = jamais encore de dégâts reçus de
+    /// cet attaquant.
+    pub last_damage_at_ms: std::collections::HashMap<ClientId, u64>,
 }
 
 impl NpcRecord {
@@ -44,7 +54,50 @@ impl NpcRecord {
             archetype,
             owner: 0,
             behavior: EntityBehavior::default(),
+            hp: None,
+            last_damage_at_ms: std::collections::HashMap::new(),
         }
+    }
+
+    /// Applique un rapport de dégâts (spec §1/§2 : "n'importe quel attaquant rapporte ses hits...
+    /// clamp de plausibilité... bascule le FSM à ATerre à zéro"). `archetype` fournit le clamp
+    /// (`degats_max_par_rapport`) et la cadence minimale — même patron que `apply_brique_tick`
+    /// (reçoit le catalogue résolu par l'appelant, ne le duplique pas). Retourne `true` SEULEMENT
+    /// si CET appel vient de faire passer le PNJ à `ATerre` (transition, pas état) — permet à
+    /// l'appelant de ne déclencher un effet ponctuel (ex. future notification) qu'une seule fois,
+    /// pas à chaque tick où le PNJ reste à terre.
+    pub fn apply_damage(
+        &mut self,
+        attacker: ClientId,
+        archetype: &crate::npc_catalog::NpcArchetypeConfig,
+        degats: u32,
+        now_ms: u64,
+    ) -> bool {
+        let Some(combat) = &archetype.combat else {
+            return false; // increvable — aucun état PV, aucune transition possible
+        };
+        if self.behavior == EntityBehavior::ATerre {
+            return false; // déjà à terre — un rapport tardif n'a plus d'effet (pas de "sur-mort")
+        }
+        // Cadence anti-spam : ignore silencieusement un rapport trop rapproché du précédent pour CE
+        // MÊME attaquant (spec §2 "cadence/précision inhumaine") — un rapport ignoré ne consomme pas
+        // le cooldown (l'horodatage n'est mis à jour QUE sur un rapport accepté), donc un spam constant
+        // ne fait jamais "glisser" la fenêtre plus loin que le premier coup accepté.
+        if let Some(&last) = self.last_damage_at_ms.get(&attacker) {
+            if now_ms.saturating_sub(last) < combat.cadence_min_ms as u64 {
+                return false;
+            }
+        }
+        self.last_damage_at_ms.insert(attacker, now_ms);
+        let clamped = degats.min(combat.degats_max_par_rapport);
+        let current = self.hp.unwrap_or(combat.hp);
+        let new_hp = current.saturating_sub(clamped);
+        self.hp = Some(new_hp);
+        if new_hp == 0 {
+            self.behavior = EntityBehavior::ATerre;
+            return true;
+        }
+        false
     }
 
     /// Transition FSM déclenchée par une `EntityInteraction` rapportée par un joueur (spec §2 :
@@ -522,5 +575,89 @@ mod brique_engine_tests {
         r.apply_brique_tick(&archetype);
         // flaner-sur-place ne s'applique qu'à Calme/Flane -> le behavior Fuite reste inchangé.
         assert_eq!(r.behavior, EntityBehavior::Fuite { menace: 99 });
+    }
+}
+
+#[cfg(test)]
+mod combat_tests {
+    use super::*;
+    use crate::npc_catalog::parse_and_validate;
+
+    fn combat_archetype(
+        hp: u32,
+        degats_max: u32,
+        cadence_ms: u32,
+    ) -> crate::npc_catalog::NpcArchetypeConfig {
+        let toml = format!(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"t\"\nbriques = [\"attaquer-cible\"]\n\
+             [archetype.combat]\nhp = {hp}\ndegats_max_par_rapport = {degats_max}\ncadence_min_ms = {cadence_ms}\n"
+        );
+        parse_and_validate(&toml)
+            .unwrap()
+            .archetype(1)
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn an_increvable_npc_never_transitions_to_aterre() {
+        let mut r = NpcRecord::new(1, 1);
+        let toml =
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"t\"\nbriques = [\"errer\"]\n";
+        let archetype = parse_and_validate(toml)
+            .unwrap()
+            .archetype(1)
+            .unwrap()
+            .clone();
+        let transitioned = r.apply_damage(99, &archetype, 1000, 0);
+        assert!(!transitioned);
+        assert_eq!(r.behavior, EntityBehavior::Calme);
+        assert!(r.hp.is_none());
+    }
+
+    #[test]
+    fn damage_is_clamped_per_report_and_hp_decreases() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = combat_archetype(100, 40, 0);
+        r.apply_damage(99, &archetype, 1000, 0); // demande 1000, clampé à 40
+        assert_eq!(r.hp, Some(60));
+    }
+
+    #[test]
+    fn hp_reaching_zero_transitions_to_aterre_and_reports_true_once() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = combat_archetype(40, 40, 0);
+        let transitioned = r.apply_damage(99, &archetype, 40, 0);
+        assert!(transitioned);
+        assert_eq!(r.behavior, EntityBehavior::ATerre);
+
+        // Un second rapport, déjà à terre : aucune transition supplémentaire signalée.
+        let transitioned_again = r.apply_damage(99, &archetype, 40, 1000);
+        assert!(!transitioned_again);
+    }
+
+    #[test]
+    fn a_report_faster_than_cadence_min_is_silently_ignored() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = combat_archetype(100, 40, 500);
+        r.apply_damage(99, &archetype, 40, 0);
+        assert_eq!(r.hp, Some(60));
+        r.apply_damage(99, &archetype, 40, 100); // 100ms < 500ms de cadence -> ignoré
+        assert_eq!(
+            r.hp,
+            Some(60),
+            "le second rapport, trop rapproché, ne doit rien changer"
+        );
+        r.apply_damage(99, &archetype, 40, 600); // 600ms > 500ms depuis le PREMIER rapport accepté
+        assert_eq!(r.hp, Some(20));
+    }
+
+    #[test]
+    fn different_attackers_have_independent_cadence_windows() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = combat_archetype(100, 40, 500);
+        r.apply_damage(1, &archetype, 40, 0);
+        r.apply_damage(2, &archetype, 40, 10); // attaquant DIFFÉRENT, quasi simultané -> accepté
+        assert_eq!(r.hp, Some(20));
     }
 }
