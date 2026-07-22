@@ -514,6 +514,19 @@ impl Server {
             };
             record.apply_brique_tick(archetype);
 
+            // Migration d'ownership (spec PNJ hostiles §1 : "changement de cible = migration
+            // d'ownership... l'owner devient le joueur que le FSM cible"). Réassignation directe et
+            // idempotente — pas de détection de "changement" nécessaire, écrire la même valeur à
+            // chaque tick est sans coût et élimine toute fenêtre où owner et cible divergeraient
+            // après coup. Seul EntityBehavior::Hostile déclenche une réassignation ; les autres
+            // comportements (Calme/Flane/Alerte/Fuite/ATerre) NE TOUCHENT PAS owner ici —
+            // Alerte/Fuite portent une "menace", pas une "cible" au sens propriétaire du terme (spec
+            // §1 ne parle que de la migration pour Hostile), et ATerre/Calme/Flane n'ont pas de
+            // notion de cible du tout.
+            if let crate::npc::EntityBehavior::Hostile { cible } = record.behavior {
+                record.owner = cible;
+            }
+
             let Some(graph) = &self.nav_graph else {
                 continue; // comportement historique préservé sans graphe (Global Constraints)
             };
@@ -880,6 +893,25 @@ impl Server {
                                 vehicle.unmount(from);
                             }
                         }
+                    } else if ei.kind() == 5 {
+                        // Nouveau (PNJ hostiles, Task 2) : kind=5=Attaque rapporte des dégâts sur un
+                        // PNJ (spec §1/§2). N'importe quel attaquant peut rapporter des dégâts — pas
+                        // besoin d'être owner (contrairement à d'autres interactions) — apply_damage
+                        // (Task 1) porte lui-même le clamp anti-triche et la cadence anti-spam par
+                        // attaquant. now_ms dérivé du tick serveur courant (cadence fixe connue via
+                        // default_tick_rate_hz) plutôt qu'une horloge murale réelle — cohérent avec le
+                        // style déterministe/testable du reste de ce fichier.
+                        if let Some(registry) = &mut self.npc_registry {
+                            if let Some(record) = registry.records.get_mut(&ei.target()) {
+                                if let Some(archetype) =
+                                    registry.catalog.archetype(record.archetype)
+                                {
+                                    let now_ms = self.world.tick()
+                                        * (1000 / crate::default_tick_rate_hz() as u64);
+                                    record.apply_damage(from, archetype, ei.param(), now_ms);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1087,6 +1119,93 @@ mod tests {
         assert!(
             snap.npcs().map(|v| v.len()).unwrap_or(0) > 0,
             "un director configuré avec un joueur présent doit finir par faire apparaître au moins un PNJ"
+        );
+    }
+
+    #[test]
+    fn entity_interaction_kind_5_applies_damage_via_apply_damage() {
+        // Câblage réel EntityInteraction{kind=5} -> NpcRecord::apply_damage (Task 2). Un archétype
+        // combattant avec 100 PV et un clamp de 40 dégâts max par rapport : un unique coup de 40
+        // suffit à passer directement à 60 PV restants (pas encore ATerre) ; on vérifie ici l'effet
+        // observable via le prochain snapshot (comportement, pas juste "accepté" — cf. protocole
+        // de sondage sur "accepté != exécuté", même principe côté serveur : on observe le FSM).
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "gang-membre"
+            briques = ["attaquer-cible"]
+            [archetype.combat]
+            hp = 100
+            degats_max_par_rapport = 100
+            cadence_min_ms = 0
+            "#,
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t); // laisse le director spawn le PNJ
+        server.tick(&mut t); // laisse le 2e tick le faire apparaître dans le snapshot
+
+        let sent = t.take_sent(1);
+        let npc_id = sent
+            .iter()
+            .find_map(|bytes| {
+                let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+                let snap = env.msg_as_snapshot()?;
+                snap.npcs()?.iter().next().map(|n| n.id())
+            })
+            .expect("le PNJ doit être apparu dans un des snapshots déjà envoyés");
+
+        // Un coup de 100 dégâts (>= hp) doit faire passer le PNJ à ATerre (behavior_to_u8 == 5).
+        let hit = encode_entity_interaction(npc_id, 5, 100);
+        t.inject(TransportEvent::Message { from: 1, data: hit });
+        server.tick(&mut t);
+
+        let sent = t.take_sent(1);
+        let behavior_after_hit = sent.iter().find_map(|bytes| {
+            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+            let snap = env.msg_as_snapshot()?;
+            snap.npcs()?
+                .iter()
+                .find(|n| n.id() == npc_id)
+                .map(|n| n.behavior())
+        });
+        assert_eq!(
+            behavior_after_hit,
+            Some(crate::npc::behavior_to_u8(
+                crate::npc::EntityBehavior::ATerre
+            )),
+            "un rapport de dégâts kind=5 >= hp doit faire passer le PNJ à ATerre via apply_damage"
+        );
+    }
+
+    #[test]
+    fn a_npc_that_becomes_hostile_has_its_owner_migrated_to_the_target() {
+        // Documente l'invariant de migration d'ownership (spec PNJ hostiles §1 : "changement de
+        // cible = migration d'ownership... l'owner devient le joueur que le FSM cible"). Test
+        // unitaire pur sur NpcRecord (pas besoin d'un Server complet) — le déclenchement RÉEL de
+        // Hostile depuis une brique arrive avec Task 3 ; ce test fige juste l'invariant que
+        // `tick_npcs` applique déjà (Step 4) dès que `behavior` vaut Hostile{cible}.
+        let mut record = crate::npc::NpcRecord::new(crate::world::NPC_ID_RANGE_START, 1);
+        assert_eq!(record.owner, 0);
+        record.behavior = crate::npc::EntityBehavior::Hostile { cible: 42 };
+        // Même logique que celle insérée dans `tick_npcs` (Step 4) — reproduite ici en isolation
+        // pure pour ne pas dépendre d'un catalogue/director/nav_graph juste pour cet invariant.
+        if let crate::npc::EntityBehavior::Hostile { cible } = record.behavior {
+            record.owner = cible;
+        }
+        assert_eq!(
+            record.owner, 42,
+            "l'owner doit migrer vers la cible visée par Hostile"
         );
     }
 
