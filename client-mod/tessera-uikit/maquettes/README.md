@@ -4,7 +4,7 @@ Dossier de **conception visuelle** des écrans HUD/UI de Tessera. On maquette en
 génère et que tu ouvres dans un navigateur, sur Mac) pour décider du look **avant** de coder en
 redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquettes soient cohérentes.
 
-## Les trois fichiers
+## Les quatre fichiers
 
 - **`catalogue-ui-natif.html`** — **LES BRIQUES : ce que le moteur accepte.** Le vocabulaire *natif*
   (widgets, contrôleurs) + la *charte graphique du jeu* (styles, atlas, police, couleurs), qu'on
@@ -14,6 +14,10 @@ redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquette
   écran natif (inventaire, carte, téléphone, vendeur, menu pause, radial, mort, logement…), un
   **schéma de disposition** + son **contrôleur réel** (RTTI) + la **stratégie de reprise**
   (1a réinvoquer / 1b patcher / 2 reconstruire). Schémas de dev, **pas d'assets CDPR extraits**.
+- **`ecrans-reconstruits.html`** — **LES ÉCRANS RECONSTRUITS EN HTML.** La même liste d'écrans natifs,
+  mais reconstruits aussi fidèlement que possible à la charte du jeu (pas des wireframes : du rendu).
+  Reconstructions CSS originales, contenu de démonstration inventé, **aucun asset CDPR** — sert de
+  référence de design pour la reconstruction en ink.
 - **`tessera-hud-kit.html`** — **NOTRE CIBLE.** Maquette de *nos* écrans (vie, faim/soif…) dans cette
   charte. Pour la phase design de nos écrans, après.
 
