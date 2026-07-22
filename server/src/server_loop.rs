@@ -81,6 +81,15 @@ pub struct Server {
     /// alors qu'un rapport de position part vers le Gateway sur un canal totalement différent
     /// (la socket TCP interne, hors de portée de `Server`) — d'où un drain externe dédié.
     pending_entity_reports: Vec<(ClientId, f32, f32, f32, f32)>,
+    /// `None` = aucune escalade policière active sur ce Shard (comportement historique préservé —
+    /// tous les constructeurs existants n'activent jamais le heat). `Some(..)` uniquement via
+    /// `Server::new_with_police_escalation` (spec PNJ hostiles §3). Le heat est un scalaire
+    /// serveur-autoritaire mono-district (même simplification que `PopulationDirector`), jamais
+    /// transporté sur le protocole — seuls ses futurs effets (peuplement policier) voyageront.
+    /// La vraie `EscalationPolicy`/`EscalationThreshold` (escalade_police.rs, Task 3) n'est PAS
+    /// encore chargée depuis TOML ici : `tick_npcs` applique des valeurs fixes (montant/decay),
+    /// raffinement de configuration différé, documenté sur `new_with_police_escalation`.
+    heat_tracker: Option<crate::escalade_police::HeatTracker>,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -140,6 +149,7 @@ impl Server {
             nav_graph: None,
             vehicle_registry: None,
             pending_entity_reports: Vec::new(),
+            heat_tracker: None,
         }
     }
 
@@ -164,6 +174,7 @@ impl Server {
             nav_graph: None,
             vehicle_registry: None,
             pending_entity_reports: Vec::new(),
+            heat_tracker: None,
         }
     }
 
@@ -199,7 +210,25 @@ impl Server {
             nav_graph: None,
             vehicle_registry: None,
             pending_entity_reports: Vec::new(),
+            heat_tracker: None,
         }
+    }
+
+    /// Identique à `new_with_npcs`, avec en plus un tracker de heat policier actif (spec PNJ
+    /// hostiles §3). Nouveau constructeur plutôt qu'un paramètre optionnel sur `new_with_npcs` :
+    /// ce dernier est déjà appelé par de nombreux tests existants (même raisonnement que chaque
+    /// constructeur précédent de ce fichier). N'accepte PAS encore d'`EscalationPolicy` en
+    /// paramètre (Task 3, escalade_police.rs) : le chargement TOML d'une vraie politique
+    /// configurable est un raffinement de configuration différé, cf. doc de `heat_tracker` et de
+    /// `tick_npcs` — ce constructeur active le mécanisme `HeatTracker` avec des valeurs fixes.
+    pub fn new_with_police_escalation(
+        aoi_radius: f32,
+        catalog: NpcCatalog,
+        director: PopulationDirector,
+    ) -> Self {
+        let mut s = Self::new_with_npcs(aoi_radius, catalog, director);
+        s.heat_tracker = Some(crate::escalade_police::HeatTracker::default());
+        s
     }
 
     /// Identique à `Server::new`, avec en plus un registre de PNJ nominatifs actif — SPAWNÉS dans
@@ -250,6 +279,7 @@ impl Server {
             nav_graph: None,
             vehicle_registry: None,
             pending_entity_reports: Vec::new(),
+            heat_tracker: None,
         }
     }
 
@@ -281,6 +311,7 @@ impl Server {
                 next_vehicle_id: crate::world::VEHICLE_ID_RANGE_START,
             }),
             pending_entity_reports: Vec::new(),
+            heat_tracker: None,
         }
     }
 
@@ -343,6 +374,15 @@ impl Server {
     /// Nombre de joueurs actuellement dans le monde de ce Shard — pour l'endpoint métriques.
     pub fn player_count(&self) -> usize {
         self.world.player_ids().len()
+    }
+
+    /// Heat policier courant (spec PNJ hostiles §3) — 0 si aucun `HeatTracker` actif sur ce
+    /// `Server` (constructeurs autres que `new_with_police_escalation`). Accesseur de test
+    /// minimal (`heat_tracker` reste privé, pas de raison de l'exposer publiquement en dehors des
+    /// tests) — même patron que d'autres accesseurs de ce fichier (`player_count`).
+    #[cfg(test)]
+    pub(crate) fn heat(&self) -> u32 {
+        self.heat_tracker.map(|t| t.heat).unwrap_or(0)
     }
 
     /// Attache un graphe de navigation après construction. Sans appel, `tick_npcs` continue de
@@ -448,7 +488,10 @@ impl Server {
     /// câblée côté Gateway/`handoff.rs`, hors périmètre ici). Tous les joueurs connus de CE `Server`
     /// comptent comme présents dans un unique district logique `"default"`. Le câblage réel
     /// multi-district est un raffinement explicitement différé, pas un oubli.
-    fn tick_npcs(&mut self) {
+    fn tick_npcs(
+        &mut self,
+        pre_tick_behaviors: Option<std::collections::HashMap<ClientId, EntityBehavior>>,
+    ) {
         let Some(registry) = &mut self.npc_registry else {
             return;
         };
@@ -512,7 +555,46 @@ impl Server {
             let Some(archetype) = registry.catalog.archetype(record.archetype) else {
                 continue;
             };
+            // `before` = comportement AVANT CE TICK ENTIER (capturé en tout début de `Server::tick`,
+            // donc AVANT le drain des events transport) — PAS juste avant `apply_brique_tick`
+            // ci-dessous. Nécessaire pour détecter une transition Calme/Flane/Alerte/ATerre ->
+            // Fuite/Hostile causée par une `EntityInteraction` traitée plus tôt dans ce même
+            // `tick()` (kind=0=Menace via `NpcRecord::apply_interaction`, appelé par
+            // `apply_client_message`, AVANT `tick_npcs`) : une capture faite ICI (après ce drain)
+            // verrait déjà l'état post-message et manquerait ce cas — vérifié empiriquement (probe
+            // de développement), pas supposé. Absent de `pre_tick_behaviors` (PNJ tout juste
+            // spawné ce tick par le director, donc inconnu au moment de la capture) => traité
+            // comme `Calme` (comportement par défaut d'un `NpcRecord`, cf. `NpcRecord::new`) : un
+            // PNJ qui spawne et devient hostile au même tick doit compter comme une transition.
+            let before = pre_tick_behaviors
+                .as_ref()
+                .and_then(|m| m.get(id))
+                .copied()
+                .unwrap_or_default();
             record.apply_brique_tick(archetype);
+
+            // Heat policier (spec PNJ hostiles §3) : un rapport d'incident dès qu'un PNJ qui
+            // n'était PAS en Fuite/Hostile en DÉBUT de tick l'est devenu (menace signalée par un
+            // joueur, ou "attaquer-cible" escaladant une Fuite déjà là — dans ce dernier cas
+            // `before` reste Fuite depuis avant CE tick, donc PAS recompté ici : seule la PREMIÈRE
+            // entrée dans la catégorie Fuite/Hostile compte, cf. spec §3 "rapport de menace").
+            // Montant fixe (10) et decay (fin de fonction) NON encore data-driven (pas de vraie
+            // `EscalationPolicy` chargée depuis TOML dans ce plan, cf. doc de
+            // `new_with_police_escalation`) — raffinement de configuration différé.
+            if let Some(tracker) = &mut self.heat_tracker {
+                let became_hostile_or_fuite = !matches!(
+                    before,
+                    crate::npc::EntityBehavior::Fuite { .. }
+                        | crate::npc::EntityBehavior::Hostile { .. }
+                ) && matches!(
+                    record.behavior,
+                    crate::npc::EntityBehavior::Fuite { .. }
+                        | crate::npc::EntityBehavior::Hostile { .. }
+                );
+                if became_hostile_or_fuite {
+                    tracker.report_incident(10); // montant v1 fixe, cf. note ci-dessus
+                }
+            }
 
             // Migration d'ownership (spec PNJ hostiles §1 : "changement de cible = migration
             // d'ownership... l'owner devient le joueur que le FSM cible"). Réassignation directe et
@@ -588,6 +670,13 @@ impl Server {
                     },
                 );
             }
+        }
+
+        // Décroissance temporelle du heat (spec §3 : "decay temporel"), une fois par tick, hors de
+        // la boucle PNJ ci-dessus — s'applique même sur un tick sans aucune nouvelle transition.
+        // Montant v1 fixe (1), même note de raffinement différé que `report_incident` ci-dessus.
+        if let Some(tracker) = &mut self.heat_tracker {
+            tracker.decay(1);
         }
     }
 
@@ -690,6 +779,24 @@ impl Server {
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
     pub fn tick<T: Transport>(&mut self, transport: &mut T) {
         let tick_start = std::time::Instant::now();
+        // Heat policier (spec PNJ hostiles §3) : capture du `behavior` de chaque PNJ AVANT le
+        // drain des events transport ci-dessous — nécessaire pour détecter une transition
+        // Calme/Flane/Alerte/ATerre -> Fuite/Hostile causée par une `EntityInteraction` traitée
+        // dans CE MÊME tick (`apply_client_message`, kind=0=Menace via `NpcRecord::apply_interaction`,
+        // appelé plus bas dans cette fonction, donc AVANT `tick_npcs`). Une capture faite à
+        // l'intérieur de `tick_npcs` (juste avant `apply_brique_tick`) arrive trop tard : elle ne
+        // verrait déjà plus que l'état POST-message, jamais l'état Calme d'origine — vérifié
+        // empiriquement (probe), pas supposé : sans cette capture en amont, `report_incident`
+        // n'était jamais déclenché sur le cas d'usage principal (joueur qui menace un PNJ),
+        // seul le cas Fuite->Hostile interne à `apply_brique_tick` (brique "attaquer-cible")
+        // aurait été détecté.
+        let pre_tick_behaviors: Option<std::collections::HashMap<ClientId, EntityBehavior>> =
+            self.npc_registry.as_ref().map(|r| {
+                r.records
+                    .iter()
+                    .map(|(id, rec)| (*id, rec.behavior))
+                    .collect()
+            });
         for ev in transport.poll() {
             match ev {
                 TransportEvent::Connected(id) => {
@@ -706,7 +813,7 @@ impl Server {
             }
         }
         self.world.advance_tick();
-        self.tick_npcs();
+        self.tick_npcs(pre_tick_behaviors);
         // Un pas des ascenseurs (spec §5.3) : fait avancer chaque cabine et diffuse à TOUS les
         // clients connus de ce Shard les états qui ont transitionné (ou le rappel périodique tant
         // qu'une cabine est en mouvement). Aucun filtrage AoI ici : `ElevatorState` ne porte aucune
@@ -1065,6 +1172,85 @@ fn pseudo_random_unit(seed: ClientId, tick: u64) -> f32 {
 mod tests {
     use super::*;
     use crate::transport::InMemoryTransport;
+
+    #[test]
+    fn a_threat_report_increases_heat_when_police_escalation_is_active() {
+        // Scénario principal spec §3 : un joueur signale une menace (kind=0=Menace) sur un PNJ
+        // encore Calme -> transition vers Fuite -> le heat serveur-autoritaire doit augmenter. Le
+        // PNJ n'a besoin d'aucune brique de mouvement particulière pour ce test ("errer" suffit,
+        // le heat ne dépend que du FSM, jamais de la navigation).
+        let catalog = crate::npc_catalog::parse_and_validate(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"t\"\nbriques = [\"errer\"]\n",
+        )
+        .unwrap();
+        let director =
+            crate::population_director::PopulationDirector::new(std::collections::HashMap::from([
+                ("default".to_string(), 1),
+            ]));
+        let mut server = Server::new_with_police_escalation(50.0, catalog, director);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t); // laisse le director spawn le PNJ
+        server.tick(&mut t);
+        assert_eq!(
+            server.heat(),
+            0,
+            "aucune menace signalée encore : le heat doit rester à zéro"
+        );
+
+        let npc_id = crate::world::NPC_ID_RANGE_START;
+        let threat = encode_entity_interaction(npc_id, 0, 0); // kind=0=Menace, déclenche Fuite
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: threat,
+        });
+        server.tick(&mut t);
+
+        assert_eq!(
+            server.heat(),
+            9, // report_incident(10) puis decay(1) systématique en fin du même tick_npcs, cf. Step 6
+            "une transition Calme -> Fuite détectée ce tick doit augmenter le heat (10 - 1 de decay)"
+        );
+    }
+
+    #[test]
+    fn a_fuite_to_hostile_escalation_via_a_brique_also_increases_heat() {
+        // Second cas d'usage du même mécanisme : "attaquer-cible" fait passer Fuite -> Hostile en
+        // un seul appel à `apply_brique_tick` (pas via une nouvelle `EntityInteraction`) — ce
+        // franchissement compte aussi comme "devenir Fuite/Hostile" car le PNJ était Calme
+        // (jamais encore Fuite/Hostile) au tout début du tick où la menace initiale ET l'escalade
+        // sont toutes deux résolues.
+        let catalog = crate::npc_catalog::parse_and_validate(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"t\"\nbriques = [\"attaquer-cible\"]\n",
+        )
+        .unwrap();
+        let director =
+            crate::population_director::PopulationDirector::new(std::collections::HashMap::from([
+                ("default".to_string(), 1),
+            ]));
+        let mut server = Server::new_with_police_escalation(50.0, catalog, director);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t); // spawn
+        server.tick(&mut t);
+
+        let npc_id = crate::world::NPC_ID_RANGE_START;
+        let threat = encode_entity_interaction(npc_id, 0, 0); // kind=0=Menace -> Fuite, PUIS
+                                                              // "attaquer-cible" escalade -> Hostile,
+                                                              // le tout dans le même tick_npcs.
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: threat,
+        });
+        server.tick(&mut t);
+
+        assert_eq!(
+            server.heat(),
+            9,
+            "Calme -> Hostile en un seul tick (via Fuite puis attaquer-cible) doit aussi compter \
+             comme une seule transition (pas de double comptage)"
+        );
+    }
 
     #[test]
     fn a_server_without_npcs_never_adds_any_npc_state_to_the_snapshot() {

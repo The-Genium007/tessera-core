@@ -19,6 +19,7 @@ pub mod framing;
 pub mod gateway;
 pub mod gateway_routing;
 pub mod handoff;
+pub mod hostile_telemetry;
 pub mod hot_state_cache;
 pub mod interaction_session;
 pub mod internal_attestation_http;
