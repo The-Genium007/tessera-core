@@ -197,6 +197,33 @@ pub async fn shard_main(
                             return Ok(()); // Gateway parti
                         }
                     }
+                    // Télémétrie combat PNJ hostiles (hostile_telemetry.rs, spec PNJ hostiles §2 :
+                    // "signal net, horodaté, archivable" pour la détection god-mode par REVUE
+                    // HUMAINE — ce câblage n'analyse rien, il enregistre seulement). Chemin
+                    // configurable comme TESSERA_SESSION_LOG_PATH (gateway.rs), jamais lu
+                    // directement par `Server`/`server_loop.rs` qui reste pur — c'est `shard_main`,
+                    // qui a déjà l'I/O pour le pont véhicules ci-dessus, qui possède cette
+                    // responsabilité.
+                    let combat_log_path = std::env::var("TESSERA_COMBAT_LOG_PATH")
+                        .unwrap_or_else(|_| "combat.jsonl".to_string());
+                    for (npc_id, archetype, killer, timestamp_ms) in
+                        server.take_pending_combat_events()
+                    {
+                        let event = crate::hostile_telemetry::CombatTelemetryEvent {
+                            npc_id,
+                            archetype,
+                            killer,
+                            timestamp_ms,
+                        };
+                        if let Err(e) = crate::hostile_telemetry::append_combat_event(
+                            std::path::Path::new(&combat_log_path),
+                            &event,
+                        ) {
+                            tracing::warn!(
+                                "télémétrie combat non écrite ({combat_log_path}): {e}"
+                            );
+                        }
+                    }
                 }
                 // Arrêt propre : ne pas attendre la fin de la connexion Gateway pour répondre
                 // au signal (sinon un SIGTERM/SIGINT reste bloqué tant qu'un Gateway est connecté).
