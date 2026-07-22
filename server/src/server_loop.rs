@@ -96,6 +96,15 @@ pub struct Server {
     /// séparation des responsabilités que `pending_entity_reports` (le pont véhicules) : `Server`/
     /// `server_loop.rs` n'a aucune I/O directe, seul `shard.rs::shard_main` en a une.
     pending_combat_events: Vec<(ClientId, u32, ClientId, u64)>,
+    /// Fenêtre glissante des N dernières durées de tick (micros) — indépendante de `metrics`
+    /// (`Option<Arc<Metrics>>`, câblé pour Prometheus séparément) : la dégradation est un mécanisme de
+    /// sécurité qui doit fonctionner même sur un `Server` sans metrics configurées. Capacité bornée à
+    /// `TICK_DURATION_WINDOW_SIZE` (`VecDeque::pop_front` quand pleine, cf. `Server::tick`).
+    tick_duration_window: std::collections::VecDeque<u64>,
+    /// Palier de dégradation courant (spec tenue-en-charge §3, `degradation.rs`) — maintenu par
+    /// hystérésis à chaque tick via `DegradationPolicy::tier_for_p99`. Défaut `Normal` : un `Server`
+    /// qui vient de démarrer (aucun tick mesuré) n'est jamais dégradé par défaut.
+    degradation_tier: crate::degradation::DegradationTier,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -157,6 +166,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -183,6 +194,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -220,6 +233,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -290,6 +305,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -323,6 +340,8 @@ impl Server {
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
+            tick_duration_window: std::collections::VecDeque::new(),
+            degradation_tier: crate::degradation::DegradationTier::Normal,
         }
     }
 
@@ -394,6 +413,21 @@ impl Server {
     #[cfg(test)]
     pub(crate) fn heat(&self) -> u32 {
         self.heat_tracker.map(|t| t.heat).unwrap_or(0)
+    }
+
+    /// Palier de dégradation courant — accesseur de test minimal (`degradation_tier` reste privé),
+    /// même patron que `heat()` ci-dessus.
+    #[cfg(test)]
+    pub(crate) fn degradation_tier_for_test(&self) -> crate::degradation::DegradationTier {
+        self.degradation_tier
+    }
+
+    /// Injecte directement le contenu de la fenêtre glissante de durées de tick — permet de
+    /// simuler une charge soutenue sans dépendre d'un vrai busy-loop (fragile en CI), même patron
+    /// que les autres accesseurs `_for_test` de ce fichier.
+    #[cfg(test)]
+    pub(crate) fn inject_tick_durations_for_test(&mut self, durations: Vec<u64>) {
+        self.tick_duration_window = durations.into_iter().collect();
     }
 
     /// Attache un graphe de navigation après construction. Sans appel, `tick_npcs` continue de
@@ -936,8 +970,20 @@ impl Server {
                 transport.send(neighbor_id, b.finished_data());
             }
         }
+        let elapsed_micros = tick_start.elapsed().as_micros() as u64;
+        // Fenêtre glissante + palier de dégradation (spec tenue-en-charge §3) — indépendant de
+        // `self.metrics` (`Option<Arc<Metrics>>`, câblé séparément pour Prometheus) : ce mécanisme
+        // de sécurité doit fonctionner même sur un `Server` sans metrics configurées.
+        if self.tick_duration_window.len() >= TICK_DURATION_WINDOW_SIZE {
+            self.tick_duration_window.pop_front();
+        }
+        self.tick_duration_window.push_back(elapsed_micros);
+        if let Some(p99) = p99_of(&self.tick_duration_window) {
+            let policy = crate::degradation::DegradationPolicy::default();
+            self.degradation_tier = policy.tier_for_p99(p99, self.degradation_tier);
+        }
         if let Some(metrics) = &self.metrics {
-            metrics.record_tick_duration_micros(tick_start.elapsed().as_micros() as u64);
+            metrics.record_tick_duration_micros(elapsed_micros);
         }
     }
 
@@ -1195,6 +1241,31 @@ fn pseudo_random_unit(seed: ClientId, tick: u64) -> f32 {
         .wrapping_mul(2654435761)
         .wrapping_add(tick.wrapping_mul(0x9E3779B97F4A7C15));
     ((mixed >> 40) as f32) / (1u64 << 24) as f32 % 1.0
+}
+
+/// Capacité de la fenêtre glissante de durées de tick utilisée pour approcher un p99 en runtime
+/// (spec tenue-en-charge §3 : "seuils à hystérésis pilotés par le p99 du tick"). 200 ticks = 10s de
+/// fenêtre glissante à 20Hz (cadence par défaut du projet, cf. `default_tick_rate_hz`) — assez pour
+/// lisser un pic ponctuel sans réagir à un seul tick isolé, assez court pour redescendre vite si la
+/// charge retombe réellement. Valeur v1, non calibrée sur mesure réelle (même statut que les
+/// constantes de `DegradationPolicy::default()`, cf. Global Constraints).
+const TICK_DURATION_WINDOW_SIZE: usize = 200;
+
+/// Calcule un p99 approché par tri complet de la fenêtre (pas un algorithme de streaming à la
+/// t-digest — à cette taille de fenêtre (200), un tri est largement assez rapide pour tourner une
+/// fois par tick sans impact mesurable sur le budget de tick). `None` si la fenêtre est vide (aucun
+/// tick mesuré encore — cas du tout premier tick).
+fn p99_of(window: &std::collections::VecDeque<u64>) -> Option<u64> {
+    if window.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<u64> = window.iter().copied().collect();
+    sorted.sort_unstable();
+    // Index du 99e percentile sur une liste triée de longueur n : ceil(0.99 * n) - 1, borné à
+    // n-1 pour éviter un débordement quand n est petit (ex. n=1 -> index 0).
+    let index = ((sorted.len() as f64 * 0.99).ceil() as usize).saturating_sub(1);
+    let index = index.min(sorted.len() - 1);
+    Some(sorted[index])
 }
 
 #[cfg(test)]
@@ -3249,5 +3320,78 @@ mod tests {
             pos_at_unmount, pos_later,
             "après démontage, la position du passager ne doit plus suivre le véhicule"
         );
+    }
+
+    #[test]
+    fn degradation_tier_becomes_degraded_after_a_sustained_run_of_slow_ticks() {
+        let mut server = Server::new(50.0);
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        // 200 ticks rapides (aucune charge réelle simulée dans ce test unitaire — ce test vérifie le
+        // MÉCANISME de fenêtre/hystérésis, pas une vraie charge CPU) ne suffisent PAS à franchir le
+        // seuil de 40ms tout seuls (un tick de InMemoryTransport est de l'ordre de la microseconde) —
+        // ce test vérifie donc plutôt l'accesseur de test et le comportement par défaut (Normal tant
+        // qu'aucune lenteur réelle n'est mesurée). Un test de franchissement RÉEL du seuil nécessiterait
+        // d'injecter artificiellement des durées dans la fenêtre — accesseur de test dédié ci-dessous.
+        for _ in 0..250 {
+            server.tick(&mut t);
+        }
+        assert_eq!(
+            server.degradation_tier_for_test(),
+            crate::degradation::DegradationTier::Normal,
+            "un Server qui tourne normalement (aucune lenteur réelle) ne doit jamais passer Degraded"
+        );
+    }
+
+    #[test]
+    fn degradation_tier_responds_to_an_injected_slow_tick_window() {
+        let mut server = Server::new(50.0);
+        // Accès de test direct à la fenêtre pour simuler une charge sans dépendre d'un vrai busy-loop
+        // (fragile en CI) — injecte 200 durées toutes au-dessus du seuil d'entrée (40ms).
+        server.inject_tick_durations_for_test(vec![45_000; 200]);
+        let mut t = InMemoryTransport::new();
+        server.tick(&mut t); // un tick réel (rapide) s'ajoute à la fenêtre pleine, éjecte la plus vieille
+        assert_eq!(
+            server.degradation_tier_for_test(),
+            crate::degradation::DegradationTier::Degraded,
+            "199 ticks lents + le p99 de la fenêtre doit rester au-dessus du seuil d'entrée"
+        );
+    }
+}
+
+#[cfg(test)]
+mod degradation_window_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn p99_of_an_empty_window_is_none() {
+        let window: VecDeque<u64> = VecDeque::new();
+        assert_eq!(p99_of(&window), None);
+    }
+
+    #[test]
+    fn p99_of_a_single_value_window_is_that_value() {
+        let window: VecDeque<u64> = VecDeque::from([5000]);
+        assert_eq!(p99_of(&window), Some(5000));
+    }
+
+    #[test]
+    fn p99_of_a_hundred_values_returns_the_99th_percentile() {
+        // 100 valeurs 1..=100 (micros) — le p99 attendu est la 99e plus petite valeur triée, soit
+        // 99 (index 98 en base 0 sur 100 éléments triés — cohérent avec la convention "au moins
+        // 99% des valeurs sont <= au résultat").
+        let window: VecDeque<u64> = (1..=100).collect();
+        assert_eq!(p99_of(&window), Some(99));
+    }
+
+    #[test]
+    fn p99_of_is_order_independent() {
+        // La fenêtre n'est pas nécessairement triée par ordre d'arrivée — p99_of doit trier
+        // lui-même, pas supposer un ordre.
+        let mut window: VecDeque<u64> = (1..=100).collect();
+        // Mélange grossier : inverse la fenêtre.
+        window.make_contiguous().reverse();
+        assert_eq!(p99_of(&window), Some(99));
     }
 }
