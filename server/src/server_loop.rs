@@ -427,7 +427,10 @@ impl Server {
     /// soutenue (le déclenchement du palier lui-même est déjà testé isolément, cf.
     /// `degradation_tier_for_test` + `inject_tick_durations_for_test` ci-dessus).
     #[cfg(test)]
-    pub(crate) fn force_degradation_tier_for_test(&mut self, tier: crate::degradation::DegradationTier) {
+    pub(crate) fn force_degradation_tier_for_test(
+        &mut self,
+        tier: crate::degradation::DegradationTier,
+    ) {
         self.degradation_tier = tier;
     }
 
@@ -1165,24 +1168,60 @@ impl Server {
         // « k plus proches voisins », pas « k plus proches par type »). Le `kind` (0=joueur/1=PNJ/
         // 2=véhicule) n'est pas utilisé après filtrage ici (les trois builders ci-dessous refiltrent
         // chacun sur `retained`), mais documente l'origine de chaque entrée fusionnée.
+        //
+        // Bug préexistant DÉCOUVERT (pas introduit) par cette tâche, corrigé ici : `World.players`
+        // est le stockage partagé joueurs+PNJ de foule+véhicules+PNJ nominatifs (même `add_player`,
+        // cf. fondations PNJ) — sans un filtre d'exclusion, chaque PNJ de foule/véhicule apparaissait
+        // DÉJÀ DEUX FOIS dans le snapshot avant ce plan (une fois comme `PlayerState` via
+        // `world.snapshot_for` brut, une fois comme `NpcState`/`VehicleState` via son registre
+        // dédié) — jamais détecté faute de test vérifiant que `players()` les exclut. Révélé par le
+        // nouveau test `a_snapshot_in_degraded_tier_caps_the_total_across_players_and_npcs_not_per_category`.
+        //
+        // Exclusion PAR APPARTENANCE À UN REGISTRE (pas par plage d'id via `is_npc_id`/
+        // `is_vehicle_id`) : une première tentative filtrait par `is_npc_id(id)` (`id >=
+        // NPC_ID_RANGE_START`, SANS borne supérieure, cf. `world.rs`) — mais les PNJ NOMINATIFS
+        // (fondation d'interaction) comptent À REBOURS depuis `u64::MAX`, donc leurs ids sont
+        // eux aussi `>= NPC_ID_RANGE_START` et se faisaient exclure à tort par ce filtre, alors
+        // qu'un PNJ nominatif N'A PAS de `NpcRecord`/registre séparé dans cette fondation et DOIT
+        // rester visible via `PlayerState` (cf. test préexistant
+        // `interacting_with_a_named_npc_opens_a_session_and_a_choice_resolves_it`, qui a détecté
+        // cette régression). L'appartenance réelle à `self.npc_registry`/`self.vehicle_registry`
+        // est le seul critère fiable : un PNJ nominatif n'appartient à aucun des deux, donc n'est
+        // jamais exclu par ce filtre, quelle que soit sa plage d'id.
+        let is_crowd_npc_or_vehicle = |id: ClientId| -> bool {
+            self.npc_registry
+                .as_ref()
+                .is_some_and(|r| r.records.contains_key(&id))
+                || self
+                    .vehicle_registry
+                    .as_ref()
+                    .is_some_and(|r| r.records.contains_key(&id))
+        };
         let mut candidates: Vec<(ClientId, f32, u8)> = self
             .world
             .snapshot_for(viewer, self.aoi_radius)
             .into_iter()
+            .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id))
             .map(|(id, pose)| (id, distance_to_viewer(pose.x, pose.y), 0u8))
             .collect();
-        candidates.extend(self.npc_registry.iter().flat_map(|r| r.records.values()).filter_map(
-            |record| {
-                let pose = self.world.pose_of(record.id)?;
-                Some((record.id, distance_to_viewer(pose.x, pose.y), 1u8))
-            },
-        ));
-        candidates.extend(self.vehicle_registry.iter().flat_map(|r| r.records.values()).filter_map(
-            |record| {
-                let pose = self.world.pose_of(record.id)?;
-                Some((record.id, distance_to_viewer(pose.x, pose.y), 2u8))
-            },
-        ));
+        candidates.extend(
+            self.npc_registry
+                .iter()
+                .flat_map(|r| r.records.values())
+                .filter_map(|record| {
+                    let pose = self.world.pose_of(record.id)?;
+                    Some((record.id, distance_to_viewer(pose.x, pose.y), 1u8))
+                }),
+        );
+        candidates.extend(
+            self.vehicle_registry
+                .iter()
+                .flat_map(|r| r.records.values())
+                .filter_map(|record| {
+                    let pose = self.world.pose_of(record.id)?;
+                    Some((record.id, distance_to_viewer(pose.x, pose.y), 2u8))
+                }),
+        );
         candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
 
         let policy = crate::degradation::DegradationPolicy::default();
@@ -1205,7 +1244,7 @@ impl Server {
             .world
             .snapshot_for(viewer, self.aoi_radius)
             .into_iter()
-            .filter(|(id, _)| retained.contains(id))
+            .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id) && retained.contains(id))
             .map(|(id, pose)| {
                 let pos = Vec3::new(pose.x, pose.y, pose.z);
                 PlayerState::create(
@@ -1466,6 +1505,59 @@ mod tests {
             snap.npcs().map(|v| v.len()).unwrap_or(0) > 0,
             "un director configuré avec un joueur présent doit finir par faire apparaître au moins un PNJ"
         );
+    }
+
+    #[test]
+    fn a_crowd_npc_never_appears_twice_as_both_playerstate_and_npcstate() {
+        // Bug préexistant découvert en revue de la Task 2 du plan câblage-dégradation (pas
+        // introduit par cette tâche) : `World.players` est le stockage PARTAGÉ joueurs+PNJ de
+        // foule+véhicules (même `add_player`, cf. fondations PNJ/véhicules) — sans exclusion
+        // explicite, un PNJ de foule apparaissait DÉJÀ deux fois dans un snapshot : une fois comme
+        // `PlayerState` (via `world.snapshot_for` brut, qui ne distingue pas joueurs/PNJ), une
+        // fois comme `NpcState` (via `npc_registry`, le chemin voulu). Ce test verrouille
+        // directement la propriété corrigée, indépendamment du mécanisme de dégradation qui l'a
+        // révélée par accident.
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur-de-rue"
+            briques = ["flaner-sur-place"]
+            "#,
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(1000.0, catalog, director);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        server.tick(&mut t); // laisse le director spawn le PNJ visé
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let npc_ids: Vec<u64> = snap
+            .npcs()
+            .map(|v| v.iter().map(|n| n.id()).collect())
+            .unwrap_or_default();
+        assert!(!npc_ids.is_empty(), "au moins un PNJ doit avoir spawné");
+        let player_ids: Vec<u64> = snap
+            .players()
+            .map(|v| v.iter().map(|p| p.id()).collect())
+            .unwrap_or_default();
+        for npc_id in &npc_ids {
+            assert!(
+                !player_ids.contains(npc_id),
+                "le PNJ {npc_id} ne doit JAMAIS apparaître aussi dans players() — sinon il est \
+                 compté/rendu deux fois côté client"
+            );
+        }
     }
 
     #[test]
@@ -3415,6 +3507,64 @@ mod tests {
             server.degradation_tier_for_test(),
             crate::degradation::DegradationTier::Degraded,
             "199 ticks lents + le p99 de la fenêtre doit rester au-dessus du seuil d'entrée"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_in_degraded_tier_caps_the_total_across_players_and_npcs_not_per_category() {
+        // Trouvé en revue de Task 2 : le test existant ci-dessous (joueurs uniquement) ne prouve
+        // pas que le plafond de voisins porte sur le TOTAL fusionné (joueurs + PNJ + véhicules),
+        // pas 60 par catégorie séparément — un vrai bug de régression (ex. un futur refactor qui
+        // réintroduirait un plafond par catégorie) ne serait pas détecté par la seule suite
+        // précédente. Ce test utilise joueurs + PNJ (un seul `Server` ne peut avoir PNJ ET
+        // véhicules actifs à la fois — `new_with_npcs`/`new_with_vehicles` sont mutuellement
+        // exclusifs, cf. constructeurs de `Server` — donc joueurs+PNJ suffit à prouver la fusion
+        // multi-catégorie sans ajouter un nouveau constructeur combiné hors périmètre ici).
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            r#"
+            format_version = 1
+            [[archetype]]
+            id = 1
+            name = "marcheur-de-rue"
+            briques = ["flaner-sur-place"]
+            "#,
+        )
+        .unwrap();
+        // Ratio élevé (40 PNJ par joueur présent) pour obtenir facilement 40 PNJ en un director
+        // qui réagit à un seul joueur connecté — cf. pattern de
+        // `a_server_with_npcs_configured_spawns_and_reports_npcs_in_the_snapshot`.
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 40)]));
+        let mut server = Server::new_with_npcs(1000.0, catalog, director);
+        server.force_degradation_tier_for_test(crate::degradation::DegradationTier::Degraded);
+
+        let mut t = InMemoryTransport::new();
+        // Joueur observateur + 39 autres joueurs (40 joueurs au total) + jusqu'à 40 PNJ (spawnés
+        // par le director sur plusieurs ticks) — 40+40 = 80 entités candidates, > le plafond de 60.
+        t.inject(TransportEvent::Connected(1));
+        for id in 2..=40 {
+            t.inject(TransportEvent::Connected(id));
+        }
+        server.tick(&mut t);
+        // Ticks supplémentaires pour laisser le director spawn tous les PNJ visés (le director ne
+        // spawn pas nécessairement tout en un seul tick — cf. commentaire de `tick_npcs`).
+        for _ in 0..5 {
+            server.tick(&mut t);
+        }
+
+        let sent = t.take_sent(1);
+        let env = flatbuffers::root::<ServerEnvelope>(sent.last().unwrap()).unwrap();
+        let snap = env.msg_as_snapshot().unwrap();
+        let visible_players = snap.players().map(|p| p.len()).unwrap_or(0);
+        let visible_npcs = snap.npcs().map(|n| n.len()).unwrap_or(0);
+        let total_visible = visible_players + visible_npcs;
+        assert!(
+            total_visible <= 60,
+            "le plafond de 60 doit porter sur le TOTAL joueurs+PNJ fusionné, pas 60 par catégorie \
+             séparément — vu {visible_players} joueurs + {visible_npcs} PNJ = {total_visible}"
         );
     }
 
