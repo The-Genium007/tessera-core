@@ -65,6 +65,15 @@ visibility_radius = 100.0
 # nommé "default" (pas la vraie topologie multi-district/authority.json) — seule une clé "default"
 # a un effet aujourd'hui ; toute autre clé de district est acceptée par le parseur mais ignorée par
 # le director tant que le câblage multi-district n'existe pas (plan de navigation, à venir).
+#
+# CURATION — liste de REJET (spec ambiance §4). Les archétypes du catalogue PNJ portent des tags
+# (démographie/faction : corpo, homeless, child, nightlife, sexworker…). Tout archétype dont un tag
+# figure ici n'est JAMAIS spawné. Modèle permissif : absent/vide = tout le catalogue est spawnable.
+# ⚠️ TOML : `exclure_tags` est un champ de [runtime.population], il doit donc être déclaré AVANT
+# d'ouvrir la sous-table [runtime.population.target_density] ci-dessous (sinon erreur de parse).
+# Exemple (dé-commenter la ligne d'en-tête ET la clé) :
+# [runtime.population]
+# exclure_tags = ["child", "sexworker"]
 [runtime.population.target_density]
 # default = 20
 

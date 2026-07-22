@@ -70,6 +70,15 @@ async fn main() -> std::io::Result<()> {
         });
         let director = server::population_director::PopulationDirector::new(
             manifest.runtime.population.target_density.clone(),
+        )
+        .with_excluded_tags(
+            manifest
+                .runtime
+                .population
+                .exclure_tags
+                .iter()
+                .cloned()
+                .collect(),
         );
         Some((catalog, director))
     };

@@ -200,6 +200,12 @@ pub struct PopulationConfig {
     /// historique préservé, cf. `Server::new_with_npcs` vs `Server::new` dans `server_loop.rs`).
     #[serde(default)]
     pub target_density: HashMap<String, u32>,
+
+    /// Liste de REJET de curation (spec ambiance §4) : les archétypes dont un tag figure ici ne
+    /// sont jamais spawnés. Modèle permissif par défaut — absent/vide = tout le catalogue est
+    /// spawnable. Passé tel quel à `PopulationDirector::with_excluded_tags` au boot.
+    #[serde(default)]
+    pub exclure_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -855,6 +861,24 @@ mod tests {
         let m = parse_and_validate(&toml).unwrap();
         assert_eq!(m.runtime.population.target_density.get("centre"), Some(&20));
         assert_eq!(m.runtime.population.target_density.get("periph"), Some(&5));
+    }
+
+    #[test]
+    fn population_exclure_tags_defaults_to_empty_when_absent() {
+        let m = parse_and_validate(MINIMAL_TOML).unwrap();
+        assert!(m.runtime.population.exclure_tags.is_empty());
+    }
+
+    #[test]
+    fn population_exclure_tags_parses_the_operator_reject_list() {
+        let toml = format!(
+            "{MINIMAL_TOML}\n[runtime.population]\nexclure_tags = [\"child\", \"sexworker\"]\n"
+        );
+        let m = parse_and_validate(&toml).unwrap();
+        assert_eq!(
+            m.runtime.population.exclure_tags,
+            vec!["child", "sexworker"]
+        );
     }
 
     // --- elevator_catalog_path : chemin du catalogue d'ascenseurs (modèle serveur, palier 2) ---
