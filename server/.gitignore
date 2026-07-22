@@ -1,0 +1,7 @@
+# Catalogues PNJ GÉNÉRÉS depuis les noms d'archétypes CDPR (pont Phase A→B,
+# bin/npc_catalog_gen.rs). Dérivés d'assets CDPR => jamais commités (CLAUDE.md :
+# « Ne rien redistribuer des assets CDPR »). Chaque opérateur régénère le sien
+# depuis son propre install de jeu. Les *.example.toml, eux, RESTENT versionnés.
+npc-catalog.toml
+named-npc-catalog.toml
+elevator-catalog.toml
