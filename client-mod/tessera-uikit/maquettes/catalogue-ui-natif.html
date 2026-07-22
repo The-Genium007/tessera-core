@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera — Catalogue UI natif (ce que le moteur accepte)</title>
+<!--
+  CATALOGUE des capacités UI NATIVES du moteur Cyberpunk (ink) + de la charte graphique du jeu.
+  But : montrer ce que la lib ink accepte comme interface, EN REPRENANT LES CODES GRAPHIQUES
+  EXISTANTS du jeu, pour qu'on réutilise sa charte plutôt que d'inventer.
+
+  Chaque bloc = une APPROXIMATION CSS d'un élément natif, annotée avec la VRAIE classe de widget
+  (dump RTTI) et/ou la VRAIE ressource du jeu à référencer en ink (depot path). Aucun asset CDPR
+  n'est embarqué : on ne fait que DÉSIGNER les ressources par leur chemin (comme SetAtlasResource /
+  SetStyle / SetFontFamily le font en jeu). Ouvre dans un navigateur (Mac) ; police Rajdhani via
+  Google Fonts (internet requis), repli condensé sinon.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Approximations des couleurs de main_colors.inkstyle (noms RÉELS de la charte du jeu). */
+    --void:   #05070a;
+    --panel:  rgba(9, 14, 19, .82);
+    --blue:   #26c9ff;   /* MainColors.Blue */
+    --red:    #ff3b3b;   /* MainColors.Red */
+    --mildred:#ff6a5a;   /* MainColors.MildRed */
+    --panelblue:#0e3b47; /* MainColors.PanelBlue */
+    --panelred:#3a1414;  /* MainColors.PanelRed */
+    --white:  #e9f4f7;   /* MainColors.White */
+    --readable:#9fb2ba;  /* MainColors.ReadableMedium */
+    --bg-darkest:#070b0f; /* Fullscreen_PrimaryBackgroundDarkest */
+    --line:   rgba(38, 201, 255, .22);
+    --dim:    #64727b;
+    --dim-2:  #33404a;
+    --bevel:  10px;
+    font-synthesis: none;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: radial-gradient(1100px 640px at 78% -10%, rgba(38,201,255,.06), transparent 60%), var(--void);
+    color: var(--white);
+    font-family: "Rajdhani", "Barlow Semi Condensed", "Roboto Condensed", system-ui, sans-serif;
+    font-size: 16px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  body::after { content:""; position:fixed; inset:0; pointer-events:none; z-index:9;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,.13) 0 1px, transparent 1px 3px); mix-blend-mode: multiply; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 40px 24px 96px; }
+  .mono { font-family: "Share Tech Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .eyebrow { font-family:"Share Tech Mono",monospace; font-size:12px; letter-spacing:.32em; text-transform:uppercase; color:var(--blue); }
+  h1 { font-size: clamp(28px,4.6vw,48px); font-weight:700; margin:6px 0 6px; text-wrap:balance; }
+  .lead { color: var(--readable); max-width: 66ch; }
+  header.page { border-bottom:1px solid var(--line); padding-bottom:22px; margin-bottom:8px; }
+
+  section { margin-top: 48px; }
+  .sec-head { display:flex; align-items:baseline; gap:14px; margin-bottom:8px; border-left:3px solid var(--blue); padding-left:12px; }
+  h2 { font-size:15px; font-weight:700; letter-spacing:.22em; text-transform:uppercase; color:var(--white); margin:0; }
+  .sec-head .num { font-family:"Share Tech Mono",monospace; color:var(--dim-2); font-size:13px; }
+  .sec-desc { color:var(--readable); font-size:14px; margin:0 0 22px; max-width:74ch; padding-left:15px; }
+
+  /* Chanfrein "cell" façon atlas_shapes_sync (cell_bg / cell_fg, nine-slice). */
+  .cut { clip-path: polygon(var(--bevel) 0, 100% 0, 100% calc(100% - var(--bevel)), calc(100% - var(--bevel)) 100%, 0 100%, 0 var(--bevel)); }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px,1fr)); gap:18px; }
+  .cell { position:relative; background:var(--panel); border:1px solid var(--line); padding:0; overflow:hidden; }
+  .cell .demo { min-height:130px; display:grid; place-items:center; padding:22px; background:linear-gradient(180deg, rgba(0,0,0,.15), rgba(0,0,0,.35)); gap:14px; }
+  .cell .info { padding:12px 15px 15px; border-top:1px solid rgba(255,255,255,.05); }
+  .cell .info h3 { margin:0 0 3px; font-size:15px; font-weight:600; letter-spacing:.04em; }
+  .cell .info p { margin:0 0 8px; color:var(--dim); font-size:12.5px; }
+  .cell .ref { font-family:"Share Tech Mono",monospace; font-size:11px; color:var(--blue); background:rgba(38,201,255,.08); border:1px solid var(--line); padding:2px 6px; display:inline-block; margin:2px 4px 0 0; word-break:break-all; }
+  .cell .ref.res { color:var(--mildred); background:rgba(255,106,90,.07); border-color:rgba(255,106,90,.25); }
+
+  /* ------- primitives réutilisées dans les démos (charte du jeu) ------- */
+  .txt-title { font-weight:700; color:var(--blue); letter-spacing:.03em; font-size:20px; }
+  .txt-label { font-family:"Share Tech Mono",monospace; letter-spacing:.2em; text-transform:uppercase; color:var(--white); font-size:12px; }
+  .g-btn { --bevel:8px; padding:.62em 1.5em; min-width:150px; text-align:center; font-weight:600; letter-spacing:.12em; text-transform:uppercase; font-size:14px; color:var(--blue); background:rgba(9,14,19,.9); border:1px solid var(--blue); cursor:pointer; transition:.15s; }
+  .g-btn.cut { }
+  .g-btn:hover, .g-btn.hover { background:var(--red); color:#160000; border-color:var(--red); }
+  .g-btn:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
+
+  .swatch-row { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px; width:100%; }
+  .sw { border:1px solid rgba(255,255,255,.08); }
+  .sw .c { height:44px; }
+  .sw .m { padding:6px 8px; font-family:"Share Tech Mono",monospace; font-size:11px; color:var(--dim); }
+  .sw .m b { display:block; color:var(--white); font-family:"Rajdhani",sans-serif; font-weight:600; font-size:12px; }
+
+  footer { margin-top:60px; padding-top:18px; border-top:1px solid var(--line); color:var(--dim); font-size:13px; }
+  code { font-family:"Share Tech Mono",monospace; color:var(--blue); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page">
+    <div class="eyebrow">Tessera · Catalogue UI natif</div>
+    <h1>Ce que le moteur (ink) accepte</h1>
+    <p class="lead">Le vocabulaire d'interface <b>natif</b> du jeu — widgets, contrôleurs, et la
+      <b>charte graphique existante</b> qu'on réutilise (styles, atlas, police, couleurs). Chaque
+      élément est une approximation CSS annotée avec sa <span style="color:var(--blue)">classe de widget réelle</span>
+      (dump RTTI) et sa <span style="color:var(--mildred)">ressource native</span> (depot path à référencer en ink).
+      But : reprendre les codes graphiques du jeu, pas inventer.</p>
+  </header>
+
+  <!-- ========= 1. FONDATIONS GRAPHIQUES (charte du jeu) ========= -->
+  <section>
+    <div class="sec-head"><span class="num">01</span><h2>Fondations graphiques — la charte du jeu</h2></div>
+    <p class="sec-desc">Les ressources qu'on référence directement (jamais copiées) pour hériter du look natif.</p>
+
+    <div class="grid">
+      <div class="cell">
+        <div class="demo" style="place-items:stretch">
+          <div class="swatch-row">
+            <div class="sw"><div class="c" style="background:#26c9ff"></div><div class="m"><b>Blue</b>bleu UI</div></div>
+            <div class="sw"><div class="c" style="background:#ff3b3b"></div><div class="m"><b>Red</b>alerte</div></div>
+            <div class="sw"><div class="c" style="background:#ff6a5a"></div><div class="m"><b>MildRed</b>doux</div></div>
+            <div class="sw"><div class="c" style="background:#0e3b47"></div><div class="m"><b>PanelBlue</b>fond</div></div>
+            <div class="sw"><div class="c" style="background:#3a1414"></div><div class="m"><b>PanelRed</b>fond</div></div>
+            <div class="sw"><div class="c" style="background:#e9f4f7"></div><div class="m"><b>White</b>texte</div></div>
+            <div class="sw"><div class="c" style="background:#9fb2ba"></div><div class="m"><b>ReadableMed.</b>texte 2</div></div>
+            <div class="sw"><div class="c" style="background:#070b0f;border:1px solid #1a2229"></div><div class="m"><b>BgDarkest</b>fond</div></div>
+          </div>
+        </div>
+        <div class="info">
+          <h3>Palette (charte native)</h3>
+          <p>Noms RÉELS des couleurs du jeu. On les bind au lieu de coder un hex : la couleur suit le thème du jeu.</p>
+          <span class="ref res">base\gameplay\gui\common\main_colors.inkstyle</span>
+          <span class="ref">BindProperty(n"tintColor", n"MainColors.Blue")</span>
+        </div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="flex-direction:column;place-items:start;gap:6px">
+          <div style="font-family:'Rajdhani';font-weight:700;font-size:30px;letter-spacing:.02em">Rajdhani 700</div>
+          <div style="font-family:'Rajdhani';font-weight:500;font-size:20px">Rajdhani 500 — corps</div>
+          <div class="mono" style="font-size:15px">Share Tech Mono · 00:41 · 168/240</div>
+        </div>
+        <div class="info">
+          <h3>Police</h3>
+          <p>Rajdhani (« raj ») = la police UI du jeu. On la référence par sa fontfamily native.</p>
+          <span class="ref res">base\gameplay\gui\fonts\raj\raj.inkfontfamily</span>
+          <span class="ref">SetFontFamily(...) · SetFontStyle(n"Bold")</span>
+        </div>
+      </div>
+
+      <div class="cell">
+        <div class="demo">
+          <div class="cut" style="width:80%;height:70px;background:linear-gradient(135deg,rgba(38,201,255,.1),transparent);border:1px solid var(--blue);position:relative">
+            <div style="position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(38,201,255,.06) 0 1px,transparent 1px 4px)"></div>
+          </div>
+        </div>
+        <div class="info">
+          <h3>Cadres / formes (atlas de shapes)</h3>
+          <p>Cadres chanfreinés, plaques, fonds, remplissages « fluff » — nine-slice depuis l'atlas de formes du jeu.</p>
+          <span class="ref res">...\common\shapes\atlas_shapes_sync.inkatlas</span>
+          <span class="ref">parts : cell_bg · cell_fg · Plate_main · frame_gradient1</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========= 2. WIDGETS DE BASE ========= -->
+  <section>
+    <div class="sec-head"><span class="num">02</span><h2>Widgets de base — briques d'affichage</h2></div>
+    <p class="sec-desc">Ce que le moteur sait dessiner. On les crée en ink (<code>new inkXWidget()</code>) et on les assemble.</p>
+
+    <div class="grid">
+      <div class="cell">
+        <div class="demo" style="flex-direction:column;place-items:start">
+          <div class="txt-title">TITRE</div>
+          <div style="color:var(--readable)">Texte simple, tailles/casses/couleurs pilotables.</div>
+        </div>
+        <div class="info"><h3>Texte</h3><p>Statique ou dynamique, aligné, coloré, en majuscules.</p><span class="ref">inkTextWidget</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="flex-direction:column;place-items:start">
+          <div style="color:var(--white)">Texte <span style="color:var(--blue)">riche</span> avec <b style="color:var(--red)">styles</b> <span class="mono" style="color:var(--mildred)">inline</span>.</div>
+        </div>
+        <div class="info"><h3>Texte riche</h3><p>Balises de style dans un même bloc (couleurs, gras, liens).</p><span class="ref">inkRichTextBoxWidget</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo">
+          <div class="cut" style="border:1px solid var(--blue);background:rgba(38,201,255,.06);padding:.4em .8em;color:var(--blue);min-width:180px">
+            <span class="mono" style="font-size:13px">saisie utilisateur_</span>
+          </div>
+        </div>
+        <div class="info"><h3>Champ de saisie</h3><p>Entrée clavier (montant, pseudo…). Codeware en fournit un prêt.</p><span class="ref">inkTextInputWidget</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo">
+          <div style="width:64px;height:64px;border:1px solid var(--line);background:radial-gradient(circle,rgba(38,201,255,.25),transparent 70%);display:grid;place-items:center;color:var(--blue)" class="mono">ICON</div>
+        </div>
+        <div class="info"><h3>Image (atlas)</h3><p>Pointe un atlas déjà chargé + un nom de part. Zéro copie d'asset.</p><span class="ref">inkImageWidget</span><span class="ref">SetAtlasResource / SetTexturePart</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="gap:10px">
+          <div style="width:60px;height:34px;background:var(--panelblue);border:1px solid var(--blue)"></div>
+          <div style="width:34px;height:34px;border-radius:50%;border:1px solid var(--mildred)"></div>
+          <div style="width:60px;height:34px;background:linear-gradient(90deg,var(--blue),transparent)"></div>
+        </div>
+        <div class="info"><h3>Formes & décor</h3><p>Rectangle, bordure, cercle, dégradé, motif de lignes, masque.</p><span class="ref">inkRectangle / inkBorder / inkCircle / inkGradient / inkLinePattern / inkMask</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo">
+          <div style="width:90%;height:56px;border:1px solid var(--line);background:repeating-linear-gradient(90deg,rgba(38,201,255,.05) 0 6px,transparent 6px 12px);display:grid;place-items:center;color:var(--dim)" class="mono">▶ vidéo</div>
+        </div>
+        <div class="info"><h3>Vidéo / vectoriel</h3><p>Le moteur sait afficher une vidéo (bink) et du vectoriel.</p><span class="ref">inkVideoWidget · inkVectorGraphicWidget</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========= 3. LAYOUTS ========= -->
+  <section>
+    <div class="sec-head"><span class="num">03</span><h2>Layouts — comment on agence</h2></div>
+    <p class="sec-desc">Conteneurs qui positionnent les enfants (équivalents flexbox/grid/scroll).</p>
+
+    <div class="grid">
+      <div class="cell">
+        <div class="demo" style="place-items:stretch">
+          <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;width:100%">
+            <div style="flex:1;height:34px;background:var(--panelblue);border:1px solid var(--line)"></div>
+            <div style="flex:1;height:34px;background:var(--panelblue);border:1px solid var(--line)"></div>
+            <div style="flex:1;height:34px;background:var(--panelblue);border:1px solid var(--line)"></div>
+          </div>
+        </div>
+        <div class="info"><h3>Empilement H / V + flex</h3><p>Rangées et colonnes, alignement, marges entre enfants.</p><span class="ref">inkHorizontalPanel · inkVerticalPanel · inkFlex</span></div>
+      </div>
+      <div class="cell">
+        <div class="demo">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;width:100%">
+            <div style="height:28px;background:var(--panelblue);border:1px solid var(--line)"></div><div style="height:28px;background:var(--panelblue);border:1px solid var(--line)"></div><div style="height:28px;background:var(--panelblue);border:1px solid var(--line)"></div>
+            <div style="height:28px;background:var(--panelblue);border:1px solid var(--line)"></div><div style="height:28px;background:var(--panelblue);border:1px solid var(--line)"></div><div style="height:28px;background:var(--panelblue);border:1px solid var(--line)"></div>
+          </div>
+        </div>
+        <div class="info"><h3>Grilles</h3><p>Grille libre ou uniforme (inventaire, catalogue d'icônes).</p><span class="ref">inkGrid · inkUniformGrid</span></div>
+      </div>
+      <div class="cell">
+        <div class="demo" style="place-items:stretch">
+          <div style="height:90px;overflow:hidden;border:1px solid var(--line);position:relative">
+            <div style="padding:6px 10px;color:var(--readable);font-size:13px">Ligne 1<br>Ligne 2<br>Ligne 3<br>Ligne 4<br>Ligne 5</div>
+            <div style="position:absolute;right:4px;top:6px;bottom:6px;width:3px;background:var(--blue);opacity:.5"></div>
+          </div>
+        </div>
+        <div class="info"><h3>Zone de défilement</h3><p>Contenu long scrollable (listes, inventaires).</p><span class="ref">inkScrollAreaWidget · inkScrollController</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========= 4. COMPOSANTS INTERACTIFS ========= -->
+  <section>
+    <div class="sec-head"><span class="num">04</span><h2>Composants interactifs — contrôleurs natifs</h2></div>
+    <p class="sec-desc">Le moteur fournit des contrôleurs prêts, à attacher à des widgets (états, callbacks). Les sliders/toggles/listes « fonctionnels » viennent en général d'un <code>.inkwidget</code> à instancier.</p>
+
+    <div class="grid">
+      <div class="cell">
+        <div class="demo" style="flex-direction:column">
+          <button class="g-btn cut hover">Survolé</button>
+          <button class="g-btn cut">Repos</button>
+        </div>
+        <div class="info"><h3>Bouton</h3><p>États repos/survol/pressé/désactivé, animés + son. (Rendu H2 validé.)</p><span class="ref">inkButtonController (+ Animated / Tint)</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="gap:18px">
+          <div style="display:flex;align-items:center;gap:8px"><div style="width:44px;height:22px;background:var(--blue);border-radius:2px;position:relative"><div style="position:absolute;right:2px;top:2px;width:18px;height:18px;background:#04121a"></div></div><span class="txt-label">ON</span></div>
+          <div style="display:flex;align-items:center;gap:8px"><div style="width:44px;height:22px;background:var(--dim-2);border-radius:2px;position:relative"><div style="position:absolute;left:2px;top:2px;width:18px;height:18px;background:#04121a"></div></div><span class="txt-label" style="color:var(--dim)">OFF</span></div>
+        </div>
+        <div class="info"><h3>Toggle / interrupteur</h3><p>Bascule on/off (isToggled, callback ToggleChanged).</p><span class="ref">inkToggleController</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="place-items:stretch">
+          <div style="height:6px;background:rgba(255,255,255,.1);position:relative;margin:0 6px"><div style="position:absolute;left:0;top:0;bottom:0;width:62%;background:var(--blue)"></div><div style="position:absolute;left:62%;top:-6px;width:16px;height:18px;background:var(--blue);transform:translateX(-50%)"></div></div>
+        </div>
+        <div class="info"><h3>Slider</h3><p>Valeur continue (Setup min/max/step, callback OnSliderValueChanged).</p><span class="ref">inkSliderController</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="place-items:stretch">
+          <div style="display:flex;flex-direction:column;gap:4px">
+            <div style="padding:6px 10px;background:rgba(38,201,255,.12);border-left:3px solid var(--blue);color:var(--white)">▸ Élément sélectionné</div>
+            <div style="padding:6px 10px;color:var(--readable);border-left:3px solid transparent">Élément 2</div>
+            <div style="padding:6px 10px;color:var(--readable);border-left:3px solid transparent">Élément 3</div>
+          </div>
+        </div>
+        <div class="info"><h3>Liste</h3><p>Lignes navigables/sélectionnables (inventaire, contacts).</p><span class="ref">inkListController · inkListItemController</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="gap:14px">
+          <div style="display:flex;align-items:center;gap:6px"><div style="width:16px;height:16px;border-radius:50%;border:1px solid var(--blue);display:grid;place-items:center"><div style="width:8px;height:8px;border-radius:50%;background:var(--blue)"></div></div><span>Choix A</span></div>
+          <div style="display:flex;align-items:center;gap:6px"><div style="width:16px;height:16px;border-radius:50%;border:1px solid var(--dim)"></div><span style="color:var(--dim)">Choix B</span></div>
+        </div>
+        <div class="info"><h3>Groupe radio / sélecteur</h3><p>Un choix parmi N (difficulté, catégorie).</p><span class="ref">inkRadioGroupController · inkSelectorController</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="place-items:stretch">
+          <div class="cut" style="border:1px solid var(--line);background:rgba(9,14,19,.9);padding:8px 12px;display:flex;justify-content:space-between;color:var(--readable)"><span>Menu déroulant ▾</span><span class="mono" style="color:var(--blue)">3 options</span></div>
+        </div>
+        <div class="info"><h3>Déroulant</h3><p>Se construit sur liste + bouton (pas de widget « dropdown » unique).</p><span class="ref">inkList + inkButton (composé)</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========= 5. COMPOSANTS COMPOSÉS (patterns du jeu) ========= -->
+  <section>
+    <div class="sec-head"><span class="num">05</span><h2>Composants composés — patterns assemblés du jeu</h2></div>
+    <p class="sec-desc">Ce que le jeu fabrique en combinant les briques ci-dessus. On reprend l'assemblage exact.</p>
+
+    <div class="grid">
+      <div class="cell">
+        <div class="demo" style="place-items:stretch;padding:0">
+          <div class="cut" style="background:var(--panel);border:1px solid var(--line);padding:16px 18px;position:relative">
+            <div style="position:absolute;top:0;left:0;background:var(--blue);color:#04121a;font-family:'Share Tech Mono';font-size:10px;letter-spacing:.16em;padding:2px 10px 2px 8px;clip-path:polygon(0 0,100% 0,calc(100% - 7px) 100%,0 100%)">POPUP</div>
+            <div style="height:10px"></div>
+            <div class="txt-title">TITRE D'ÉCRAN</div>
+            <div style="color:var(--readable);font-size:13px;margin-top:2px">Corps du popup (vignette + cadre centré).</div>
+          </div>
+        </div>
+        <div class="info"><h3>Popup / dialogue</h3><p>Vignette + cadre + contenu. C'est le socle H2 (InGamePopup Codeware).</p><span class="ref res">...\widgets\notifications\vignette.inkatlas</span><span class="ref res">dialogs_popups.inkstyle</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="flex-direction:column">
+          <div class="cut" style="background:var(--panel);border:1px solid var(--line);padding:8px 14px;display:flex;align-items:center;gap:8px;font-size:13px"><div style="width:8px;height:8px;background:var(--blue);box-shadow:0 0 8px var(--blue)"></div> Objet reçu · Ronin</div>
+        </div>
+        <div class="info"><h3>Notification / toast</h3><p>Bandeaux empilables du HUD.</p><span class="ref res">notification_assets.inkatlas</span><span class="ref">GenericMessageNotification</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo">
+          <div class="cut" style="background:var(--bg-darkest);border:1px solid var(--mildred);padding:8px 12px;max-width:220px">
+            <div class="mono" style="color:var(--mildred);font-size:11px;letter-spacing:.14em">SCAN // CIBLE</div>
+            <div style="color:var(--white);font-size:13px;margin-top:3px">Info-bulle façon scanner : titre + valeurs.</div>
+          </div>
+        </div>
+        <div class="info"><h3>Tooltip / scanner</h3><p>Bulle d'info du scanner (survol d'objet/PNJ).</p><span class="ref res">...\scanning\scanner_tooltip\atlas_scanner.inkatlas</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="gap:16px">
+          <div style="display:flex;align-items:center;gap:6px"><span class="mono" style="display:grid;place-items:center;width:24px;height:24px;border:1px solid var(--blue);color:var(--blue);font-size:12px">F</span><span class="txt-label">Interagir</span></div>
+          <div style="display:flex;align-items:center;gap:6px"><span class="mono" style="display:grid;place-items:center;width:24px;height:24px;border:1px solid var(--blue);color:var(--blue);font-size:11px">ESC</span><span class="txt-label">Fermer</span></div>
+        </div>
+        <div class="info"><h3>Button hints</h3><p>Rappels de touches (icône clavier + libellé). Prêt dans Codeware.</p><span class="ref res">buttonhints.inkwidget</span><span class="ref res">icons_keyboard.inkatlas</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="place-items:stretch">
+          <div style="display:flex;gap:0">
+            <div style="padding:6px 14px;background:rgba(38,201,255,.14);color:var(--blue);border-bottom:2px solid var(--blue);font-size:13px;letter-spacing:.08em">ONGLET 1</div>
+            <div style="padding:6px 14px;color:var(--dim);border-bottom:2px solid transparent;font-size:13px;letter-spacing:.08em">ONGLET 2</div>
+            <div style="padding:6px 14px;color:var(--dim);border-bottom:2px solid transparent;font-size:13px;letter-spacing:.08em">ONGLET 3</div>
+          </div>
+        </div>
+        <div class="info"><h3>Onglets</h3><p>Barre d'onglets (sélecteur + panneaux). Motif hub/menu.</p><span class="ref res">hub_menu_style.inkstyle</span></div>
+      </div>
+
+      <div class="cell">
+        <div class="demo" style="place-items:stretch">
+          <div style="margin:0 6px"><div style="font-family:'Share Tech Mono';font-size:11px;color:var(--dim);margin-bottom:4px;display:flex;justify-content:space-between"><span>PROGRESSION</span><span style="color:var(--blue)">62%</span></div><div style="height:8px;background:rgba(255,255,255,.08)"><div style="height:100%;width:62%;background:linear-gradient(90deg,var(--blue),var(--mildred))"></div></div></div>
+        </div>
+        <div class="info"><h3>Barre de progression</h3><p>Craft, chargement, breach. Anim de valeur possible.</p><span class="ref">inkTextValueProgressAnimationController</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========= 6. ANIMATIONS ========= -->
+  <section>
+    <div class="sec-head"><span class="num">06</span><h2>Animations & effets natifs</h2></div>
+    <p class="sec-desc">Le moteur anime les widgets (interpolateurs). On les déclenche en ink.</p>
+    <div class="grid">
+      <div class="cell"><div class="demo"><span style="color:var(--blue)">fondu / opacité</span></div><div class="info"><h3>Transparence, couleur, échelle, position</h3><p>Interpolateurs de base (fade, tint, scale, slide).</p><span class="ref">inkAnimTransparency · inkAnimColor · inkAnimScale · inkAnimTranslation</span></div></div>
+      <div class="cell"><div class="demo"><span class="mono" style="color:var(--mildred);letter-spacing:.1em">G̷L̷I̷T̷C̷H̷</span></div><div class="info"><h3>Texte « Kiroshi » (glitch)</h3><p>Effets de texte signature du jeu (glitch, révélation, décompte).</p><span class="ref">inkTextKiroshiAnimationController · inkTextReplaceAnimationController</span></div></div>
+      <div class="cell"><div class="demo"><span class="mono" style="color:var(--blue);font-size:22px">240</span></div><div class="info"><h3>Compteur animé</h3><p>Chiffre qui monte/descend (PV, argent).</p><span class="ref">inkTextValueProgressAnimationController</span></div></div>
+    </div>
+  </section>
+
+  <footer>
+    <p><b>Légende.</b> <span style="color:var(--blue)">bleu</span> = classe de widget/contrôleur native (dump RTTI) ·
+      <span style="color:var(--mildred)">rouge</span> = ressource graphique du jeu (depot path à référencer, jamais copier).</p>
+    <p>Approximations CSS pour visualiser le vocabulaire natif — aucun asset CDPR embarqué. Le rendu exact
+      se vérifie en jeu (Windows). Vocabulaire complet listé dans <code>README.md</code>.</p>
+  </footer>
+
+</div>
+</body>
+</html>

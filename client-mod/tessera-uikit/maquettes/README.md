@@ -4,12 +4,45 @@ Dossier de **conception visuelle** des écrans HUD/UI de Tessera. On maquette en
 génère et que tu ouvres dans un navigateur, sur Mac) pour décider du look **avant** de coder en
 redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquettes soient cohérentes.
 
-## Ouvrir le kit
+## Les deux fichiers
 
-Ouvre **`tessera-hud-kit.html`** dans un navigateur. Tu y trouves : une **maquette d'écran de jeu**
-(disposition cible du palier 2), une **galerie de composants** (barre de vie, jauges faim/soif,
-bouton H2, roue radiale, toast, panneau), la **palette** et la **typo**. La police Rajdhani se charge
-depuis Google Fonts (il faut internet ; sinon repli sur une condensée système).
+- **`catalogue-ui-natif.html`** — **CE QUE LE MOTEUR ACCEPTE.** Le vocabulaire d'interface *natif*
+  (widgets, contrôleurs) + la *charte graphique existante du jeu* (styles, atlas, police, couleurs),
+  qu'on **réutilise plutôt que d'inventer**. Chaque bloc est annoté avec la vraie classe de widget
+  (dump RTTI) et la vraie ressource native (depot path). **→ commence par celui-ci.**
+- **`tessera-hud-kit.html`** — **CE QU'ON VISE POUR NOTRE HUD.** Maquette de nos écrans (vie, faim/soif,
+  etc.) dans cette charte. Sert pour la phase design de *nos* écrans, après.
+
+Ouvre-les dans un navigateur. La police Rajdhani se charge depuis Google Fonts (internet requis ;
+repli condensé sinon).
+
+## Vocabulaire natif — référence rapide (dump RTTI + Codeware)
+
+**Widgets d'affichage :** `inkTextWidget`, `inkRichTextBoxWidget`, `inkTextInputWidget`,
+`inkImageWidget`, `inkVideoWidget`, `inkVectorGraphicWidget`, `inkRectangleWidget`, `inkBorderWidget`,
+`inkCircleWidget`, `inkGradientWidget`, `inkLinePatternWidget`, `inkMaskWidget`, `inkQuadShapeWidget`.
+
+**Layouts (compound) :** `inkCanvasWidget`, `inkFlexWidget`, `inkHorizontalPanelWidget`,
+`inkVerticalPanelWidget`, `inkGridWidget`, `inkUniformGridWidget`, `inkScrollAreaWidget`.
+
+**Contrôleurs interactifs :** `inkButtonController` (+`Animated`/`Tint`/`DpadSupported`),
+`inkToggleController`, `inkSliderController`, `inkListController`/`inkListItemController`,
+`inkRadioGroupController`, `inkSelectorController`, `inkScrollController`.
+
+**Animations :** `inkAnimTransparency`/`Color`/`Scale`/`Translation`, `inkTextKiroshiAnimationController`
+(glitch), `inkTextReplaceAnimationController`, `inkTextValueProgressAnimationController` (compteur).
+
+**Ressources graphiques du jeu (à référencer, jamais copier) :**
+- Police : `base\gameplay\gui\fonts\raj\raj.inkfontfamily`
+- Styles : `...\common\main_colors.inkstyle` (`MainColors.Blue/Red/MildRed/White/PanelBlue/PanelRed/`
+  `ReadableMedium/Fullscreen_PrimaryBackgroundDarkest/…`), `dialogs_popups.inkstyle`,
+  `fullscreen_main_colors.inkstyle`, `hub_menu_style.inkstyle`, `perks_style.inkstyle`
+- Atlas : `...\shapes\atlas_shapes_sync.inkatlas` (parts `cell_bg`/`cell_fg`/`Plate_main`/`frame_gradient1`),
+  `atlas_common.inkatlas` (icônes), `icons_keyboard.inkatlas`, `masks.inkatlas`, `shadow_blobs.inkatlas`,
+  `notifications\notification_assets.inkatlas`, `notifications\vignette.inkatlas`,
+  `scanning\scanner_tooltip\atlas_scanner.inkatlas`, `inventory\atlas_inventory.inkatlas`,
+  `hub_menu\hub_atlas.inkatlas`
+- Widget prêt : `common\buttonhints.inkwidget`
 
 ## Ce que je peux générer (esthétiquement)
 
