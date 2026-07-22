@@ -4,14 +4,18 @@ Dossier de **conception visuelle** des écrans HUD/UI de Tessera. On maquette en
 génère et que tu ouvres dans un navigateur, sur Mac) pour décider du look **avant** de coder en
 redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquettes soient cohérentes.
 
-## Les deux fichiers
+## Les trois fichiers
 
-- **`catalogue-ui-natif.html`** — **CE QUE LE MOTEUR ACCEPTE.** Le vocabulaire d'interface *natif*
-  (widgets, contrôleurs) + la *charte graphique existante du jeu* (styles, atlas, police, couleurs),
-  qu'on **réutilise plutôt que d'inventer**. Chaque bloc est annoté avec la vraie classe de widget
-  (dump RTTI) et la vraie ressource native (depot path). **→ commence par celui-ci.**
-- **`tessera-hud-kit.html`** — **CE QU'ON VISE POUR NOTRE HUD.** Maquette de nos écrans (vie, faim/soif,
-  etc.) dans cette charte. Sert pour la phase design de *nos* écrans, après.
+- **`catalogue-ui-natif.html`** — **LES BRIQUES : ce que le moteur accepte.** Le vocabulaire *natif*
+  (widgets, contrôleurs) + la *charte graphique du jeu* (styles, atlas, police, couleurs), qu'on
+  **réutilise plutôt que d'inventer**. Chaque bloc annoté avec sa vraie classe (RTTI) et sa vraie
+  ressource (depot path).
+- **`ecrans-natifs.html`** — **LES ÉCRANS ASSEMBLÉS : carte des écrans de base du jeu.** Pour chaque
+  écran natif (inventaire, carte, téléphone, vendeur, menu pause, radial, mort, logement…), un
+  **schéma de disposition** + son **contrôleur réel** (RTTI) + la **stratégie de reprise**
+  (1a réinvoquer / 1b patcher / 2 reconstruire). Schémas de dev, **pas d'assets CDPR extraits**.
+- **`tessera-hud-kit.html`** — **NOTRE CIBLE.** Maquette de *nos* écrans (vie, faim/soif…) dans cette
+  charte. Pour la phase design de nos écrans, après.
 
 Ouvre-les dans un navigateur. La police Rajdhani se charge depuis Google Fonts (internet requis ;
 repli condensé sinon).
