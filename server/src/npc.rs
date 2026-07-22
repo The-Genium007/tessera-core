@@ -131,6 +131,17 @@ impl NpcRecord {
         {
             self.behavior = EntityBehavior::Flane;
         }
+        // "attaquer-cible" (spec PNJ hostiles §1) : escalade une menace déjà signalée (Fuite, posée
+        // par `apply_interaction` kind=0) en cible hostile — un PNJ agressif ne fuit pas la menace,
+        // il l'attaque. Ne s'applique QUE sur `Fuite` (une menace DOIT déjà exister, spec « le FSM
+        // est la cause » — cette brique ne fait jamais devenir un PNJ hostile sans provocation
+        // préalable) ; ne touche jamais `Hostile` (déjà là, rien à faire), `ATerre` (jamais réactivé
+        // tout seul), ou `Calme`/`Flane`/`Alerte` (aucune menace concrète à escalader).
+        if let EntityBehavior::Fuite { menace } = self.behavior {
+            if archetype.briques.iter().any(|b| b == "attaquer-cible") {
+                self.behavior = EntityBehavior::Hostile { cible: menace };
+            }
+        }
         // "rester-statique" : ne change jamais `behavior` (reste Calme) — c'est la définition même
         // de la brique (spec §4 : « le danseur hip-hop = brique… zéro navigation »).
         // "vendre"/"donner-quête"/"réagir-dialogue" : hooks sociaux, pas de transition de
@@ -554,6 +565,55 @@ mod brique_engine_tests {
         let archetype = archetype_with_briques(&["marcher-route"]);
         r.apply_brique_tick(&archetype); // ne doit pas paniquer
         assert_eq!(r.behavior, EntityBehavior::Calme);
+    }
+
+    #[test]
+    fn attaquer_cible_brique_escalates_fuite_to_hostile_when_active() {
+        let mut r = NpcRecord::new(1, 1);
+        r.apply_interaction(99, 0); // déclenche Fuite { menace: 99 } (comportement existant, inchangé)
+        let archetype = archetype_with_briques(&["attaquer-cible"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(
+            r.behavior,
+            EntityBehavior::Hostile { cible: 99 },
+            "un PNJ agressif (brique attaquer-cible) doit escalader une menace en cible hostile, \
+             pas simplement fuir"
+        );
+    }
+
+    #[test]
+    fn attaquer_cible_brique_does_nothing_without_an_existing_threat() {
+        let mut r = NpcRecord::new(1, 1);
+        let archetype = archetype_with_briques(&["attaquer-cible"]);
+        r.apply_brique_tick(&archetype); // aucune menace signalée -> reste Calme
+        assert_eq!(r.behavior, EntityBehavior::Calme);
+    }
+
+    #[test]
+    fn attaquer_cible_brique_does_not_override_an_existing_hostile_state_with_a_different_reporter()
+    {
+        // Une fois Hostile{cible=X}, un brique_tick répété ne doit pas changer la cible tant que
+        // owner/FSM n'a pas de raison de le faire (pas de re-déclenchement sur chaque tick — la
+        // cible ne change que via une NOUVELLE interaction kind=0, testé séparément dans
+        // record_tests existant `a_second_threat_interaction_updates_the_threat_id`).
+        let mut r = NpcRecord::new(1, 1);
+        r.behavior = EntityBehavior::Hostile { cible: 42 };
+        let archetype = archetype_with_briques(&["attaquer-cible"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(r.behavior, EntityBehavior::Hostile { cible: 42 });
+    }
+
+    #[test]
+    fn attaquer_cible_brique_never_overrides_aterre() {
+        let mut r = NpcRecord::new(1, 1);
+        r.behavior = EntityBehavior::ATerre;
+        let archetype = archetype_with_briques(&["attaquer-cible"]);
+        r.apply_brique_tick(&archetype);
+        assert_eq!(
+            r.behavior,
+            EntityBehavior::ATerre,
+            "un PNJ à terre ne redevient jamais hostile tout seul"
+        );
     }
 
     #[test]
