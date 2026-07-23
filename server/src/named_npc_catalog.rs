@@ -63,11 +63,15 @@ pub enum NamedNpcCatalogError {
 impl fmt::Display for NamedNpcCatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NamedNpcCatalogError::Parse(e) => write!(f, "manifeste PNJ nominatif invalide (TOML) : {e}"),
+            NamedNpcCatalogError::Parse(e) => {
+                write!(f, "manifeste PNJ nominatif invalide (TOML) : {e}")
+            }
             NamedNpcCatalogError::UnsupportedFormatVersion(v) => {
                 write!(f, "format_version {v} non supporté (attendu : 1)")
             }
-            NamedNpcCatalogError::DuplicateId(id) => write!(f, "id-manifeste '{id}' déclaré plusieurs fois"),
+            NamedNpcCatalogError::DuplicateId(id) => {
+                write!(f, "id-manifeste '{id}' déclaré plusieurs fois")
+            }
             NamedNpcCatalogError::EmptyBriquesList { id } => {
                 write!(f, "PNJ '{id}' n'a aucune brique — au moins une requise")
             }
@@ -80,7 +84,9 @@ pub fn parse_and_validate(toml_str: &str) -> Result<NamedNpcCatalog, NamedNpcCat
     let raw: RawCatalog =
         toml::from_str(toml_str).map_err(|e| NamedNpcCatalogError::Parse(e.to_string()))?;
     if raw.format_version != 1 {
-        return Err(NamedNpcCatalogError::UnsupportedFormatVersion(raw.format_version));
+        return Err(NamedNpcCatalogError::UnsupportedFormatVersion(
+            raw.format_version,
+        ));
     }
     let mut entries = std::collections::HashMap::new();
     for p in raw.pnj {
@@ -136,7 +142,10 @@ mod tests {
     fn unsupported_format_version_is_rejected() {
         let toml = VALID.replace("format_version = 1", "format_version = 2");
         let err = parse_and_validate(&toml).unwrap_err();
-        assert!(matches!(err, NamedNpcCatalogError::UnsupportedFormatVersion(2)));
+        assert!(matches!(
+            err,
+            NamedNpcCatalogError::UnsupportedFormatVersion(2)
+        ));
     }
 
     #[test]
@@ -145,17 +154,18 @@ mod tests {
             "{VALID}\n[[pnj]]\nid = \"ripperdoc-watson-01\"\narchetype = \"x\"\nposition = [0.0, 0.0, 0.0]\nbriques = [\"rester-statique\"]\n"
         );
         let err = parse_and_validate(&toml).unwrap_err();
-        assert!(matches!(err, NamedNpcCatalogError::DuplicateId(id) if id == "ripperdoc-watson-01"));
+        assert!(
+            matches!(err, NamedNpcCatalogError::DuplicateId(id) if id == "ripperdoc-watson-01")
+        );
     }
 
     #[test]
     fn entry_with_no_briques_is_rejected() {
-        let toml = VALID.replace(
-            r#"briques = ["rester-statique", "vendre"]"#,
-            "briques = []",
-        );
+        let toml = VALID.replace(r#"briques = ["rester-statique", "vendre"]"#, "briques = []");
         let err = parse_and_validate(&toml).unwrap_err();
-        assert!(matches!(err, NamedNpcCatalogError::EmptyBriquesList { id } if id == "ripperdoc-watson-01"));
+        assert!(
+            matches!(err, NamedNpcCatalogError::EmptyBriquesList { id } if id == "ripperdoc-watson-01")
+        );
     }
 
     #[test]
@@ -172,8 +182,8 @@ mod tests {
 
     #[test]
     fn the_example_toml_file_on_disk_parses_successfully() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("named-npc-catalog.example.toml");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("named-npc-catalog.example.toml");
         let cat = load(&path).expect("named-npc-catalog.example.toml doit être valide");
         assert_eq!(cat.len(), 2);
     }
