@@ -44,7 +44,9 @@ impl NamedNpcRegistry {
     }
 
     pub fn manifest_id_of(&self, runtime_id: ClientId) -> Option<&str> {
-        self.runtime_to_manifest.get(&runtime_id).map(String::as_str)
+        self.runtime_to_manifest
+            .get(&runtime_id)
+            .map(String::as_str)
     }
 
     pub fn runtime_ids(&self) -> Vec<ClientId> {

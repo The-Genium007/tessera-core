@@ -782,10 +782,17 @@ pub fn record_anomaly(tracker: &mut AnomalyTracker, now: std::time::Instant) -> 
 /// (bypass playtest voulu, staff/MJ — Moderator et Player n'en bénéficient jamais). Sinon,
 /// `classify_move` tranche (une 1re position, `last` = `None`, est verte). Remplace
 /// `resolve_move_plausibility` (retirée au recâblage de la boucle).
+///
+/// `frame` (ADR 0013) : documente que `last` et `current` doivent être dans le MÊME référentiel
+/// (tous deux en offset local du même repère, ou tous deux en position monde) — la garde réelle
+/// est côté appelant (`gateway_main`, qui bascule `last_pos`/`current` sur l'offset local dès que
+/// le joueur est porté), ce paramètre sert de rappel de type, pas de logique supplémentaire ici :
+/// `classify_move` compare des distances dans le référentiel qu'on lui donne, quel qu'il soit.
 pub fn resolve_move_verdict(
     rank: crate::handoff::Rank,
     last: Option<([f32; 3], std::time::Duration)>,
     current: [f32; 3],
+    _frame: crate::frame::FrameId,
 ) -> crate::anticheat::MoveVerdict {
     use crate::anticheat::MoveVerdict;
     if rank == crate::handoff::Rank::GameMaster {
@@ -1445,7 +1452,7 @@ pub async fn gateway_main(
                         (Some(prev), Some(at)) => Some((prev, now.duration_since(at))),
                         _ => None,
                     };
-                    match resolve_move_verdict(rank, last, [x, y, z]) {
+                    match resolve_move_verdict(rank, last, [x, y, z], crate::frame::WORLD_FRAME) {
                         crate::anticheat::MoveVerdict::Green => {
                             last_pos.insert(cid, [x, y, z]);
                             last_pos_at.insert(cid, now);
@@ -3700,20 +3707,71 @@ mod tests {
         let elapsed = std::time::Duration::from_millis(50); // un seul tick à 20 Hz
 
         assert_eq!(
-            resolve_move_verdict(Rank::GameMaster, Some((prev, elapsed)), teleport),
+            resolve_move_verdict(
+                Rank::GameMaster,
+                Some((prev, elapsed)),
+                teleport,
+                crate::frame::WORLD_FRAME
+            ),
             MoveVerdict::Green,
             "GameMaster doit rester Green même sur un téléport implausible"
         );
         assert_eq!(
-            resolve_move_verdict(Rank::Player, Some((prev, elapsed)), teleport),
+            resolve_move_verdict(
+                Rank::Player,
+                Some((prev, elapsed)),
+                teleport,
+                crate::frame::WORLD_FRAME
+            ),
             MoveVerdict::Red,
             "un joueur normal ne doit pas bénéficier du bypass"
         );
         assert_eq!(
-            resolve_move_verdict(Rank::Moderator, Some((prev, elapsed)), teleport),
+            resolve_move_verdict(
+                Rank::Moderator,
+                Some((prev, elapsed)),
+                teleport,
+                crate::frame::WORLD_FRAME
+            ),
             MoveVerdict::Red,
             "un modérateur ne doit pas bénéficier du bypass (réservé au GameMaster)"
         );
+    }
+
+    #[test]
+    fn resolve_move_verdict_takes_a_frame_parameter_without_changing_world_frame_behavior() {
+        use crate::frame::WORLD_FRAME;
+        use crate::handoff::Rank;
+        use std::time::Duration;
+
+        // Comportement inchangé pour WORLD_FRAME : un saut de 40m en 300ms reste Orange (déjà couvert
+        // par anticheat::classify_move, ce test vérifie juste que le nouveau paramètre ne régresse pas
+        // ce chemin existant).
+        let verdict = resolve_move_verdict(
+            Rank::Player,
+            Some(([0.0, 0.0, 0.0], Duration::from_millis(300))),
+            [40.0, 0.0, 0.0],
+            WORLD_FRAME,
+        );
+        assert_eq!(verdict, crate::anticheat::MoveVerdict::Orange);
+    }
+
+    #[test]
+    fn resolve_move_verdict_on_a_non_world_frame_still_validates_the_local_offset() {
+        use crate::handoff::Rank;
+        use std::time::Duration;
+
+        // Un passager dans un ascenseur (repère 7) dont l'OFFSET LOCAL saute de 40m en 300ms doit
+        // toujours être détecté comme suspect — le modèle de repère ne désactive PAS la validation,
+        // il la déplace sur le bon référentiel (ADR 0013 : "elle reste active à l'intérieur du
+        // repère").
+        let verdict = resolve_move_verdict(
+            Rank::Player,
+            Some(([0.0, 0.0, 0.0], Duration::from_millis(300))),
+            [40.0, 0.0, 0.0],
+            7,
+        );
+        assert_eq!(verdict, crate::anticheat::MoveVerdict::Orange);
     }
 
     #[test]
