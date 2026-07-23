@@ -73,6 +73,7 @@ fn main() {
                     token: None,
                     protocol_version: server::gateway_routing::CURRENT_PROTOCOL_VERSION,
                     hwid_hash: Some(hwid_hash),
+                    space_id: 0,
                 },
             );
             let env = ClientEnvelope::create(
@@ -101,15 +102,21 @@ fn main() {
             let yaw = (t * 60.0) % 360.0;
 
             let mut b = FlatBufferBuilder::new();
-            let pos = Vec3::new(x, cy, cz);
+            let pos = QVec3::new(
+                server::quant::q_pos(x),
+                server::quant::q_pos(cy),
+                server::quant::q_pos(cz),
+            );
             let pu = PositionUpdate::create(
                 &mut b,
                 &PositionUpdateArgs {
                     position: Some(&pos),
-                    yaw,
+                    yaw: server::quant::q_yaw(yaw),
                     locomotion: 0,
                     move_dir: 0,
                     flags: 0,
+                    frame: 0,
+                    slot: 0,
                 },
             );
             let env = ClientEnvelope::create(

@@ -1,52 +1,170 @@
+// ============================================================================
+// GEL DE PROTOCOLE — PALIER 2 (2026-07-23)
+// ============================================================================
+// Ce schéma est FIGÉ (design : docs/superpowers/specs/2026-07-18-gel-protocole-palier-2-design.md,
+// enrichi des specs 2026-07-21-vehicules-protocole-design.md et
+// 2026-07-23-synchronisation-etats-joueurs-vehicules-design.md §4).
+// Rituel non négociable à CHAQUE modification (incident 2026-07-16, CLAUDE.md) :
+//   1. flatc --rust -o tessera-core/server/src/generated tessera-core/protocol/schema/protocol.fbs
+//   2. flatc --cpp (version 25.12.19 EXACTEMENT, celle des crates Rust) → régénérer
+//      client/red4ext/src/generated/protocol_generated.h du fork The-Genium007/Cyberverse@port/2.31
+//   3. Figer dans gateway_routing.rs les octets produits par le VRAI encodeur C++ (tester le FIL,
+//      pas chaque côté : un test qui encode ET décode en Rust est vert même si le fil est cassé).
+//   4. Poser EXPLICITEMENT tout champ dont le défaut 0 est significatif à l'encodage
+//      (protocol_version, reason, throttle, driver, frame, drawn…) — un champ omis compile sans
+//      broncher et MENT sur le fil.
+// Discipline d'évolution : unions APPEND-ONLY (jamais réordonner l'existant), nouveaux champs de
+// table EN FIN de table (extensibilité avant, comme Join.hwid_hash l'a prouvé).
+// ============================================================================
+
 namespace cyberpunk_rp.protocol;
 
+// Position quantifiée : fixed-point WORLD-ABSOLU, mètres = Bits/131072 (2^17) — exactement la
+// représentation native du jeu (confirmée par le spike navmesh) et des données de nav extraites
+// (smartobjects) → mapping direct, zéro conversion. Grille ABSOLUE, pas relative-au-shard : une
+// position s'encode bit-à-bit identiquement quel que soit le shard → zéro décohérence au handoff /
+// à l'interpolation cross-shard. Le client déquantifie en float pour interpoler (précision
+// ~0,0076 mm, invisible). Nuance assumée (gel §2) : int32 absolu = même taille qu'un float, la
+// quantization SEULE ne gagne pas de bande passante — le gain viendra de la delta-compression
+// (framework conçu au gel §4, implémentation ultérieure, keyframe au handoff) ; on quantifie quand
+// même pour le socle (alignement jeu + données nav, delta-ready, cross-shard-safe).
+struct QVec3 { x:int; y:int; z:int; }
+
+// Vec3 float CONSERVÉ pour le seul filet véhicule joueur (VehiclePlayerState : position + vitesses,
+// quantization délibérément différée — spec 2026-07-21 §4.3 : « si ça serre, quantifier position
+// et vitesses avant de réduire la fréquence »). Toutes les positions-monde des canaux d'état
+// passent par QVec3.
 struct Vec3 { x:float; y:float; z:float; }
+
+// Quaternion d'orientation véhicule. Trois raisons (spec 2026-07-21 §3.2) : c'est ce que le moteur
+// stocke réellement (Entity_GetWorldOrientation) ; les angles d'Euler ont un blocage de cardan
+// qu'une voiture qui se retourne atteint pour de bon ; le système de renversement EXIGE de
+// représenter un véhicule sur le toit — inexprimable avec un seul yaw.
+struct Quat { x:float; y:float; z:float; w:float; }
+
+// yaw partout ailleurs : ushort (uint16), 0..65535 = 0..360° (~0,0055°/cran) — suffisant, économe.
 
 // `token` : JWT ZITADEL optionnel (chaîne vide par défaut FlatBuffers si absent) — ignoré
 // intégralement par un serveur privé (`identity.public = false`, défaut), exigé et vérifié via
 // `JwksCache::verify` par un serveur public (design 2026-07-09, launcher-server-auth).
 // `protocol_version` : version du protocole FlatBuffers parlée par le client (Task C3) — comparée
 // à `CURRENT_PROTOCOL_VERSION` côté serveur au Join ; un mismatch kick avec un message explicite
-// plutôt qu'un comportement indéfini (désérialisation qui dérive silencieusement au fil des
-// évolutions du schéma). 0 par défaut FlatBuffers si absent (client trop ancien pour connaître le
-// champ) — mismatch avec la version courante dès qu'elle dépasse 0.
+// plutôt qu'un comportement indéfini. 0 par défaut FlatBuffers si absent (client trop ancien pour
+// connaître le champ) — TOUJOURS le poser explicitement à l'encodage (kTesseraProtocolVersion côté
+// C++) : un appel qui l'omet compile sans broncher et ment sur le fil (piège payé, CLAUDE.md).
 // `hwid_hash` : identifiant matériel HACHÉ+salé côté launcher (jamais l'identifiant brut — voir
-// `ban_store.rs`), schéma de TRAVAIL (pas encore figé/régénéré côté fork C++, sous-projet C robustesse
-// opérationnelle palier 2). Chaîne vide par défaut FlatBuffers si absent (client qui ne le pose pas
-// encore) — vérifié contre le vecteur `hwid_hash` d'un `BanRecord` au Join, cf. `gateway.rs`.
-table Join { display_name:string; token:string; protocol_version:uint; hwid_hash:string; }
+// `ban_store.rs`). Chaîne vide par défaut si absent (client sans launcher) — vérifié contre le
+// vecteur `hwid_hash` d'un `BanRecord` au Join, cf. `gateway.rs`. Durcissement possible (gel §3) :
+// le porter en claim JWT signé (serveurs publics) plutôt qu'en champ client-settable.
+// `space_id` : instance d'espace (prévision instancing palier 3, gel disc.1). 0 = monde ouvert.
+// APPENDU EN FIN de table (et non avant hwid_hash comme l'esquissait le gel §3) : Join est le SEUL
+// message qu'un client en retard doit encore pouvoir faire lire au serveur — c'est lui qui porte le
+// protocol_version du kick explicite. L'append-only y est donc vital, pas optionnel.
+table Join { display_name:string; token:string; protocol_version:uint; hwid_hash:string; space_id:uint; }
 
 // locomotion : enum EXTENSIBLE en ubyte (append-only) — 0=Idle 1=Walk 2=Run 3=Sprint
 //              4=CrouchIdle 5=CrouchMove 6=InAir/Jump (documenté, jamais re-gelé).
 // move_dir   : direction du déplacement RELATIVE au regard, quantifiée sur 1 octet (256
 //              directions) → l'AnimGraph choisit strafe / marche arrière ; 0 si immobile.
 // flags      : bitfield ubyte réservé (visée haut-du-corps, futur — non implémenté ici).
-table PositionUpdate { position:Vec3; yaw:float; locomotion:ubyte; move_dir:ubyte; flags:ubyte; }
+// frame/slot : modèle de repère ADR 0013 — LA primitive partagée cabine/siège/benne (spec
+//              2026-07-21 §4.2 : ne jamais la dupliquer par un vehicle_id concurrent).
+//              frame : 0 = monde (position = position monde). Sinon EntityID u64 du repère
+//              (cabine ADR 0012, ou véhicule) — format de clé TRANCHÉ (ADR 0013), ne pas changer.
+//              slot : CName-hash du siège quand frame est un véhicule (0 sinon). Quand frame ≠ 0,
+//              `position` devient l'OFFSET LOCAL dans le repère — c'est LUI que l'anti-triche
+//              valide (petit, lent), jamais la vitesse monde → plus de faux positif passager SANS
+//              désactiver la validation.
+table PositionUpdate { position:QVec3; yaw:ushort; locomotion:ubyte; move_dir:ubyte; flags:ubyte;
+                       frame:ulong; slot:ulong; }
 
 // sustained : pose/émote TENUE en cours (id d'émote natif), 0 = aucune. N'existe que côté
 // PlayerState (le début/fin d'une pose tenue passe par EmoteReport, pas PositionUpdate).
-table PlayerState { id:ulong; position:Vec3; yaw:float; locomotion:ubyte; move_dir:ubyte; flags:ubyte; sustained:uint; }
+// space_id : instance d'espace (prévision palier 3), 0 = monde ouvert.
+// frame/slot : même sémantique que PositionUpdate (ADR 0013) — remplace le forecast
+// `mounted_on`/`seat` du gel §3 (2026-07-18), supplanté par la primitive de repère unique.
+table PlayerState { id:ulong; position:QVec3; yaw:ushort; locomotion:ubyte; move_dir:ubyte;
+                    flags:ubyte; sustained:uint; space_id:uint; frame:ulong; slot:ulong; }
 
 // PNJ orchestré serveur (fondation nav-indépendante, palier 2). Réutilise le triplet biped d'A
 // (locomotion/move_dir/flags/sustained) — même canal cosmétique que PlayerState, id dans une plage
 // réservée disjointe des connexions réelles (jamais un id de session). `behavior` : voir
-// EntityBehavior (npc.rs) — encodage 0=Calme 1=Flane 2=Alerte 3=Fuite 4=Hostile 5=ATerre, la cible
-// éventuelle (menace/cible) N'EST PAS transportée ici (c'est un détail serveur, le client n'a besoin
-// que de savoir QUOI animer, pas POURQUOI) — cf. principe canal cosmétique/état canonique séparé.
-table NpcState { id:ulong; archetype:uint; position:Vec3; yaw:float;
-                 locomotion:ubyte; move_dir:ubyte; flags:ubyte; sustained:uint; behavior:ubyte; }
+// EntityBehavior (npc.rs) — encodage 0=Calme 1=Flane 2=Alerte 3=Fuite 4=Hostile 5=ATerre.
+// `target` (gel §3, hostiles disc.8) : cible du FSM (id d'entité — joueur OU PNJ, même espace
+// d'ids), 0 = aucune. L'exécuteur oriente l'attaque du pantin chez les spectateurs, et le
+// client-CIBLE sait activer son mode « ped combattant local » (combat natif chez la victime,
+// théâtre chez les autres, jamais de dégât sur le fil). Défaut 0, invisible pour foule/vendeurs.
+table NpcState { id:ulong; archetype:uint; position:QVec3; yaw:ushort;
+                 locomotion:ubyte; move_dir:ubyte; flags:ubyte; sustained:uint; behavior:ubyte;
+                 space_id:uint; target:ulong; }
 
-// Véhicule autonome orchestré serveur (spec véhicules autonomes §1/§3). PAS le triplet biped d'A
-// (locomotion/move_dir/flags/sustained, pensé pour un PNJ/joueur humain) — un véhicule a une
-// `speed` scalaire (magnitude, direction = `yaw`) permettant l'interpolation client sans
-// dégradation à la perte de paquet (spec §3). Table séparée de `NpcState`, pas une extension :
-// sémantiquement différente (pas de locomotion piétonne), cohérent avec le principe canal
-// cosmétique/état canonique déjà établi (fondation PNJ). `speed:ushort` = quantifiée (spec §3),
-// pas `float` — cohérent avec l'esprit de quantization déjà prévu pour le gel consolidé (`QVec3`).
-table VehicleState { id:ulong; archetype:uint; position:Vec3; yaw:float; speed:ushort;
-                     passenger:ulong; }
+// Véhicule AUTONOME orchestré serveur (trafic — spec véhicules autonomes §1/§3). PAS le triplet
+// biped d'A : un véhicule a une `speed` scalaire (magnitude quantifiée ushort, direction = `yaw`)
+// permettant l'interpolation client sans dégradation à la perte de paquet. Table distincte de
+// VehiclePlayerState (véhicule PILOTÉ, filet de correction du modèle de conduite local) —
+// sémantiques différentes, ne pas fusionner (spec 2026-07-23 §4.2).
+table VehicleState { id:ulong; archetype:uint; position:QVec3; yaw:ushort; speed:ushort;
+                     passenger:ulong; space_id:uint; }
 
-table Snapshot { tick:ulong; players:[PlayerState]; npcs:[NpcState]; vehicles:[VehicleState]; }
+// --- Véhicule PILOTÉ joueur — niveau 2, réplication d'inputs (ADR 0011, spec 2026-07-21 §3) ---
+
+// Commandes de conduite du joueur qui conduit RÉELLEMENT (client conducteur → serveur, canal
+// NON-FIABLE — spec §4.1 : un paquet d'état périmé se jette, ne s'attend pas). C'est la primitive
+// du niveau 2 : le même modèle de conduite tourne sur chaque client, alimenté par les mêmes
+// entrées, et produit roues/son/suspension/collisions localement — aucune de ces sorties ne
+// transite. Quantification : throttle/brake [0,1] → ubyte (0..255) ; steer [-1,1] → byte signé.
+// `tick` est OBLIGATOIRE et c'est le champ le plus important : sans lui le serveur ne peut ni
+// ordonner, ni détecter un trou, ni dater une correction (le fork Cyberverse porte exactement ce
+// manque en TODO). `buttons` : bitfield extensible — bit0 frein à main, bit1 klaxon, bit2 phares,
+// bit3 sirène ; en ajouter un ne re-gèle pas le schéma.
+table VehicleInput { vehicle:ulong; tick:ulong; throttle:ubyte; brake:ubyte;
+                     steer:byte; gear:byte; buttons:ubyte; }
+
+// État autoritaire d'un véhicule piloté (serveur → clients, dans le Snapshot, non-fiable). Sert à
+// CORRIGER la dérive du modèle local, pas à déplacer le véhicule (le déplacer par cet état, c'est
+// le fantôme qui glisse — observé en jeu). `orientation` : quaternion, voir struct Quat.
+// `linear_velocity`/`angular_velocity` : le récepteur EXTRAPOLE (continue le mouvement pendant les
+// ~50 ms entre snapshots) au lieu d'interpoler en rattrapant un retard. `driver` = id du joueur qui
+// conduit, 0 si personne — le conducteur ignore l'état (il fait autorité localement) et n'applique
+// que les corrections franches. `seat_occupancy` : bitfield, 1 bit par siège dans l'ordre du record
+// TweakDB — topologie JAMAIS codée en dur (ADR 0011), résolue via VehicleComponent.GetSeats ;
+// redondant avec les événements de montage et c'est VOULU (auto-cicatrisant, comme sustained).
+// `record` : hash du record TweakDB du véhicule, pour savoir QUOI faire apparaître — 0 sur un
+// véhicule déjà connu du client. Position/vitesses en float : quantization différée (spec §4.3).
+// Le déterminisme du modèle de conduite est PLAUSIBLE mais non prouvé (RE 2026-07-23 : fixed-step
+// + data-driven OK, mais PID à état caché + float cross-hardware) → cette table est le filet dont
+// la fréquence sera dimensionnée par la mesure inter-machine (sonde 9).
+table VehiclePlayerState { id:ulong; record:ulong; position:Vec3; orientation:Quat;
+                           linear_velocity:Vec3; angular_velocity:Vec3;
+                           driver:ulong; seat_occupancy:ubyte; flags:ubyte; }
+
+// --- Apparence & équipement (spec 2026-07-23 §4.1) ---
+
+// Objet équipé visible sur l'avatar. `item` = TweakDBID 64 bits (le param:uint de
+// PlayerActionReport est trop court — même raison que le mount, passé par EntityInteraction).
+// `slot` = hash du slot d'attache (WeaponRight, Chest, …). `drawn` : en main (true) vs holstré.
+table EquippedItem { item:ulong; slot:ulong; drawn:bool; }
+
+// Identité visuelle d'un personnage, résolue par le client en record + apparence + tenue.
+// `base_record` : hash TweakDBID du record de base à spawner (remplace le Character.Panam en dur).
+// `appearance` : hash CName de la variante .app (ScheduleAppearanceChange). `garments` : items
+// visuels par slot (résolus via GetPlacementSlot côté client). Le blob de customisation faciale
+// complet N'EST PAS ici — non applicable en script (mur dur, spec 2026-07-23 §2.4), backlog natif
+// C6 (CharacterCustomizationComponent via RED4ext).
+table AppearanceSpec { base_record:ulong; appearance:ulong; garments:[EquippedItem]; }
+
+// Serveur → clients AoI : « l'avatar #id a cette apparence ». Poussé à l'entrée en portée et à
+// chaque changement (dégainage, changement de tenue). LOURD ET RARE → séparé du Snapshot (jamais
+// diffusé à 20 Hz), auto-cicatrisant pour un arrivant tardif dans l'AoI.
+table AppearanceSync { id:ulong; spec:AppearanceSpec; }
+
+// Client → serveur : rapporte un changement d'équipement/tenue local (capture OnItemEquipped déjà
+// existante côté client-mod). Le serveur le relaie en AppearanceSync filtré AoI.
+table EquipmentReport { item:ulong; slot:ulong; drawn:bool; equipped:bool; }
+
+// Snapshot : `vehicles_player` appendu EN FIN de table (extensibilité avant).
+table Snapshot { tick:ulong; players:[PlayerState]; npcs:[NpcState]; vehicles:[VehicleState];
+                 vehicles_player:[VehiclePlayerState]; }
 
 // Client -> serveur, one-shot (saut, tir, reload, dodge, et émote one-shot type coucou).
 // action = enum extensible ; param = contexte (arme, id émote one-shot...).
@@ -56,18 +174,20 @@ table PlayerActionReport { action:ubyte; param:uint; }
 table EmoteReport { emote:uint; start:bool; }
 
 // Rapport d'interaction client -> serveur : « le joueur a fait X sur l'entité #N » (spec modèle
-// serveur §1). kind : 0=Menace/attaque 1=Parle 2=Interagit 3=Mount(véhicule) 4=Unmount(véhicule)
-//              5=Attaque 6=MountElevator 7=UnmountElevator (extensible) ; pour kind=6/7, `target`
-//              est un `elevator_id` (EntityID arbitraire, ADR 0012 §2.5), JAMAIS un id de la plage
-//              véhicule — le kind seul distingue les deux domaines, `elevator_id` n'a pas de plage
-//              réservée et peut numériquement chevaucher n'importe quel ClientId (ADR 0013) ;
+// serveur §1). kind : plage 0-63 = CORE, 64+ = opérateur/mods (append-only — un mod déclare un
+// verbe sans toucher au fil, gel §3). CORE gelés : 0=Menace/attaque 1=Parle 2=Interagit
+// 3=Mount(véhicule) 4=Unmount(véhicule) 5=Attaque 6=MountElevator 7=UnmountElevator ; pour
+// kind=6/7, `target` est un `elevator_id` (EntityID arbitraire, ADR 0012 §2.5), JAMAIS un id de la
+// plage véhicule — le kind seul distingue les deux domaines, `elevator_id` n'a pas de plage
+// réservée et peut numériquement chevaucher n'importe quel ClientId (ADR 0013).
+// AGNOSTIQUE CIBLE : target = n'importe quelle entité (PNJ OU joueur — même espace d'ids) →
+// joueur↔joueur = joueur↔PNJ, même plomberie (gel disc.7).
 // param = contexte (dégâts, id dialogue…), sauf pour Mount/Unmount où param = index de siège désiré
-// (0 = conducteur/premier siège) — spec véhicules autonomes §3 : PlayerActionReport.param (32b) est
-// trop court pour un id d'entité 64b, le mount passe donc par EntityInteraction, dont `target:ulong`
-// porte déjà l'id du véhicule visé ; `param:uint` porte le siège, pas un id. Arbitré par le serveur
-// (NpcRecord::apply_interaction, npc.rs) — anti-triche gratuit : un client ne peut jamais forcer
-// directement l'état comportemental d'un PNJ, seulement RAPPORTER une interaction que le serveur
-// choisit ou non de traduire en transition FSM.
+// (0 = conducteur/premier siège) — PlayerActionReport.param (32b) est trop court pour un id
+// d'entité 64b, le mount passe donc par EntityInteraction, dont `target:ulong` porte l'id visé.
+// Arbitré par le serveur (NpcRecord::apply_interaction, npc.rs) — anti-triche gratuit : un client
+// ne peut jamais forcer l'état d'un PNJ, seulement RAPPORTER une interaction que le serveur choisit
+// ou non de traduire en transition FSM.
 table EntityInteraction { target:ulong; kind:ubyte; param:uint; }
 
 // Enveloppe de session d'interaction (fondation d'interaction, palier 2, Phase 3.1). session_id
@@ -79,8 +199,10 @@ table EntityInteraction { target:ulong; kind:ubyte; param:uint; }
 // dialogue/contrat...), catalogue non figé ici (contenu différé, spec §9).
 table InteractionOpen { session_id:ulong; target:ulong; ui_kind:ubyte; payload:[ubyte]; }
 // Client -> serveur : réponse à une InteractionOpen. `choice`/`param` opaques, interprétés par le
-// contenu réel (différé) ; ce plan ne transporte que la plomberie.
-table InteractionChoice { session_id:ulong; choice:ubyte; param:uint; }
+// contenu réel (différé). `choice` élargi ubyte→uint AU GEL (2026-07-23, cible gel §3) : opaque et
+// tourné vers un contenu inconnu, 256 choix par écran était une borne arbitraire — dernier moment
+// où l'élargissement était gratuit.
+table InteractionChoice { session_id:ulong; choice:uint; param:uint; }
 // Verdict serveur (spec §2 : succès, OU refus avec raison IN-FICTION portée dans `payload`, jamais
 // un code d'erreur générique). `ok=false` avec payload vide = refus sans détail transporté (ex.
 // session inconnue/expirée) ; `ok=false` avec payload = raison encodée par le contenu réel (différé).
@@ -146,7 +268,7 @@ table Leave {}
 // reason : 0=Spawn, 1=AntiCheat, 2=Resync. Défaut FlatBuffers 0 (=Spawn) → TOUJOURS le poser
 // explicitement à l'encodage (même piège que protocol_version du Join). `PositionCorrection` reste
 // en FIN d'union ServerMsg — ne jamais réordonner les membres d'un union déjà publié.
-table PositionCorrection { position:Vec3; yaw:float; reason:ubyte; }
+table PositionCorrection { position:QVec3; yaw:ushort; reason:ubyte; }
 
 // Placement autoritaire du client tel que décidé par le serveur (topology.locate). Poussé à
 // chaque changement de placement (même déclencheur que le journal de session, diff_placement) —
@@ -169,8 +291,9 @@ table ElevatorStateMsg { elevator_id:ulong; active_floor:int; target_floor:int;
                          movement_state:ubyte; requested_floors:[int];
                          depart_tick:ulong; start_delay_ms:uint; travel_time_ms:uint; }
 
-union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter, EntityInteraction, InteractionChoice, ElevatorCall }
-union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult, QueueStatus, InteractionOpen, InteractionResult, ElevatorStateMsg }
+// --- unions : NOUVEAUX membres APPENDÉS EN FIN (jamais réordonner l'existant) ---
+union ClientMsg { Join, PositionUpdate, ClientTimeReport, AdminCommand, Leave, PlayerActionReport, EmoteReport, CreateCharacter, SelectCharacter, DeleteCharacter, EntityInteraction, InteractionChoice, ElevatorCall, VehicleInput, EquipmentReport }
+union ServerMsg { Snapshot, Kicked, WorldState, CommandResult, PermissionSync, PositionCorrection, ShardAssignment, PlayerEvent, CharacterList, CharacterResult, QueueStatus, InteractionOpen, InteractionResult, ElevatorStateMsg, AppearanceSync }
 
 table ClientEnvelope { msg:ClientMsg; }
 table ServerEnvelope { msg:ServerMsg; }

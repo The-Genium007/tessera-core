@@ -182,15 +182,21 @@ mod tests {
     /// Encode un `PositionUpdate` dans un `ClientEnvelope` FlatBuffers.
     fn encode_position(x: f32, y: f32, z: f32, yaw: f32) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
-        let pos = Vec3::new(x, y, z);
+        let pos = QVec3::new(
+            crate::quant::q_pos(x),
+            crate::quant::q_pos(y),
+            crate::quant::q_pos(z),
+        );
         let pu = PositionUpdate::create(
             &mut b,
             &PositionUpdateArgs {
                 position: Some(&pos),
-                yaw,
+                yaw: crate::quant::q_yaw(yaw),
                 locomotion: 0,
                 move_dir: 0,
                 flags: 0,
+                frame: 0,
+                slot: 0,
             },
         );
         let env = ClientEnvelope::create(

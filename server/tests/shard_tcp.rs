@@ -11,15 +11,17 @@ fn client_position(x: f32) -> Vec<u8> {
     use flatbuffers::FlatBufferBuilder;
     use protocol::*;
     let mut b = FlatBufferBuilder::new();
-    let pos = Vec3::new(x, 0.0, 0.0);
+    let pos = QVec3::new(server::quant::q_pos(x), 0, 0);
     let pu = PositionUpdate::create(
         &mut b,
         &PositionUpdateArgs {
             position: Some(&pos),
-            yaw: 0.0,
+            yaw: 0,
             locomotion: 0,
             move_dir: 0,
             flags: 0,
+            frame: 0,
+            slot: 0,
         },
     );
     let env = ClientEnvelope::create(
@@ -87,7 +89,7 @@ async fn shard_relays_snapshots_over_tcp() {
             if let Some(players) = snap.players() {
                 if players.len() == 1
                     && players.get(0).id() == 1
-                    && players.get(0).position().unwrap().x() == 5.0
+                    && server::quant::dq_pos(players.get(0).position().unwrap().x()) == 5.0
                 {
                     return; // succès
                 }

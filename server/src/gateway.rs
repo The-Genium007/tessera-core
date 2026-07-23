@@ -7,8 +7,8 @@ use crate::internal_net::{decode_server_send, event_to_client_event_frame};
 use crate::transport::{Transport, TransportEvent};
 use protocol::{
     CommandResult, CommandResultArgs, Kicked, KickedArgs, PermissionSync, PermissionSyncArgs,
-    PositionCorrection, PositionCorrectionArgs, ServerEnvelope, ServerEnvelopeArgs, ServerMsg,
-    ShardAssignment, ShardAssignmentArgs, Vec3, WorldState, WorldStateArgs,
+    PositionCorrection, PositionCorrectionArgs, QVec3, ServerEnvelope, ServerEnvelopeArgs,
+    ServerMsg, ShardAssignment, ShardAssignmentArgs, WorldState, WorldStateArgs,
 };
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -293,12 +293,16 @@ pub fn encode_permission_sync(nodes: &[String]) -> Vec<u8> {
 /// `position`/`yaw` à la réception (téléportation), quel que soit `reason`.
 pub fn encode_position_correction(pos: [f32; 3], yaw: f32, reason: u8) -> Vec<u8> {
     let mut b = flatbuffers::FlatBufferBuilder::new();
-    let v = Vec3::new(pos[0], pos[1], pos[2]);
+    let v = QVec3::new(
+        crate::quant::q_pos(pos[0]),
+        crate::quant::q_pos(pos[1]),
+        crate::quant::q_pos(pos[2]),
+    );
     let pc = PositionCorrection::create(
         &mut b,
         &PositionCorrectionArgs {
             position: Some(&v),
-            yaw,
+            yaw: crate::quant::q_yaw(yaw),
             reason,
         },
     );
@@ -2029,10 +2033,12 @@ mod tests {
         let env = flatbuffers::root::<protocol::ServerEnvelope>(&bytes).unwrap();
         assert_eq!(env.msg_type(), ServerMsg::PositionCorrection);
         let pc = env.msg_as_position_correction().unwrap();
-        assert_eq!(pc.position().unwrap().x(), 1.0);
-        assert_eq!(pc.position().unwrap().y(), 2.0);
-        assert_eq!(pc.position().unwrap().z(), 3.0);
-        assert_eq!(pc.yaw(), 90.0);
+        // Fil quantifié (gel palier 2) : les mètres/degrés entiers sont représentables exactement
+        // (quant.rs), la déquantization redonne les valeurs d'entrée bit-à-bit.
+        assert_eq!(crate::quant::dq_pos(pc.position().unwrap().x()), 1.0);
+        assert_eq!(crate::quant::dq_pos(pc.position().unwrap().y()), 2.0);
+        assert_eq!(crate::quant::dq_pos(pc.position().unwrap().z()), 3.0);
+        assert_eq!(crate::quant::dq_yaw(pc.yaw()), 90.0);
         assert_eq!(pc.reason(), 1);
     }
 
@@ -2312,8 +2318,9 @@ mod tests {
             &protocol::JoinArgs {
                 display_name: Some(name),
                 token: None,
-                protocol_version: 1,
+                protocol_version: crate::gateway_routing::CURRENT_PROTOCOL_VERSION,
                 hwid_hash: Some(hwid_hash),
+                space_id: 0,
             },
         );
         let env = protocol::ClientEnvelope::create(

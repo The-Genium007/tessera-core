@@ -1,8 +1,9 @@
 //! Logique de routage du Gateway (M3) : extraire la position du protocole client + assigner les
 //! clients aux shards selon leur 1re position. Pur, testable sans GNS/TCP.
 
+use crate::quant::{dq_pos, dq_yaw, q_pos};
 use protocol::{
-    ClientEnvelope, ClientEnvelopeArgs, ClientMsg, PositionUpdate, PositionUpdateArgs, Vec3,
+    ClientEnvelope, ClientEnvelopeArgs, ClientMsg, PositionUpdate, PositionUpdateArgs, QVec3,
 };
 
 /// Version courante du protocole FlatBuffers parlée par CE serveur (Task C3). Comparée au champ
@@ -11,7 +12,10 @@ use protocol::{
 /// silencieusement au fil des évolutions du schéma. À incrémenter à chaque changement de schéma
 /// qui casse la compatibilité binaire (champ retiré/retypé, union réordonnée) — PAS à chaque ajout
 /// additif rétrocompatible (un nouveau champ optionnel en fin de table, par exemple).
-pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+/// v2 : gel palier 2 (2026-07-23) — positions `Vec3`→`QVec3` fixed-point, yaw `float`→`ushort`,
+/// `InteractionChoice.choice` `ubyte`→`uint` (retypages = cassure binaire assumée, un client v1
+/// est kické au Join avec le message explicite plutôt que de lire des positions absurdes).
+pub const CURRENT_PROTOCOL_VERSION: u32 = 2;
 
 /// Décode un `ClientEnvelope` client ; si c'est un `ClientTimeReport`, renvoie (heure, minute,
 /// seconde) tels qu'observés localement par le client — diagnostic de dérive d'horloge (playtest).
@@ -24,7 +28,9 @@ pub fn extract_time_report(client_payload: &[u8]) -> Option<(u8, u8, u8)> {
     Some((report.hour(), report.minute(), report.second()))
 }
 
-/// Décode un `ClientEnvelope` client ; si c'est un `PositionUpdate`, renvoie sa position.
+/// Décode un `ClientEnvelope` client ; si c'est un `PositionUpdate`, renvoie sa position en
+/// mètres f32 (déquantifiée du `QVec3` fixed-point du fil — le cœur serveur reste en f32, la
+/// conversion vit au bord, cf. `quant.rs`).
 pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
     if env.msg_type() != ClientMsg::PositionUpdate {
@@ -32,19 +38,20 @@ pub fn extract_position(client_payload: &[u8]) -> Option<(f32, f32, f32)> {
     }
     let pu = env.msg_as_position_update()?;
     let p = pu.position()?;
-    Some((p.x(), p.y(), p.z()))
+    Some((dq_pos(p.x()), dq_pos(p.y()), dq_pos(p.z())))
 }
 
-/// Comme `extract_position` mais renvoie le `yaw` du `PositionUpdate` — nécessaire pour renvoyer
-/// une `PositionCorrection` (rubber-band zone rouge) fidèle à l'orientation du joueur. `None` si
-/// l'enveloppe n'est pas un `PositionUpdate` décodable.
+/// Comme `extract_position` mais renvoie le `yaw` du `PositionUpdate` en degrés f32 (déquantifié
+/// du `ushort` du fil) — nécessaire pour renvoyer une `PositionCorrection` (rubber-band zone
+/// rouge) fidèle à l'orientation du joueur. `None` si l'enveloppe n'est pas un `PositionUpdate`
+/// décodable.
 pub fn extract_position_yaw(client_payload: &[u8]) -> Option<f32> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
     if env.msg_type() != ClientMsg::PositionUpdate {
         return None;
     }
     let pu = env.msg_as_position_update()?;
-    Some(pu.yaw())
+    Some(dq_yaw(pu.yaw()))
 }
 
 /// Construit le payload client d'un `PositionUpdate` — utilisé pour re-semer, sur un shard qui
@@ -53,15 +60,19 @@ pub fn extract_position_yaw(client_payload: &[u8]) -> Option<f32> {
 /// orientation temporairement fausse s'auto-corrige au prochain vrai `PositionUpdate` du client.
 pub fn encode_position_update(pos: [f32; 3]) -> Vec<u8> {
     let mut b = flatbuffers::FlatBufferBuilder::new();
-    let p = Vec3::new(pos[0], pos[1], pos[2]);
+    let p = QVec3::new(q_pos(pos[0]), q_pos(pos[1]), q_pos(pos[2]));
     let pu = PositionUpdate::create(
         &mut b,
         &PositionUpdateArgs {
             position: Some(&p),
-            yaw: 0.0,
+            yaw: 0,
             locomotion: 0,
             move_dir: 0,
             flags: 0,
+            // Repère monde (ADR 0013) : cette position re-semée vient de `last_pos` du Gateway,
+            // toujours une position monde — frame/slot posés explicitement à 0 (= monde).
+            frame: 0,
+            slot: 0,
         },
     );
     let env = ClientEnvelope::create(
@@ -162,8 +173,10 @@ pub fn extract_entity_interaction(client_payload: &[u8]) -> Option<(u64, u8, u32
 
 /// Décode un `ClientEnvelope` ; si c'est un `InteractionChoice` (fondation d'interaction, palier 2),
 /// renvoie `(session_id, choice, param)`. Pur décodage — l'arbitrage (session valide ? bon
-/// propriétaire ?) vit dans `interaction_session.rs`, pas ici.
-pub fn extract_interaction_choice(client_payload: &[u8]) -> Option<(u64, u8, u32)> {
+/// propriétaire ?) vit dans `interaction_session.rs`, pas ici. `choice` élargi `u8`→`u32` au gel
+/// (2026-07-23) : opaque et tourné vers un contenu inconnu, 256 choix par écran était une borne
+/// arbitraire.
+pub fn extract_interaction_choice(client_payload: &[u8]) -> Option<(u64, u32, u32)> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
     if env.msg_type() != ClientMsg::InteractionChoice {
         return None;
@@ -441,15 +454,17 @@ mod tests {
 
     fn client_position(x: f32, y: f32, z: f32) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
-        let pos = Vec3::new(x, y, z);
+        let pos = QVec3::new(q_pos(x), q_pos(y), q_pos(z));
         let pu = PositionUpdate::create(
             &mut b,
             &PositionUpdateArgs {
                 position: Some(&pos),
-                yaw: 0.0,
+                yaw: 0,
                 locomotion: 0,
                 move_dir: 0,
                 flags: 0,
+                frame: 0,
+                slot: 0,
             },
         );
         let env = ClientEnvelope::create(
@@ -483,6 +498,7 @@ mod tests {
                 token,
                 protocol_version,
                 hwid_hash: Some(hwid_hash),
+                space_id: 0, // monde ouvert (l'instancing est un chantier palier 3)
             },
         );
         let env = ClientEnvelope::create(
@@ -544,15 +560,19 @@ mod tests {
     #[test]
     fn extract_position_yaw_reads_yaw_and_ignores_join() {
         let mut b = FlatBufferBuilder::new();
-        let pos = Vec3::new(1.0, 2.0, 3.0);
+        let pos = QVec3::new(q_pos(1.0), q_pos(2.0), q_pos(3.0));
         let pu = PositionUpdate::create(
             &mut b,
             &PositionUpdateArgs {
+                // 90° = 16384 crans exactement (65536/4) — le round-trip est sans perte sur les
+                // quarts de tour, cf. quant.rs.
                 position: Some(&pos),
-                yaw: 1.25,
+                yaw: crate::quant::q_yaw(90.0),
                 locomotion: 0,
                 move_dir: 0,
                 flags: 0,
+                frame: 0,
+                slot: 0,
             },
         );
         let env = ClientEnvelope::create(
@@ -565,7 +585,7 @@ mod tests {
         b.finish(env, None);
         let payload = b.finished_data().to_vec();
 
-        assert_eq!(extract_position_yaw(&payload), Some(1.25));
+        assert_eq!(extract_position_yaw(&payload), Some(90.0));
         assert_eq!(extract_position_yaw(&client_join()), None);
         assert_eq!(extract_position_yaw(&[0, 1, 2]), None); // garbage → None
     }
@@ -615,6 +635,7 @@ mod tests {
                 token: Some(token),
                 protocol_version: 1,
                 hwid_hash: Some(hwid),
+                space_id: 0,
             },
         );
         let env = ClientEnvelope::create(
@@ -666,16 +687,19 @@ mod tests {
     }
 
     #[test]
-    fn the_cpp_client_join_is_accepted_by_the_version_check() {
-        // Le test qui aurait attrapé le kick du 2026-07-15 avant qu'il n'atteigne un joueur :
-        // ce sont les octets réels du client, passés à la fonction réelle qui kicke.
+    fn a_v1_cpp_client_join_still_decodes_but_is_rejected_by_the_version_check() {
+        // Gel palier 2 (v2) : `Join` est resté APPEND-ONLY précisément pour ça — les octets v1 du
+        // vrai client C++ doivent encore SE DÉCODER (sinon le serveur ne peut pas lire leur
+        // protocol_version et kicker avec un message explicite), mais la vérification de version
+        // doit désormais les REFUSER (les positions v1 sont des Vec3 float, illisibles en v2).
+        // Les octets v2 du vrai encodeur C++ seront figés en 1.4 (test frère de celui-ci).
         let (_, _, version, _) = extract_join_fields(CPP_CLIENT_JOIN_V1).unwrap();
-        assert_eq!(
-            version, CURRENT_PROTOCOL_VERSION,
-            "le client C++ publié doit parler la version courante — sinon le Gateway le kicke \
-             (« kick : version protocole incompatible ») et le jeu est injouable"
+        assert_eq!(version, 1);
+        assert_ne!(version, CURRENT_PROTOCOL_VERSION);
+        assert!(
+            crate::gateway::resolve_protocol_version(version).is_err(),
+            "un client v1 doit être kické au Join (message explicite), jamais laissé parler"
         );
-        assert!(crate::gateway::resolve_protocol_version(version).is_ok());
     }
 
     // ── Fil figé ShardAssignment / PositionCorrection (server → client) ──────────────────────
@@ -706,12 +730,15 @@ mod tests {
         0x31, 0x00,
     ];
 
-    // PositionCorrection{ position=(100.5, -20.25, 3.0), yaw=90.0, reason=0 }.
+    // PositionCorrection{ position=(100.5, -20.25, 3.0) m, yaw=90.0°, reason=0 } — layout v2
+    // (gel palier 2) : QVec3 fixed-point (100.5 m = 0x00C90000, -20.25 = 0xFFD78000,
+    // 3.0 = 0x00060000, little-endian) + yaw ushort (90° = 0x4000 = 16384 crans). Régénéré le
+    // 2026-07-23 depuis l'encodeur Rust après migration (vérifié à la main octet par octet).
     const POSITION_CORRECTION_SPAWN: &[u8] = &[
         0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x06, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x14, 0x00, 0x04, 0x00,
-        0x10, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc9, 0x42, 0x00, 0x00, 0xa2, 0xc1, 0x00,
-        0x00, 0x40, 0x40, 0x00, 0x00, 0xb4, 0x42,
+        0x00, 0x00, 0x00, 0x00, 0x06, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x14, 0x00, 0x08, 0x00,
+        0x06, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0xc9, 0x00, 0x00,
+        0x80, 0xd7, 0xff, 0x00, 0x00, 0x06, 0x00,
     ];
 
     #[test]
@@ -746,8 +773,13 @@ mod tests {
         assert_eq!(env.msg_type(), protocol::ServerMsg::PositionCorrection);
         let pc = env.msg_as_position_correction().unwrap();
         let pos = pc.position().unwrap();
-        assert_eq!((pos.x(), pos.y(), pos.z()), (100.5, -20.25, 3.0));
-        assert_eq!(pc.yaw(), 90.0);
+        // 100.5/-20.25/3.0 m et 90° sont représentables exactement sur la grille (quant.rs) —
+        // la déquantization redonne les valeurs bit-à-bit.
+        assert_eq!(
+            (dq_pos(pos.x()), dq_pos(pos.y()), dq_pos(pos.z())),
+            (100.5, -20.25, 3.0)
+        );
+        assert_eq!(dq_yaw(pc.yaw()), 90.0);
         assert_eq!(pc.reason(), 0);
     }
 

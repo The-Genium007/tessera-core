@@ -64,6 +64,7 @@ fn main() {
                     token: None,
                     protocol_version: server::gateway_routing::CURRENT_PROTOCOL_VERSION,
                     hwid_hash: Some(hwid_hash),
+                    space_id: 0,
                 },
             );
             let env = ClientEnvelope::create(

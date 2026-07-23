@@ -1,19 +1,31 @@
 //! Fusion de snapshots (M4) : un joueur en zone tampon reçoit un snapshot de chaque shard chargé.
 //! Le Gateway les fusionne en un seul (union des joueurs par id) avant de l'envoyer au client —
 //! le format reste l'`ServerEnvelope/Snapshot` que le client comprend déjà.
+//!
+//! Gel palier 2 : les positions transitent en `QVec3` fixed-point (i32) — la fusion les recopie
+//! TELLES QUELLES, sans jamais déquantifier (zéro perte, zéro conversion : la grille est
+//! world-absolue, un même point s'encode bit-à-bit identiquement sur chaque shard — c'est
+//! précisément la propriété cross-shard pour laquelle la quantization absolue a été choisie).
 
 use flatbuffers::FlatBufferBuilder;
 use protocol::*;
 use std::collections::BTreeMap;
 
+/// Champs d'un `PlayerState` (protocol.fbs) hors id, agrégés par id durant la fusion. Position en
+/// fixed-point i32 (jamais déquantifiée ici) + yaw u16 + repère ADR 0013 (`frame`/`slot`) — un
+/// passager en repère mobile re-encodé `frame=0` verrait son offset local lu comme une position
+/// monde par le client : le repère DOIT survivre à la fusion. Les champs cosmétiques
+/// (locomotion/sustained) restent hors fusion (comportement historique de ce module, zone tampon).
+type PlayerAgg = (i32, i32, i32, u16, u64, u64);
+
 /// Champs d'un `VehicleState` (protocol.fbs) hors id, agrégés par id durant la fusion — miroir du
 /// tuple position+yaw utilisé pour les joueurs, mais avec les champs propres au véhicule.
-type VehicleAgg = (u32, f32, f32, f32, f32, u16, u64);
+type VehicleAgg = (u32, i32, i32, i32, u16, u16, u64);
 
 /// Unionne plusieurs snapshots serveur en un seul (dédup par id de joueur, `tick` = max).
 /// `None` si aucun snapshot valide n'a pu être décodé.
 pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
-    let mut by_id: BTreeMap<u64, (f32, f32, f32, f32)> = BTreeMap::new();
+    let mut by_id: BTreeMap<u64, PlayerAgg> = BTreeMap::new();
     let mut vehicles_by_id: BTreeMap<u64, VehicleAgg> = BTreeMap::new();
     let mut tick: u64 = 0;
     let mut any = false;
@@ -30,9 +42,14 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
         if let Some(players) = snap.players() {
             for p in players.iter() {
                 if let Some(pos) = p.position() {
-                    by_id
-                        .entry(p.id())
-                        .or_insert((pos.x(), pos.y(), pos.z(), p.yaw()));
+                    by_id.entry(p.id()).or_insert((
+                        pos.x(),
+                        pos.y(),
+                        pos.z(),
+                        p.yaw(),
+                        p.frame(),
+                        p.slot(),
+                    ));
                 }
             }
         }
@@ -60,8 +77,8 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
     let mut b = FlatBufferBuilder::new();
     let states: Vec<_> = by_id
         .iter()
-        .map(|(id, (x, y, z, yaw))| {
-            let pos = Vec3::new(*x, *y, *z);
+        .map(|(id, (x, y, z, yaw, frame, slot))| {
+            let pos = QVec3::new(*x, *y, *z);
             PlayerState::create(
                 &mut b,
                 &PlayerStateArgs {
@@ -72,6 +89,9 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
                     move_dir: 0,
                     flags: 0,
                     sustained: 0,
+                    space_id: 0,
+                    frame: *frame,
+                    slot: *slot,
                 },
             )
         })
@@ -81,7 +101,7 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
     let vehicle_states: Vec<_> = vehicles_by_id
         .iter()
         .map(|(id, (archetype, x, y, z, yaw, speed, passenger))| {
-            let pos = Vec3::new(*x, *y, *z);
+            let pos = QVec3::new(*x, *y, *z);
             VehicleState::create(
                 &mut b,
                 &VehicleStateArgs {
@@ -91,6 +111,7 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
                     yaw: *yaw,
                     speed: *speed,
                     passenger: *passenger,
+                    space_id: 0,
                 },
             )
         })
@@ -111,6 +132,9 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
             // pourrait un jour faire pour `npcs` ce que cette tâche fait pour `vehicles`).
             npcs: None,
             vehicles: vehicles_vec,
+            // Véhicules pilotés (niveau 2) : pas encore produits par les shards — symétrique de
+            // `npcs`, un chantier futur les fera transiter ici quand `vehicle.rs` niveau 2 existera.
+            vehicles_player: None,
         },
     );
     let env = ServerEnvelope::create(
@@ -127,25 +151,30 @@ pub fn merge_snapshots(snapshots: &[Vec<u8>]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quant::{dq_pos, q_pos};
     use flatbuffers::FlatBufferBuilder;
 
-    /// Encode un Snapshot serveur (comme un shard l'enverrait) avec les joueurs donnés.
+    /// Encode un Snapshot serveur (comme un shard l'enverrait) avec les joueurs donnés
+    /// (`x` en mètres — quantifié ici comme le ferait `server_loop::encode_snapshot_for`).
     fn snapshot(tick: u64, players: &[(u64, f32)]) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
         let states: Vec<_> = players
             .iter()
             .map(|(id, x)| {
-                let pos = Vec3::new(*x, 0.0, 0.0);
+                let pos = QVec3::new(q_pos(*x), 0, 0);
                 PlayerState::create(
                     &mut b,
                     &PlayerStateArgs {
                         id: *id,
                         position: Some(&pos),
-                        yaw: 0.0,
+                        yaw: 0,
                         locomotion: 0,
                         move_dir: 0,
                         flags: 0,
                         sustained: 0,
+                        space_id: 0,
+                        frame: 0,
+                        slot: 0,
                     },
                 )
             })
@@ -158,6 +187,7 @@ mod tests {
                 players: Some(pv),
                 npcs: None,
                 vehicles: None,
+                vehicles_player: None,
             },
         );
         let env = ServerEnvelope::create(
@@ -178,7 +208,7 @@ mod tests {
             .players()
             .unwrap()
             .iter()
-            .map(|p| (p.id(), p.position().unwrap().x()))
+            .map(|p| (p.id(), dq_pos(p.position().unwrap().x())))
             .collect();
         v.sort_by_key(|(id, _)| *id);
         v
@@ -208,6 +238,58 @@ mod tests {
         assert!(merge_snapshots(&[vec![0, 1, 2]]).is_none());
     }
 
+    #[test]
+    fn a_passenger_frame_survives_the_merge() {
+        // ADR 0013 : un joueur porté par un repère mobile (frame ≠ 0) transporte un OFFSET LOCAL
+        // dans position. Si la fusion re-encodait frame=0, le client lirait cet offset comme une
+        // position monde — le passager apparaîtrait près de l'origine du monde. Le repère doit
+        // survivre bit-à-bit.
+        let mut b = FlatBufferBuilder::new();
+        let pos = QVec3::new(q_pos(0.5), q_pos(-0.25), 0); // offset local dans la cabine
+        let ps = PlayerState::create(
+            &mut b,
+            &PlayerStateArgs {
+                id: 7,
+                position: Some(&pos),
+                yaw: 0,
+                locomotion: 0,
+                move_dir: 0,
+                flags: 0,
+                sustained: 0,
+                space_id: 0,
+                frame: 9939278384122899325, // EntityID de cabine (ADR 0012)
+                slot: 0,
+            },
+        );
+        let pv = b.create_vector(&[ps]);
+        let snap = Snapshot::create(
+            &mut b,
+            &SnapshotArgs {
+                tick: 1,
+                players: Some(pv),
+                npcs: None,
+                vehicles: None,
+                vehicles_player: None,
+            },
+        );
+        let env = ServerEnvelope::create(
+            &mut b,
+            &ServerEnvelopeArgs {
+                msg_type: ServerMsg::Snapshot,
+                msg: Some(snap.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let shard_snap = b.finished_data().to_vec();
+
+        let merged = merge_snapshots(&[shard_snap]).unwrap();
+        let env = flatbuffers::root::<ServerEnvelope>(&merged).unwrap();
+        let players = env.msg_as_snapshot().unwrap().players().unwrap();
+        let p = players.get(0);
+        assert_eq!(p.frame(), 9939278384122899325);
+        assert_eq!(dq_pos(p.position().unwrap().x()), 0.5);
+    }
+
     /// Encode un Snapshot serveur avec, en plus des joueurs, un unique véhicule optionnel
     /// (id, archetype, x, y, z, speed, passenger) — suffisant pour ces tests, pas besoin de vecteur.
     fn snapshot_with_vehicle(
@@ -219,33 +301,37 @@ mod tests {
         let states: Vec<_> = players
             .iter()
             .map(|(id, x)| {
-                let pos = Vec3::new(*x, 0.0, 0.0);
+                let pos = QVec3::new(q_pos(*x), 0, 0);
                 PlayerState::create(
                     &mut b,
                     &PlayerStateArgs {
                         id: *id,
                         position: Some(&pos),
-                        yaw: 0.0,
+                        yaw: 0,
                         locomotion: 0,
                         move_dir: 0,
                         flags: 0,
                         sustained: 0,
+                        space_id: 0,
+                        frame: 0,
+                        slot: 0,
                     },
                 )
             })
             .collect();
         let pv = b.create_vector(&states);
         let vehicles_vec = vehicle.map(|(id, archetype, x, y, z, speed, passenger)| {
-            let pos = Vec3::new(x, y, z);
+            let pos = QVec3::new(q_pos(x), q_pos(y), q_pos(z));
             let v = VehicleState::create(
                 &mut b,
                 &VehicleStateArgs {
                     id,
                     archetype,
                     position: Some(&pos),
-                    yaw: 0.0,
+                    yaw: 0,
                     speed,
                     passenger,
+                    space_id: 0,
                 },
             );
             b.create_vector(&[v])
@@ -257,6 +343,7 @@ mod tests {
                 players: Some(pv),
                 npcs: None,
                 vehicles: vehicles_vec,
+                vehicles_player: None,
             },
         );
         let env = ServerEnvelope::create(
@@ -283,9 +370,9 @@ mod tests {
                         (
                             veh.id(),
                             veh.archetype(),
-                            pos.x(),
-                            pos.y(),
-                            pos.z(),
+                            dq_pos(pos.x()),
+                            dq_pos(pos.y()),
+                            dq_pos(pos.z()),
                             veh.speed(),
                             veh.passenger(),
                         )

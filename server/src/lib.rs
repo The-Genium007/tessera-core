@@ -42,6 +42,7 @@ pub mod persistence;
 pub mod player_store_impl;
 pub mod population_director;
 pub mod postgres_store;
+pub mod quant;
 pub mod queue;
 pub mod rate_limit;
 pub mod server_loop;

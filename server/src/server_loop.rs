@@ -1048,13 +1048,22 @@ impl Server {
             ClientMsg::PositionUpdate => {
                 if let Some(pu) = env.msg_as_position_update() {
                     if let Some(p) = pu.position() {
+                        // Déquantization au bord (gel palier 2, quant.rs) : le fil porte un QVec3
+                        // fixed-point + yaw ushort, le cœur (Pose) reste en f32.
+                        // `pu.frame()`/`pu.slot()` (ADR 0013) ne sont PAS lus ici : le repère d'un
+                        // joueur est SERVEUR-AUTORITAIRE, posé par EntityInteraction kind=6/7
+                        // (MountElevator/UnmountElevator) — le `..pose_of(from)` préserve le frame
+                        // courant. Faire confiance au frame client permettrait de se téléporter en
+                        // déclarant un offset local dans un repère lointain. La conversion
+                        // position-monde → offset-local au montage (C4.2, backlog) tranchera qui
+                        // convertit — pas ce décodeur.
                         self.world.set_pose(
                             from,
                             Pose {
-                                x: p.x(),
-                                y: p.y(),
-                                z: p.z(),
-                                yaw: pu.yaw(),
+                                x: crate::quant::dq_pos(p.x()),
+                                y: crate::quant::dq_pos(p.y()),
+                                z: crate::quant::dq_pos(p.z()),
+                                yaw: crate::quant::dq_yaw(pu.yaw()),
                                 ..self.world.pose_of(from).unwrap_or_default()
                             },
                         );
@@ -1314,17 +1323,29 @@ impl Server {
             .into_iter()
             .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id) && retained.contains(id))
             .map(|(id, pose)| {
-                let pos = Vec3::new(pose.x, pose.y, pose.z);
+                let pos = QVec3::new(
+                    crate::quant::q_pos(pose.x),
+                    crate::quant::q_pos(pose.y),
+                    crate::quant::q_pos(pose.z),
+                );
                 PlayerState::create(
                     b,
                     &PlayerStateArgs {
                         id,
                         position: Some(&pos),
-                        yaw: pose.yaw,
+                        yaw: crate::quant::q_yaw(pose.yaw),
                         locomotion: pose.locomotion,
                         move_dir: pose.move_dir,
                         flags: pose.flags,
                         sustained: pose.sustained,
+                        space_id: 0, // monde ouvert — l'instancing est un chantier palier 3
+                        // ADR 0013 : frame transporté tel que stocké dans la Pose (aujourd'hui
+                        // toujours WORLD_FRAME sur ce chemin : `snapshot_for` n'inclut pas encore
+                        // les passagers en repère mobile — branchement `snapshot_for_resolved` =
+                        // C4.1, chantier 2.7 du round-trip). slot : sièges véhicule, pas encore
+                        // suivis serveur (dépend du protocole véhicule niveau 2).
+                        frame: pose.frame,
+                        slot: 0,
                     },
                 )
             })
@@ -1341,13 +1362,23 @@ impl Server {
                     &NpcStateArgs {
                         id: record.id,
                         archetype: record.archetype,
-                        position: Some(&Vec3::new(pose.x, pose.y, pose.z)),
-                        yaw: pose.yaw,
+                        position: Some(&QVec3::new(
+                            crate::quant::q_pos(pose.x),
+                            crate::quant::q_pos(pose.y),
+                            crate::quant::q_pos(pose.z),
+                        )),
+                        yaw: crate::quant::q_yaw(pose.yaw),
                         locomotion: pose.locomotion,
                         move_dir: pose.move_dir,
                         flags: pose.flags,
                         sustained: pose.sustained,
                         behavior: behavior_to_u8(record.behavior),
+                        space_id: 0, // monde ouvert — instancing palier 3
+                        // Cible du FSM (gel §3, hostiles) : posée explicitement à 0 (= aucune)
+                        // tant que le volet hostiles n'alimente pas le champ — le défaut
+                        // FlatBuffers vaudrait 0 aussi, mais un champ significatif ne se laisse
+                        // jamais au défaut (piège protocol_version, CLAUDE.md).
+                        target: 0,
                     },
                 ))
             })
@@ -1364,14 +1395,17 @@ impl Server {
                     &VehicleStateArgs {
                         id: record.id,
                         archetype: record.archetype,
-                        position: Some(&Vec3::new(pose.x, pose.y, pose.z)),
-                        yaw: pose.yaw,
-                        // Quantization simple centiunités/s (choix v1, raffinable au gel consolidé
-                        // si une meilleure précision s'avère nécessaire) — cohérent avec l'esprit
-                        // de quantization déjà prévu pour le protocole (cf. commentaire schéma
-                        // VehicleState, protocol.fbs).
+                        position: Some(&QVec3::new(
+                            crate::quant::q_pos(pose.x),
+                            crate::quant::q_pos(pose.y),
+                            crate::quant::q_pos(pose.z),
+                        )),
+                        yaw: crate::quant::q_yaw(pose.yaw),
+                        // Quantization simple centiunités/s (choix v1, confirmé au gel consolidé
+                        // 2026-07-23) — cohérent avec la quantization position/yaw (quant.rs).
                         speed: (record.speed_units_per_sec * 100.0).round() as u16,
                         passenger: record.passenger.unwrap_or(0),
+                        space_id: 0, // monde ouvert — instancing palier 3
                     },
                 ))
             })
@@ -1386,6 +1420,10 @@ impl Server {
                 players: Some(players),
                 npcs: Some(npcs),
                 vehicles: Some(vehicles),
+                // Véhicules PILOTÉS (niveau 2, VehiclePlayerState) : le serveur n'a pas encore de
+                // registre de conduite (vehicle.rs niveau 2 à construire) — champ absent, le
+                // client lit « aucun » (même sémantique qu'un vecteur vide, cf. snapshot_merge).
+                vehicles_player: None,
             },
         );
         let env = ServerEnvelope::create(
@@ -1796,15 +1834,21 @@ mod tests {
 
     fn encode_position(x: f32, y: f32, z: f32, yaw: f32) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
-        let pos = Vec3::new(x, y, z);
+        let pos = QVec3::new(
+            crate::quant::q_pos(x),
+            crate::quant::q_pos(y),
+            crate::quant::q_pos(z),
+        );
         let pu = PositionUpdate::create(
             &mut b,
             &PositionUpdateArgs {
                 position: Some(&pos),
-                yaw,
+                yaw: crate::quant::q_yaw(yaw),
                 locomotion: 0,
                 move_dir: 0,
                 flags: 0,
+                frame: 0,
+                slot: 0,
             },
         );
         let env = ClientEnvelope::create(
@@ -1843,7 +1887,7 @@ mod tests {
         assert_eq!(players.len(), 1);
         let p = players.get(0);
         assert_eq!(p.id(), 1);
-        assert_eq!(p.position().unwrap().x(), 5.0);
+        assert_eq!(crate::quant::dq_pos(p.position().unwrap().x()), 5.0);
 
         let sent_to_1 = t.take_sent(1);
         assert_eq!(sent_to_1.len(), 1, "un snapshot envoyé au client 1");
@@ -1863,15 +1907,21 @@ mod tests {
         move_dir: u8,
     ) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
-        let pos = Vec3::new(x, y, z);
+        let pos = QVec3::new(
+            crate::quant::q_pos(x),
+            crate::quant::q_pos(y),
+            crate::quant::q_pos(z),
+        );
         let pu = PositionUpdate::create(
             &mut b,
             &PositionUpdateArgs {
                 position: Some(&pos),
-                yaw,
+                yaw: crate::quant::q_yaw(yaw),
                 locomotion,
                 move_dir,
                 flags: 0,
+                frame: 0,
+                slot: 0,
             },
         );
         let env = ClientEnvelope::create(
@@ -1930,7 +1980,7 @@ mod tests {
         let env = flatbuffers::root::<ServerEnvelope>(&sent_to_2.last().unwrap()).unwrap();
         let snap = env.msg_as_snapshot().unwrap();
         let p = snap.players().unwrap().get(0);
-        assert_eq!(p.position().unwrap().x(), 6.0);
+        assert_eq!(crate::quant::dq_pos(p.position().unwrap().x()), 6.0);
         assert_eq!(p.locomotion(), 2);
     }
 
@@ -2037,7 +2087,7 @@ mod tests {
             9,
             "la pose tenue doit survivre au PositionUpdate suivant"
         );
-        assert_eq!(p.position().unwrap().x(), 1.0);
+        assert_eq!(crate::quant::dq_pos(p.position().unwrap().x()), 1.0);
     }
 
     fn encode_player_action(action: u8, param: u32) -> Vec<u8> {
@@ -2141,7 +2191,7 @@ mod tests {
         let snap = env.msg_as_snapshot().unwrap();
         let p = snap.players().unwrap().get(0);
         assert_eq!(
-            p.position().unwrap().x(),
+            crate::quant::dq_pos(p.position().unwrap().x()),
             3.0,
             "un PlayerActionReport ne doit jamais déplacer le joueur"
         );
@@ -2280,7 +2330,7 @@ mod tests {
         b.finished_data().to_vec()
     }
 
-    fn encode_interaction_choice(session_id: u64, choice: u8, param: u32) -> Vec<u8> {
+    fn encode_interaction_choice(session_id: u64, choice: u32, param: u32) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
         let ic = InteractionChoice::create(
             &mut b,
@@ -2593,7 +2643,7 @@ mod tests {
             let snap = env.msg_as_snapshot()?;
             snap.npcs()?.iter().next().map(|n| {
                 let p = n.position().unwrap();
-                (p.x(), p.y())
+                (crate::quant::dq_pos(p.x()), crate::quant::dq_pos(p.y()))
             })
         });
         assert_eq!(
@@ -2880,7 +2930,7 @@ mod tests {
             let snap = env.msg_as_snapshot()?;
             snap.npcs()?.iter().next().map(|n| {
                 let p = n.position().unwrap();
-                (p.x(), p.y())
+                (crate::quant::dq_pos(p.x()), crate::quant::dq_pos(p.y()))
             })
         });
         let npc_position =
@@ -3555,7 +3605,11 @@ mod tests {
             let snap = env.msg_as_snapshot()?;
             snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
                 let pos = p.position().unwrap();
-                (pos.x(), pos.y(), pos.z())
+                (
+                    crate::quant::dq_pos(pos.x()),
+                    crate::quant::dq_pos(pos.y()),
+                    crate::quant::dq_pos(pos.z()),
+                )
             })
         });
         assert_eq!(pos_before, Some((0.0, 0.0, 0.0)));
@@ -3584,7 +3638,11 @@ mod tests {
             let snap = env.msg_as_snapshot()?;
             snap.players()?.iter().find(|p| p.id() == 1).map(|p| {
                 let pos = p.position().unwrap();
-                (pos.x(), pos.y(), pos.z())
+                (
+                    crate::quant::dq_pos(pos.x()),
+                    crate::quant::dq_pos(pos.y()),
+                    crate::quant::dq_pos(pos.z()),
+                )
             })
         });
         assert!(pos_after.is_some());

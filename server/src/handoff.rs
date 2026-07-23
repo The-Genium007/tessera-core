@@ -435,8 +435,9 @@ mod tests {
             &JoinArgs {
                 display_name: Some(name),
                 token: None,
-                protocol_version: 1,
+                protocol_version: crate::gateway_routing::CURRENT_PROTOCOL_VERSION,
                 hwid_hash: Some(hwid_hash),
+                space_id: 0,
             },
         );
         let env = ClientEnvelope::create(
@@ -452,15 +453,17 @@ mod tests {
 
     fn pos_payload(x: f32) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
-        let pos = Vec3::new(x, 0.0, 0.0);
+        let pos = QVec3::new(crate::quant::q_pos(x), 0, 0);
         let pu = PositionUpdate::create(
             &mut b,
             &PositionUpdateArgs {
                 position: Some(&pos),
-                yaw: 0.0,
+                yaw: 0,
                 locomotion: 0,
                 move_dir: 0,
                 flags: 0,
+                frame: 0,
+                slot: 0,
             },
         );
         let env = ClientEnvelope::create(

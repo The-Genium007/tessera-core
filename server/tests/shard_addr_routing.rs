@@ -28,15 +28,17 @@ fn client_position(x: f32, y: f32) -> Vec<u8> {
     use flatbuffers::FlatBufferBuilder;
     use protocol::*;
     let mut b = FlatBufferBuilder::new();
-    let pos = Vec3::new(x, y, 0.0);
+    let pos = QVec3::new(server::quant::q_pos(x), server::quant::q_pos(y), 0);
     let pu = PositionUpdate::create(
         &mut b,
         &PositionUpdateArgs {
             position: Some(&pos),
-            yaw: 0.0,
+            yaw: 0,
             locomotion: 0,
             move_dir: 0,
             flags: 0,
+            frame: 0,
+            slot: 0,
         },
     );
     let env = ClientEnvelope::create(

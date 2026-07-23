@@ -116,6 +116,7 @@ fn encode_join(name: &str) -> Vec<u8> {
             token: None,
             protocol_version: server::gateway_routing::CURRENT_PROTOCOL_VERSION,
             hwid_hash: Some(hwid_hash),
+            space_id: 0,
         },
     );
     let env = ClientEnvelope::create(
@@ -131,15 +132,21 @@ fn encode_join(name: &str) -> Vec<u8> {
 
 fn encode_position(x: f32, y: f32, z: f32) -> Vec<u8> {
     let mut b = FlatBufferBuilder::new();
-    let pos = Vec3::new(x, y, z);
+    let pos = QVec3::new(
+        server::quant::q_pos(x),
+        server::quant::q_pos(y),
+        server::quant::q_pos(z),
+    );
     let pu = PositionUpdate::create(
         &mut b,
         &PositionUpdateArgs {
             position: Some(&pos),
-            yaw: 0.0,
+            yaw: 0,
             locomotion: 0,
             move_dir: 0,
             flags: 0,
+            frame: 0,
+            slot: 0,
         },
     );
     let env = ClientEnvelope::create(
@@ -176,7 +183,12 @@ fn other_player_from_snapshot(payload: &[u8]) -> Option<(u64, f32, f32, f32)> {
     }
     let p = players.get(0);
     let pos = p.position()?;
-    Some((p.id(), pos.x(), pos.y(), pos.z()))
+    Some((
+        p.id(),
+        server::quant::dq_pos(pos.x()),
+        server::quant::dq_pos(pos.y()),
+        server::quant::dq_pos(pos.z()),
+    ))
 }
 
 /// État d'un client de test, mis à jour à chaque pompage de la boucle de poll.
