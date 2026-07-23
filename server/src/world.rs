@@ -224,6 +224,11 @@ impl World {
                     resolved.x = world_pos[0];
                     resolved.y = world_pos[1];
                     resolved.z = world_pos[2];
+                    // Les coordonnées sont maintenant en espace MONDE : le repère d'origine ne
+                    // doit plus être réappliqué. Sans ce reset, un futur appelant qui repasserait
+                    // ce `Pose` à `world_position` doublerait la transformation (revue finale
+                    // 2026-07-23).
+                    resolved.frame = crate::frame::WORLD_FRAME;
                     Some((id, resolved))
                 } else {
                     None
@@ -539,6 +544,12 @@ mod tests {
         let (_, resolved_pose) = snap[0];
         assert_eq!(resolved_pose.x, 10.5, "10 (cabine) + 0.5 (offset local)");
         assert_eq!(resolved_pose.z, 40.0);
+        assert_eq!(
+            resolved_pose.frame,
+            crate::frame::WORLD_FRAME,
+            "une pose résolue en monde ne doit plus porter son ancien repère, sous peine de \
+             double transformation si un futur appelant la repasse à world_position"
+        );
     }
 
     #[test]
