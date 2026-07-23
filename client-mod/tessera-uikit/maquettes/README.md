@@ -1,5 +1,9 @@
 # Maquettes HUD — kit et workflow
 
+> **⚠️ DA OFFICIELLE : `../DIRECTION-ARTISTIQUE.md`** (validée 2026-07-22, calibrée sur les
+> captures des menus réels). Toute nouvelle maquette et tout écran ink en dérive — modèle de
+> référence : `maquette-lobby-arrivee.html` (v2).
+
 Dossier de **conception visuelle** des écrans HUD/UI de Tessera. On maquette en **HTML/CSS** (que je
 génère et que tu ouvres dans un navigateur, sur Mac) pour décider du look **avant** de coder en
 redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquettes soient cohérentes.
