@@ -178,24 +178,11 @@
       T('Pleurer','Sanglote.','icon','☂'),T('Fatigue','S\'étire, épuisé.','icon','≋'),
       T('Photo','Mime une photo.','icon','▣'),T('Cœur','Petit cœur avec les mains.','icon','♥'),
     ]),
-    // Poses : 28 éléments ICÔNE SEULE (glyphes placeholders « au pif », décision Lucas),
-    // répartis 13 (cercle intérieur) + 15 (cercle extérieur) via `split`.
-    Object.assign(C('Poses','28 postures (icônes seules) — 13 au centre + 15 autour.',[
-      T('S\'asseoir','S\'assoit sur place.','icon','◉'),T('S\'adosser','S\'adosse au mur.','icon','◫'),
-      T('Bras croisés','Croise les bras.','icon','◈'),T('Accroupi','S\'accroupit.','icon','▼'),
-      T('Allongé','S\'allonge.','icon','▭'),T('Appuyé comptoir','S\'appuie sur un comptoir.','icon','◻'),
-      T('Pose 07','Placeholder — à définir.','icon','✦'),T('Pose 08','Placeholder — à définir.','icon','➤'),
-      T('Pose 09','Placeholder — à définir.','icon','❖'),T('Pose 10','Placeholder — à définir.','icon','♪'),
-      T('Pose 11','Placeholder — à définir.','icon','✚'),T('Pose 12','Placeholder — à définir.','icon','✓'),
-      T('Pose 13','Placeholder — à définir.','icon','∿'),T('Pose 14','Placeholder — à définir.','icon','▲'),
-      T('Pose 15','Placeholder — à définir.','icon','◇'),T('Pose 16','Placeholder — à définir.','icon','☼'),
-      T('Pose 17','Placeholder — à définir.','icon','☂'),T('Pose 18','Placeholder — à définir.','icon','≋'),
-      T('Pose 19','Placeholder — à définir.','icon','▣'),T('Pose 20','Placeholder — à définir.','icon','♥'),
-      T('Pose 21','Placeholder — à définir.','icon','⌂'),T('Pose 22','Placeholder — à définir.','icon','⚑'),
-      T('Pose 23','Placeholder — à définir.','icon','☍'),T('Pose 24','Placeholder — à définir.','icon','⌗'),
-      T('Pose 25','Placeholder — à définir.','icon','◐'),T('Pose 26','Placeholder — à définir.','icon','◭'),
-      T('Pose 27','Placeholder — à définir.','icon','✂'),T('Pose 28','Placeholder — à définir.','icon','✱'),
-    ]), {split:[13,15]}),
+    C('Poses','Postures tenues (icône + texte).',[
+      T('S\'asseoir','S\'assoit sur place.','both','◉'),T('S\'adosser','S\'adosse au mur.','both','◫'),
+      T('Bras croisés','Croise les bras.','both','◈'),T('Accroupi','S\'accroupit.','both','▼'),
+      T('Allongé','S\'allonge.','both','▭'),T('Appuyé comptoir','S\'appuie sur un comptoir.','both','◻'),
+    ]),
     C('Interactions','Interactions joueur (texte seul).',[
       T('Se présenter','Révèle ton nom au joueur visé — pour toujours.'),
       T('Se présenter à tous','Révèle ton nom à tous les joueurs autour.'),
@@ -223,27 +210,14 @@
 
   function em(){ return parseFloat(getComputedStyle(scr).fontSize); }
 
-  let ringRadii = [];
-  function layout(node){
-    // Répartition : `split` explicite (ex. Poses [13,15]) sinon ≤8 = un cercle, sinon 6 + reste.
-    // Rayons ADAPTATIFS : assez grands pour que les tuiles ne se chevauchent pas (arc ~3em/tuile).
-    const nodes = node.children;
-    let groups;
-    if (node.split) groups = [nodes.slice(0, node.split[0]), nodes.slice(node.split[0])];
-    else if (nodes.length <= 8) groups = [nodes];
-    else groups = [nodes.slice(0,6), nodes.slice(6)];
-    const SP = 3.0; // em d'arc visés par tuile
-    ringRadii = [];
-    const out = [];
-    groups.forEach((g,ri)=>{
-      let r;
-      if (groups.length === 1) r = 7.6;
-      else if (ri === 0) r = Math.max(5.4, g.length*SP/(2*Math.PI));
-      else r = Math.max(ringRadii[0]+3.8, g.length*SP/(2*Math.PI));
-      ringRadii.push(r);
-      g.forEach((n,i)=> out.push({n, ring:ri, r, a:-90 + i*360/g.length}));
-    });
-    return out;
+  function layout(nodes){
+    // ≤8 : un cercle ; sinon petit cercle (6) + grand cercle (le reste). Rayons en em (roue compacte).
+    if (nodes.length <= 8) return nodes.map((n,i)=>({n, ring:0, r:7.6, a:-90 + i*360/nodes.length}));
+    const inner = nodes.slice(0,6), outer = nodes.slice(6);
+    return [
+      ...inner.map((n,i)=>({n, ring:0, r:5.4, a:-90 + i*360/inner.length})),
+      ...outer.map((n,i)=>({n, ring:1, r:9.4, a:-90 + i*360/outer.length})),
+    ];
   }
 
   function render(){
@@ -255,7 +229,7 @@
     document.getElementById('hubBc').textContent = stack.length ? '◄ échap : retour' : 'racine';
     hub.classList.toggle('canback', !!stack.length);
     tiles = [];
-    const pl = layout(node);
+    const pl = layout(node.children);
     const rings = [...new Set(pl.map(p=>p.r))];
     rings.forEach(r=>{ const m=document.createElement('i'); m.className='ringmark';
       m.style.width = m.style.height = (r*2+2.6)+'em'; center.appendChild(m); });
@@ -292,7 +266,8 @@
     const dist = Math.hypot(dx,dy)/em();
     if (dist < 3){ setSel(-1); return; }              // zone hub : rien
     const ang = ((Math.atan2(dy,dx)*180/Math.PI)%360+360)%360;
-    const ring = ringRadii.length > 1 ? (dist > (ringRadii[0]+ringRadii[1])/2 ? 1 : 0) : 0;
+    const hasOuter = tiles.some(t=>t.ring===1);
+    const ring = hasOuter ? (dist > 7.4 ? 1 : 0) : 0;
     let best=-1, bd=1e9;
     tiles.forEach((t,i)=>{ if (t.ring!==ring) return;
       let d = Math.abs(t.a-ang); d = Math.min(d,360-d);
