@@ -31,6 +31,9 @@ redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquette
   (minimap haut-droite, hex-widgets, hints ; wanted et tracker RETIRÉS) + les AJOUTS Tessera
   (faim/soif, nametags à présentation, micro PTT à cadre-égaliseur, toasts, micro-statut) —
   bouton pour surligner les ajouts.
+- **`maquette-menu-pause.html`** — **MAQUETTE D'ÉCRAN : menu pause reworké** (C24). Natif conservé
+  (Reprendre/Réglages) + ajouts Tessera : Retour au choix de personnage, Commandes (keybindings),
+  Quitter wrappé (Leave d'abord — démo au clic), panneau de session (serveur/perso/ping/temps).
 - **`maquette-roue-action-rapide.html`** — **MAQUETTE D'ÉCRAN : Roue d'action rapide (G).**
   Codes de la roue native (plates à liseré orange, détail à cadre rouge, [Q]/[E]) + multi-étages
   (Émotes = sous-roue, hub = retour), densité variable (6/8/4) et navigation entre roues (Q/E).
