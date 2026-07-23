@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera — Maquette : menu pause reworké</title>
+<!--
+  MAQUETTE du MENU PAUSE reworké (C24, « plan dédié » — décision 2026-07-22), DA officielle.
+  Base : le menu pause NATIF (PauseMenuGameController, 1b prouvé — flux d'arrivée §4). En session
+  serveur, la pause vanilla n'a que « Réglages » et « Quitter » ; on AJOUTE nos contrôles :
+  - RETOUR AU CHOIX DE PERSONNAGE : sauvegarde la progression, re-gèle (bulle), repasse le serveur
+    en AwaitingSelection — sans quitter le jeu.
+  - COMMANDES (KEYBINDINGS) : entrée directe vers la config des touches (C30).
+  - QUITTER LE JEU (wrap du bouton natif) : envoie `Leave` D'ABORD (libère le slot serveur
+    proprement) puis quitte — démo au clic.
+  + un PANNEAU DE SESSION Tessera (serveur, personnage, temps, joueurs, ping).
+  Bouton « surligner » = distinguer natif / ajouts Tessera. Approximation CSS, aucun asset CDPR.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --cyan:#4be3f7; --red:#e5342e; --amber:#f5b13d;
+    --white:#eef6f8; --readable:#a9b6bc; --dim:#6a6f75; --dim-2:#2c2226;
+    font-synthesis:none;
+  }
+  *{box-sizing:border-box;} html,body{margin:0;}
+  body{background:#050307;color:var(--white);
+    font-family:"Rajdhani","Barlow Semi Condensed","Roboto Condensed",system-ui,sans-serif;
+    font-size:16px;line-height:1.45;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1220px;margin:0 auto;padding:34px 20px 80px;}
+  .mono{font-family:"Share Tech Mono",ui-monospace,monospace;}
+  .note{color:var(--dim);font-size:13px;max-width:76ch;margin:10px 0 14px;}
+  h1{font-size:clamp(24px,3.6vw,36px);font-weight:700;margin:4px 0 0;}
+  .eyebrow{font-family:"Share Tech Mono",monospace;font-size:12px;letter-spacing:.32em;text-transform:uppercase;color:var(--cyan);}
+  .toolbar{display:flex;gap:10px;margin:0 0 12px;}
+  .tg{font-family:"Share Tech Mono",monospace;font-size:12px;letter-spacing:.08em;padding:6px 14px;border:1px solid var(--cyan);color:var(--cyan);background:rgba(8,12,16,.8);cursor:pointer;
+    clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px);}
+  .tg.on{background:var(--cyan);color:#03191d;}
+
+  /* ============ ÉCRAN ============ */
+  .screen{position:relative;aspect-ratio:16/9;overflow:hidden;border:1px solid rgba(229,52,46,.25);
+    background:
+      radial-gradient(700px 420px at 70% 30%, rgba(229,52,46,.10), transparent 62%),
+      radial-gradient(600px 400px at 15% 85%, rgba(75,227,247,.04), transparent 60%),
+      linear-gradient(180deg,#0d0609 0%, #0a070c 55%, #08090c 100%);
+    font-size:clamp(9px,1.05vw,15px);}
+  /* jeu flouté derrière (silhouettes) */
+  .bg i{position:absolute;background:rgba(0,0,0,.4);filter:blur(2px);}
+  .bg .b1{left:8%;top:30%;width:14%;height:48%;}
+  .bg .b2{left:74%;top:24%;width:16%;height:54%;}
+  .screen::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:8;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,.13) 0 1px,transparent 1px 3px);mix-blend-mode:multiply;}
+  /* vignette rouge : la pause est un état "hors du monde" */
+  .screen::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:9;
+    box-shadow: inset 0 0 100px rgba(229,52,46,.26), inset 0 0 14px rgba(229,52,46,.25);
+    border:1px solid rgba(229,52,46,.38);}
+
+  .head{position:absolute;left:6%;top:8%;z-index:3;}
+  .head .t{font-size:2.2em;font-weight:700;letter-spacing:.2em;text-transform:uppercase;}
+  .head .s{font-family:"Share Tech Mono",monospace;font-size:.8em;color:var(--dim);letter-spacing:.18em;}
+
+  /* marqueur ajout Tessera */
+  .tsr{position:relative;}
+  .hl .tsr{outline:2px dashed var(--cyan);outline-offset:4px;}
+  .hl .tsr::after{content:"TESSERA";position:absolute;top:-1.6em;left:0;font-family:"Share Tech Mono",monospace;font-size:.55em;letter-spacing:.16em;color:#03191d;background:var(--cyan);padding:1px 6px;}
+
+  /* ---- colonne de boutons ---- */
+  .menu{position:absolute;left:6%;top:24%;display:flex;flex-direction:column;gap:.7em;z-index:3;width:24em;}
+  .mbtn{--bevel:9px;position:relative;text-align:left;padding:.72em 1.2em;font-weight:600;letter-spacing:.14em;text-transform:uppercase;font-size:1.05em;
+    color:var(--white);background:rgba(10,8,10,.82);border:1px solid rgba(229,52,46,.3);cursor:pointer;transition:.13s;
+    clip-path:polygon(var(--bevel) 0,100% 0,100% calc(100% - var(--bevel)),calc(100% - var(--bevel)) 100%,0 100%,0 var(--bevel));}
+  .mbtn .k{float:right;font-family:"Share Tech Mono",monospace;font-size:.7em;color:var(--dim);letter-spacing:.1em;margin-top:.35em;}
+  .mbtn:hover{border-color:var(--cyan);color:var(--cyan);background:rgba(75,227,247,.08);}
+  .mbtn.danger{border-color:rgba(229,52,46,.55);color:#ff8d86;}
+  .mbtn.danger:hover{background:var(--red);border-color:var(--red);color:#160000;}
+  .mbtn .sub{display:block;font-family:"Share Tech Mono",monospace;font-size:.6em;letter-spacing:.1em;color:var(--dim);text-transform:none;margin-top:.15em;}
+  .mbtn:hover .sub{color:inherit;opacity:.8;}
+
+  /* ---- panneau session (Tessera) ---- */
+  .session{position:absolute;right:6%;top:24%;width:22em;z-index:3;
+    background:rgba(9,12,16,.85);border:1px solid rgba(75,227,247,.22);padding:1em 1.2em;
+    clip-path:polygon(12px 0,100% 0,100% calc(100% - 12px),calc(100% - 12px) 100%,0 100%,0 12px);}
+  .session .sh{font-family:"Share Tech Mono",monospace;font-size:.68em;letter-spacing:.22em;color:var(--cyan);text-transform:uppercase;border-bottom:1px solid rgba(75,227,247,.2);padding-bottom:.5em;margin-bottom:.7em;}
+  .row{display:flex;justify-content:space-between;gap:1em;font-size:.92em;padding:.28em 0;}
+  .row .k{color:var(--readable);}
+  .row .v{font-family:"Share Tech Mono",monospace;color:var(--white);font-size:.85em;}
+  .row .v.c{color:var(--cyan);} .row .v.a{color:var(--amber);}
+
+  .esc{position:absolute;right:6%;bottom:6%;z-index:3;font-family:"Share Tech Mono",monospace;color:var(--red);font-size:.95em;display:flex;align-items:center;gap:.5em;}
+  .esc .k{border:1px solid var(--red);padding:.05em .4em;font-size:.85em;}
+
+  /* toast démo (wrap Quitter -> Leave) */
+  .go{position:absolute;left:50%;bottom:7%;transform:translateX(-50%);z-index:6;display:none;
+    align-items:center;gap:.7em;background:rgba(8,10,14,.9);border:1px solid rgba(75,227,247,.2);border-left:4px solid var(--cyan);padding:.5em 1.1em;}
+  .go.show{display:flex;}
+  .go .tx{font-size:.88em;color:var(--cyan);letter-spacing:.05em;text-transform:uppercase;font-weight:600;}
+
+  .legend{margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;}
+  .lg{border:1px solid rgba(75,227,247,.12);background:rgba(9,12,16,.6);padding:10px 12px;font-size:12.5px;color:var(--readable);}
+  .lg b{color:var(--white);display:block;margin-bottom:2px;font-size:13px;}
+  .lg .mono{color:var(--cyan);font-size:11px;}
+  .lg.nat{border-color:rgba(229,52,46,.2);} .lg.nat .mono{color:#ff7b74;}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="eyebrow">Tessera · Maquette · DA officielle</div>
+  <h1>Menu pause reworké</h1>
+  <p class="note">Base native (PauseMenuGameController, hook 1b prouvé) + contrôles Tessera. Survole
+    les boutons ; clique « Quitter le jeu » pour voir le comportement wrappé (Leave d'abord). Bouton
+    pour surligner ce que Tessera ajoute.</p>
+  <div class="toolbar"><button type="button" class="tg" id="tgl">Surligner les ajouts Tessera</button></div>
+
+  <div class="screen" id="scr">
+    <div class="bg"><i class="b1"></i><i class="b2"></i></div>
+
+    <div class="head"><div class="t">Pause</div><div class="s">TESSERA // SERVEUR RP · LE MONDE CONTINUE SANS TOI</div></div>
+
+    <div class="menu">
+      <button type="button" class="mbtn">Reprendre <span class="k">ÉCHAP</span></button>
+      <button type="button" class="mbtn tsr" title="C4/C24 — re-gèle, bulle, AwaitingSelection">Retour au choix de personnage
+        <span class="sub">sauvegarde la progression · repasse en sélection</span></button>
+      <button type="button" class="mbtn">Réglages <span class="sub">réglages natifs du jeu, conservés tels quels</span></button>
+      <button type="button" class="mbtn tsr" title="C30 — config des touches">Commandes
+        <span class="sub">touches Tessera + natives, rebind (roue G, PTT…)</span></button>
+      <button type="button" class="mbtn danger" id="quit" title="wrap du bouton natif : Leave d'abord">Quitter le jeu
+        <span class="sub">libère ta place sur le serveur proprement, puis ferme</span></button>
+    </div>
+
+    <div class="session tsr" title="Panneau de session Tessera">
+      <div class="sh">Session</div>
+      <div class="row"><span class="k">Serveur</span><span class="v c">tessera-dev-01</span></div>
+      <div class="row"><span class="k">Personnage</span><span class="v">Vika Moreno</span></div>
+      <div class="row"><span class="k">En ligne</span><span class="v">12 / 64</span></div>
+      <div class="row"><span class="k">Ping</span><span class="v c">24 ms</span></div>
+      <div class="row"><span class="k">Session</span><span class="v a">02:41:07</span></div>
+      <div class="row"><span class="k">Heure serveur</span><span class="v">14:02</span></div>
+    </div>
+
+    <div class="esc"><span class="k">ÉCHAP</span> Reprendre</div>
+    <div class="go" id="go"><span class="tx" id="goTx"></span></div>
+  </div>
+
+  <div class="legend">
+    <div class="lg nat"><b>Natif conservé</b>Structure du menu pause, « Reprendre », « Réglages » (intouchés). Le monde N'EST PAS en pause côté serveur — d'où le sous-titre.<span class="mono">PauseMenuGameController · 1b</span></div>
+    <div class="lg"><b>Tessera — Retour au choix de personnage</b>Sauvegarde la progression du perso, re-gèle (Tier cinématique + bulle), dit au serveur de repasser en AwaitingSelection — sans quitter le jeu.<span class="mono">flux d'arrivée §4 · C4</span></div>
+    <div class="lg"><b>Tessera — Quitter wrappé</b>Le bouton natif est wrappé : envoi de `Leave` (libère le slot, l'annuaire respire) PUIS fermeture du jeu. Jamais de slot fantôme.<span class="mono">wrap 1b prouvé · protocole Leave</span></div>
+    <div class="lg"><b>Tessera — Commandes & Session</b>Entrée directe keybindings (C30) + panneau de session (serveur, perso, joueurs, ping, temps). Le joueur sait toujours où il est connecté.<span class="mono">C30 · C12/C13</span></div>
+  </div>
+
+<script>
+  document.getElementById('tgl').addEventListener('click', function(){
+    this.classList.toggle('on');
+    document.getElementById('scr').classList.toggle('hl');
+  });
+  // Démo du wrap Quitter → Leave d'abord, puis fermeture.
+  const go = document.getElementById('go'), goTx = document.getElementById('goTx');
+  document.getElementById('quit').addEventListener('click', ()=>{
+    goTx.textContent = 'Leave envoyé — slot libéré · fermeture du jeu…';
+    go.classList.add('show');
+    setTimeout(()=>go.classList.remove('show'), 2600);
+  });
+</script>
+</div>
+</body>
+</html>
