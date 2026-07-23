@@ -76,7 +76,9 @@ pub enum ElevatorCatalogError {
 impl fmt::Display for ElevatorCatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ElevatorCatalogError::Parse(e) => write!(f, "catalogue ascenseurs invalide (TOML) : {e}"),
+            ElevatorCatalogError::Parse(e) => {
+                write!(f, "catalogue ascenseurs invalide (TOML) : {e}")
+            }
             ElevatorCatalogError::UnsupportedFormatVersion(v) => {
                 write!(f, "format_version {v} non supporté (attendu : 1)")
             }
@@ -87,12 +89,21 @@ impl fmt::Display for ElevatorCatalogError {
                 write!(f, "ascenseur {id} déclaré plusieurs fois")
             }
             ElevatorCatalogError::EmptyFloorList { elevator_id } => {
-                write!(f, "ascenseur {elevator_id} n'a aucun étage — au moins un requis")
+                write!(
+                    f,
+                    "ascenseur {elevator_id} n'a aucun étage — au moins un requis"
+                )
             }
             ElevatorCatalogError::DuplicateFloorIndex { elevator_id, index } => {
-                write!(f, "ascenseur {elevator_id} : étage {index} déclaré plusieurs fois")
+                write!(
+                    f,
+                    "ascenseur {elevator_id} : étage {index} déclaré plusieurs fois"
+                )
             }
-            ElevatorCatalogError::StartFloorNotInFloorList { elevator_id, start_floor } => {
+            ElevatorCatalogError::StartFloorNotInFloorList {
+                elevator_id,
+                start_floor,
+            } => {
                 write!(
                     f,
                     "ascenseur {elevator_id} : start_floor {start_floor} absent de sa liste d'étages"
@@ -108,14 +119,15 @@ pub fn parse_and_validate(toml_str: &str) -> Result<ElevatorCatalog, ElevatorCat
     let raw: RawCatalog =
         toml::from_str(toml_str).map_err(|e| ElevatorCatalogError::Parse(e.to_string()))?;
     if raw.format_version != 1 {
-        return Err(ElevatorCatalogError::UnsupportedFormatVersion(raw.format_version));
+        return Err(ElevatorCatalogError::UnsupportedFormatVersion(
+            raw.format_version,
+        ));
     }
     let mut entries: Vec<(String, ElevatorState)> = Vec::new();
     for e in raw.elevator {
-        let id: u64 = e
-            .id
-            .parse()
-            .map_err(|_| ElevatorCatalogError::InvalidElevatorId(e.id.clone()))?;
+        let id: u64 =
+            e.id.parse()
+                .map_err(|_| ElevatorCatalogError::InvalidElevatorId(e.id.clone()))?;
         if entries.iter().any(|(_, s)| s.elevator_id == id) {
             return Err(ElevatorCatalogError::DuplicateElevatorId(id));
         }
@@ -144,7 +156,13 @@ pub fn parse_and_validate(toml_str: &str) -> Result<ElevatorCatalog, ElevatorCat
         }
         entries.push((
             e.name,
-            ElevatorState::new(id, e.start_floor, floors, e.start_delay_ms, e.travel_time_ms),
+            ElevatorState::new(
+                id,
+                e.start_floor,
+                floors,
+                e.start_delay_ms,
+                e.travel_time_ms,
+            ),
         ));
     }
     Ok(ElevatorCatalog { entries })
@@ -179,7 +197,10 @@ mod tests {
     fn valid_catalog_parses_and_builds_an_initial_state() {
         let cat = parse_and_validate(VALID).unwrap();
         assert_eq!(cat.len(), 1);
-        assert_eq!(cat.name_of(9939278384122899325), Some("megabuilding-h10-little-china"));
+        assert_eq!(
+            cat.name_of(9939278384122899325),
+            Some("megabuilding-h10-little-china")
+        );
         let states = cat.into_states();
         assert_eq!(states[0].active_floor, 1);
         assert_eq!(states[0].start_delay_ms, 1000);
@@ -191,7 +212,10 @@ mod tests {
     fn unsupported_format_version_is_rejected() {
         let toml = VALID.replace("format_version = 1", "format_version = 2");
         let err = parse_and_validate(&toml).unwrap_err();
-        assert!(matches!(err, ElevatorCatalogError::UnsupportedFormatVersion(2)));
+        assert!(matches!(
+            err,
+            ElevatorCatalogError::UnsupportedFormatVersion(2)
+        ));
     }
 
     #[test]
@@ -218,7 +242,10 @@ mod tests {
             "{ index = 0, hidden = false, inactive = false },",
         );
         let err = parse_and_validate(&toml).unwrap_err();
-        assert!(matches!(err, ElevatorCatalogError::DuplicateFloorIndex { index: 0, .. }));
+        assert!(matches!(
+            err,
+            ElevatorCatalogError::DuplicateFloorIndex { index: 0, .. }
+        ));
     }
 
     #[test]
@@ -233,12 +260,11 @@ mod tests {
 
     #[test]
     fn a_non_numeric_elevator_id_is_rejected() {
-        let toml = VALID.replace(
-            r#"id = "9939278384122899325""#,
-            r#"id = "not-a-number""#,
-        );
+        let toml = VALID.replace(r#"id = "9939278384122899325""#, r#"id = "not-a-number""#);
         let err = parse_and_validate(&toml).unwrap_err();
-        assert!(matches!(err, ElevatorCatalogError::InvalidElevatorId(ref id) if id == "not-a-number"));
+        assert!(
+            matches!(err, ElevatorCatalogError::InvalidElevatorId(ref id) if id == "not-a-number")
+        );
     }
 
     #[test]
@@ -249,8 +275,8 @@ mod tests {
 
     #[test]
     fn the_example_toml_file_on_disk_parses_successfully() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("elevator-catalog.example.toml");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("elevator-catalog.example.toml");
         let cat = load(&path).expect("elevator-catalog.example.toml doit être valide");
         assert_eq!(cat.len(), 1);
         assert_eq!(

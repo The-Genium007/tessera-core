@@ -306,7 +306,10 @@ mod lifecycle_tests {
     fn requesting_an_unknown_floor_is_silently_rejected() {
         let mut e = fresh();
         assert!(!e.request_floor(99));
-        assert!(e.requested_floors.is_empty(), "aucun bouton ne doit s'allumer");
+        assert!(
+            e.requested_floors.is_empty(),
+            "aucun bouton ne doit s'allumer"
+        );
     }
 
     #[test]
@@ -315,9 +318,21 @@ mod lifecycle_tests {
             42,
             0,
             vec![
-                FloorSpec { index: 0, hidden: false, inactive: false },
-                FloorSpec { index: 1, hidden: true, inactive: false },
-                FloorSpec { index: 2, hidden: false, inactive: true },
+                FloorSpec {
+                    index: 0,
+                    hidden: false,
+                    inactive: false,
+                },
+                FloorSpec {
+                    index: 1,
+                    hidden: true,
+                    inactive: false,
+                },
+                FloorSpec {
+                    index: 2,
+                    hidden: false,
+                    inactive: true,
+                },
             ],
             1000,
             4000,
@@ -332,7 +347,11 @@ mod lifecycle_tests {
         let mut e = fresh();
         e.request_floor(3);
         e.request_floor(3);
-        assert_eq!(e.requested_floors.len(), 1, "le spam de bouton ne doit rien faire");
+        assert_eq!(
+            e.requested_floors.len(),
+            1,
+            "le spam de bouton ne doit rien faire"
+        );
     }
 
     #[test]
@@ -342,7 +361,10 @@ mod lifecycle_tests {
         e.request_floor(5);
         e.start_trip_if_idle(0, TICK_MS);
         assert_eq!(e.movement_state, MovementState::MovingUp);
-        assert!(e.request_floor(2), "un appel pendant le mouvement doit être accepté");
+        assert!(
+            e.request_floor(2),
+            "un appel pendant le mouvement doit être accepté"
+        );
         assert!(e.requested_floors.contains(&2));
     }
 
@@ -354,7 +376,11 @@ mod lifecycle_tests {
         assert_eq!(e.target_floor, Some(3));
         assert_eq!(e.movement_state, MovementState::MovingUp);
         assert_eq!(e.depart_tick, Some(10));
-        assert_eq!(e.arrival_tick, Some(10 + 100), "1000+4000 ms à 50 ms/tick = 100 ticks");
+        assert_eq!(
+            e.arrival_tick,
+            Some(10 + 100),
+            "1000+4000 ms à 50 ms/tick = 100 ticks"
+        );
     }
 
     #[test]
@@ -373,7 +399,10 @@ mod lifecycle_tests {
         e.start_trip_if_idle(0, TICK_MS);
         assert_eq!(e.movement_state, MovementState::Stopped);
         assert_eq!(e.target_floor, None);
-        assert!(e.requested_floors.is_empty(), "l'appel est consommé sur place");
+        assert!(
+            e.requested_floors.is_empty(),
+            "l'appel est consommé sur place"
+        );
     }
 
     #[test]
@@ -397,7 +426,10 @@ mod lifecycle_tests {
         assert_eq!(e.target_floor, None);
         assert_eq!(e.depart_tick, None);
         assert_eq!(e.arrival_tick, None);
-        assert!(!e.requested_floors.contains(&3), "le bouton s'éteint à l'arrivée");
+        assert!(
+            !e.requested_floors.contains(&3),
+            "le bouton s'éteint à l'arrivée"
+        );
     }
 
     #[test]
@@ -421,7 +453,11 @@ mod lifecycle_tests {
         e.start_trip_if_idle(0, TICK_MS);
         e.advance(100, TICK_MS); // arrivée au 2, puis enchaînement vers le 4
         assert_eq!(e.active_floor, 2);
-        assert_eq!(e.target_floor, Some(4), "la cabine repart immédiatement vers l'appel suivant");
+        assert_eq!(
+            e.target_floor,
+            Some(4),
+            "la cabine repart immédiatement vers l'appel suivant"
+        );
         assert_eq!(e.movement_state, MovementState::MovingUp);
     }
 

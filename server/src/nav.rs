@@ -160,7 +160,11 @@ mod tests {
         g.add_edge(a, c);
         g.add_edge(c, d);
         let path = plan_path(&g, Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)).unwrap();
-        assert_eq!(path.len(), 3, "doit passer par le chemin court a-b-d, pas a-c-d");
+        assert_eq!(
+            path.len(),
+            3,
+            "doit passer par le chemin court a-b-d, pas a-c-d"
+        );
         assert_eq!(path[1].position, Vec3::new(1.0, 0.0, 0.0));
     }
 
@@ -193,6 +197,10 @@ mod tests {
 
     #[test]
     fn is_walkable_on_an_empty_graph_is_always_false() {
-        assert!(!is_walkable(&NavGraph::new(), Vec3::new(0.0, 0.0, 0.0), 1000.0));
+        assert!(!is_walkable(
+            &NavGraph::new(),
+            Vec3::new(0.0, 0.0, 0.0),
+            1000.0
+        ));
     }
 }
