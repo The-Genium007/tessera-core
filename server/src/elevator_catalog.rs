@@ -32,6 +32,16 @@ struct RawFloor {
     hidden: bool,
     #[serde(default)]
     inactive: bool,
+    /// Position monde de la porte d'étage — TROIS champs TOML séparés (pas un tableau) pour rester
+    /// facile à écrire à la main dans un catalogue d'opérateur. `Option` : un catalogue existant
+    /// sans ces champs continue de parser exactement comme avant ce plan (`serde(default)` produit
+    /// `None` pour chacun, combinés en `None` par `parse_and_validate`, Step 4).
+    #[serde(default)]
+    position_x: Option<f32>,
+    #[serde(default)]
+    position_y: Option<f32>,
+    #[serde(default)]
+    position_z: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +156,10 @@ pub fn parse_and_validate(toml_str: &str) -> Result<ElevatorCatalog, ElevatorCat
                 index: f.index,
                 hidden: f.hidden,
                 inactive: f.inactive,
+                position: match (f.position_x, f.position_y, f.position_z) {
+                    (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                    _ => None,
+                },
             });
         }
         if !floors.iter().any(|f| f.index == e.start_floor) {
@@ -284,5 +298,67 @@ mod tests {
             Some("megabuilding-h10-little-china"),
             "le vrai EntityID mesuré en jeu doit survivre à l'aller-retour depuis le fichier livré"
         );
+    }
+
+    #[test]
+    fn a_floor_with_all_three_position_fields_parses_a_known_position() {
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 1000
+            travel_time_ms = 4000
+            [[elevator.floors]]
+            index = 0
+            position_x = 10.0
+            position_y = 20.0
+            position_z = 30.0
+        "#;
+        let catalog = parse_and_validate(toml).expect("catalogue valide");
+        let states = catalog.into_states();
+        assert_eq!(states[0].floors[0].position, Some([10.0, 20.0, 30.0]));
+    }
+
+    #[test]
+    fn a_floor_missing_one_position_field_has_no_known_position() {
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 1000
+            travel_time_ms = 4000
+            [[elevator.floors]]
+            index = 0
+            position_x = 10.0
+            position_y = 20.0
+        "#;
+        let catalog = parse_and_validate(toml).expect("catalogue valide");
+        let states = catalog.into_states();
+        assert_eq!(
+            states[0].floors[0].position, None,
+            "position_z manquant => aucune position connue, jamais une position à moitié renseignée"
+        );
+    }
+
+    #[test]
+    fn a_floor_with_no_position_fields_has_no_known_position() {
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 1000
+            travel_time_ms = 4000
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).expect("catalogue valide");
+        let states = catalog.into_states();
+        assert_eq!(states[0].floors[0].position, None);
     }
 }
