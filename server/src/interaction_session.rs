@@ -62,20 +62,29 @@ impl SessionRegistry {
     /// les cas (succès ou erreur) sauf `NotFound` — une session ne se résout qu'une fois, c'est ce
     /// qui arbitre la course : le premier `resolve` gagnant retire la session, tout `resolve`
     /// suivant sur le même id tombe sur `NotFound`.
-    pub fn resolve(&mut self, session_id: SessionId, actor: u64) -> Result<InteractionSession, SessionError> {
-        let session = self.sessions.get(&session_id).ok_or(SessionError::NotFound)?;
+    pub fn resolve(
+        &mut self,
+        session_id: SessionId,
+        actor: u64,
+    ) -> Result<InteractionSession, SessionError> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or(SessionError::NotFound)?;
         if session.actor != actor {
             return Err(SessionError::NotOwner);
         }
-        Ok(self.sessions.remove(&session_id).expect("présence vérifiée juste au-dessus"))
+        Ok(self
+            .sessions
+            .remove(&session_id)
+            .expect("présence vérifiée juste au-dessus"))
     }
 
     /// Retire toute session ouverte depuis plus de `max_age` — appelé périodiquement (Task 5,
     /// câblage tick) pour ne jamais laisser une session fantôme accumuler indéfiniment (client qui
     /// ouvre une session puis se déconnecte sans jamais répondre).
     pub fn expire_stale(&mut self, max_age: Duration) {
-        self.sessions
-            .retain(|_, s| s.opened_at.elapsed() < max_age);
+        self.sessions.retain(|_, s| s.opened_at.elapsed() < max_age);
     }
 
     pub fn session_count(&self) -> usize {

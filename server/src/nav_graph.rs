@@ -77,11 +77,7 @@ impl NavGraph {
         self.positions
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                a.distance(&point)
-                    .partial_cmp(&b.distance(&point))
-                    .unwrap()
-            })
+            .min_by(|(_, a), (_, b)| a.distance(&point).partial_cmp(&b.distance(&point)).unwrap())
             .map(|(id, _)| id)
     }
 }
