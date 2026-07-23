@@ -58,7 +58,9 @@ Chaque couleur a un RÔLE strict :
 - **Vocal : logo micro SEUL, bas-centre**, visible **uniquement pendant le push-to-talk** — pas de
   texte « canal X parle » (décision 2026-07-22).
 - Vie/armure : barres natives (état-piloté serveur, spec `2026-07-22-ui-native-branchement-multi`).
-- **Roue des émotes** : différée — arrivera via le système de roues radiales (R34).
+- **« Roue d'action rapide »** (nom officiel du système de roues R34, émotes incluses) — touche
+  provisoire **G**. Indicateur vocal PTT = plaque chanfreinée + micro + égaliseur animé (lisible),
+  jamais de texte.
 
 ## 6. Application
 

@@ -117,13 +117,24 @@
   .ntag .r{font-family:"Share Tech Mono",monospace;font-size:.6em;letter-spacing:.18em;color:var(--amber);text-transform:uppercase;}
   .ntag .pin{width:0;height:0;margin:.2em auto 0;border-left:.35em solid transparent;border-right:.35em solid transparent;border-top:.4em solid rgba(75,227,247,.7);}
 
-  /* ---- TESSERA : vocal = LOGO MICRO seul, bas-centre, visible UNIQUEMENT pendant le
-     push-to-talk (décision 2026-07-22 — plus de texte "canal X parle"). Démo : maintiens V. ---- */
-  .voice{left:50%;bottom:6%;transform:translateX(-50%);display:none;}
-  .voice.talk{display:block;}
-  .voice svg{width:2.2em;height:2.2em;color:var(--cyan);filter:drop-shadow(0 0 10px rgba(75,227,247,.7));animation:pulse 1.2s infinite;}
-  @keyframes pulse{50%{opacity:.45;}}
-  @media (prefers-reduced-motion: reduce){.voice svg{animation:none;}}
+  /* ---- TESSERA : vocal pendant le push-to-talk, bas-centre — VERSION LISIBLE (retour Lucas :
+     le logo seul ne se voyait pas). Plaque sombre chanfreinée + micro + égaliseur animé. Pas de
+     texte. Démo : maintiens V. ---- */
+  .voice{left:50%;bottom:5.5%;transform:translateX(-50%);display:none;}
+  .voice.talk{display:flex;}
+  .voice{align-items:center;gap:.55em;padding:.5em .9em;background:rgba(6,12,15,.88);
+    border:1px solid var(--cyan);box-shadow:0 0 22px rgba(75,227,247,.45), inset 0 0 12px rgba(75,227,247,.12);
+    clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);}
+  .voice svg{width:2.4em;height:2.4em;color:var(--cyan);filter:drop-shadow(0 0 8px rgba(75,227,247,.8));}
+  .voice .eq{display:flex;align-items:flex-end;gap:3px;height:1.8em;}
+  .voice .eq i{width:4px;background:var(--cyan);box-shadow:0 0 6px rgba(75,227,247,.7);animation:eq .7s infinite ease-in-out;}
+  .voice .eq i:nth-child(1){height:35%;animation-delay:0s;}
+  .voice .eq i:nth-child(2){height:80%;animation-delay:.12s;}
+  .voice .eq i:nth-child(3){height:55%;animation-delay:.24s;}
+  .voice .eq i:nth-child(4){height:95%;animation-delay:.06s;}
+  .voice .eq i:nth-child(5){height:45%;animation-delay:.18s;}
+  @keyframes eq{50%{transform:scaleY(.35);}}
+  @media (prefers-reduced-motion: reduce){.voice .eq i{animation:none;}}
 
   /* ---- TESSERA : toast serveur haut-centre (bandeau DA à liseré cyan) ---- */
   .toast{left:50%;top:4%;transform:translateX(-50%);display:flex;align-items:center;gap:.7em;background:rgba(8,10,14,.85);border:1px solid rgba(75,227,247,.2);border-left:4px solid var(--cyan);padding:.45em 1em;}
@@ -166,6 +177,7 @@
     <div class="hud hints">
       <span class="hint">Dégainer l'arme <span class="k">ALT</span></span>
       <span class="hint">S'accroupir <span class="k">C</span></span>
+      <span class="hint tsr" title="R34 — Roue d'action rapide (touche provisoire)">Roue d'action rapide <span class="k">G</span></span>
     </div>
 
     <!-- TESSERA (ajouts) -->
@@ -175,8 +187,9 @@
     </div>
     <div class="hud srv tsr">TESSERA <b>dev-01</b> · PING <b>24MS</b> · <b>12/64</b></div>
     <div class="hud toast tsr"><span class="tx">Annonce serveur — event Kabuki dans 10 min</span></div>
-    <div class="hud voice tsr" id="voice" title="C11 — logo micro, visible pendant le push-to-talk (maintiens V pour la démo)">
+    <div class="hud voice tsr" id="voice" title="C11 — plaque micro + égaliseur, visible pendant le push-to-talk (maintiens V pour la démo)">
       <svg viewBox="0 0 24 24" fill="currentColor" aria-label="micro actif"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5.3-3a5.3 5.3 0 0 1-10.6 0H4.9a7.1 7.1 0 0 0 6.2 6.9V21h1.8v-3.1a7.1 7.1 0 0 0 6.2-6.9h-1.8z"/></svg>
+      <span class="eq"><i></i><i></i><i></i><i></i><i></i></span>
     </div>
     <div class="hud player tsr" style="left:38%;top:52%">
       <span class="ntag"><span class="n">Dex<b>_</b>Carter</span><br><span class="r">Corpo</span><span class="pin"></span></span>
@@ -191,7 +204,7 @@
   <div class="legend">
     <div class="lg nat"><b>Natif — intouché, données serveur</b>Vie/armure (C8), minimap, tracker, hex-widgets, consommables, hints. L'UI reste vanilla ; les PV deviennent serveur-autoritaires par l'état local. <b>Étoiles de police : retirées</b> (le heat serveur existe, sans affichage HUD).<span class="mono">état-piloté · spec 2026-07-22-ui-native-branchement-multi</span></div>
     <div class="lg"><b>Tessera — faim & soif (C14)</b>2 jauges verticales à gauche de la minimap (ambre = faim, aqua = soif). Seul élément de HUD permanent ajouté.<span class="mono">overlay ink · DA §5</span></div>
-    <div class="lg"><b>Tessera — social (C15/C11/C19)</b>Nametags (nom cyan + rôle ambre) au-dessus des joueurs ; vocal = <b>logo micro seul, bas-centre, visible pendant le push-to-talk</b> (maintiens V en démo) ; toasts serveur haut-centre. <b>Roue des émotes : plus tard</b> (système de roues R34).<span class="mono">worldui + overlay</span></div>
+    <div class="lg"><b>Tessera — social (C15/C11/C19)</b>Nametags (nom cyan + rôle ambre) au-dessus des joueurs ; vocal = <b>plaque micro + égaliseur animé, bas-centre, pendant le push-to-talk</b> (maintiens V en démo) ; toasts serveur haut-centre. <b>Roue d'action rapide</b> (émotes incluses) sur <b>G</b> (touche provisoire) — système de roues R34.<span class="mono">worldui + overlay</span></div>
     <div class="lg"><b>Tessera — micro-statut (C12/C13)</b>Serveur · ping · joueurs, en mono discret sous la vie. Debug-friendly, quasi invisible.<span class="mono">overlay ink</span></div>
   </div>
 
