@@ -60,26 +60,40 @@ impl CrowdPlacement {
         player_pos: (f32, f32, f32),
         first_id: ClientId,
     ) -> Vec<EntityStub> {
-        let mut stubs = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            let angle = i as f32 * GOLDEN_ANGLE;
-            // Rayon en √ pour une densité uniforme sur le disque (sinon tout se tasse au centre).
-            // `(i+0.5)/count` ∈ (0,1) mappé sur [inner, outer].
-            let t = ((i as f32 + 0.5) / count as f32).sqrt();
-            let radius = self.inner + (self.outer - self.inner) * t;
-            let x = player_pos.0 + radius * angle.cos();
-            let y = player_pos.1 + radius * angle.sin();
-            let yaw = angle; // dos au joueur (placeholder, cf. doc)
-            stubs.push(EntityStub::new_dormant(
-                first_id + i as ClientId,
-                EntityKind::Pedestrian,
-                archetype,
-                (x, y, player_pos.2),
-                yaw,
-                ProducerId::Crowd,
-            ));
-        }
-        stubs
+        self.positions(count, player_pos)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (x, y, z, yaw))| {
+                EntityStub::new_dormant(
+                    first_id + i as ClientId,
+                    EntityKind::Pedestrian,
+                    archetype,
+                    (x, y, z),
+                    yaw,
+                    ProducerId::Crowd,
+                )
+            })
+            .collect()
+    }
+
+    /// Le CŒUR géométrique du placement, exposé seul (position + yaw) pour les appelants qui posent
+    /// une pose sans construire de `EntityStub` — ex. `server_loop::tick_npcs` qui place un
+    /// `NpcRecord` existant. `produce` en est la version « qui emballe en stubs ». Retourne
+    /// `(x, y, z, yaw)` : `z` recopie celui du joueur, `yaw` = angle spiralé (dos au joueur,
+    /// placeholder jusqu'à la tangente de voie). Déterministe, aucun RNG.
+    pub fn positions(&self, count: u32, player_pos: (f32, f32, f32)) -> Vec<(f32, f32, f32, f32)> {
+        (0..count)
+            .map(|i| {
+                let angle = i as f32 * GOLDEN_ANGLE;
+                // Rayon en √ pour une densité uniforme sur le disque (sinon tout se tasse au centre).
+                // `(i+0.5)/count` ∈ (0,1) mappé sur [inner, outer].
+                let t = ((i as f32 + 0.5) / count as f32).sqrt();
+                let radius = self.inner + (self.outer - self.inner) * t;
+                let x = player_pos.0 + radius * angle.cos();
+                let y = player_pos.1 + radius * angle.sin();
+                (x, y, player_pos.2, angle)
+            })
+            .collect()
     }
 }
 

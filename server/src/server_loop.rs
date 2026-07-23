@@ -616,6 +616,31 @@ impl Server {
             &players_by_district,
             &existing_by_district,
         );
+        // PLACEMENT (incrément 2/3 du monde vivant) : avant, un spawn faisait `add_player` SANS
+        // `set_pose` — toute la foule apparaissait empilée à l'origine (0,0,0), loin du joueur. On
+        // place désormais chaque PNJ via `CrowdProducer` (semis en anneau autour d'un joueur réel).
+        // Positions des VRAIS joueurs (non-PNJ) de ce shard, ancre du placement.
+        let player_positions: Vec<(f32, f32, f32)> = self
+            .world
+            .player_ids()
+            .into_iter()
+            .filter(|id| !crate::world::is_npc_id(*id))
+            .filter_map(|id| self.world.pose_of(id).map(|p| (p.x, p.y, p.z)))
+            .collect();
+        // Pré-calcul des positions pour tous les spawns de ce tick (spirale déterministe autour du
+        // 1er joueur — mono-district, cf. simplification `"default"` ci-dessus ; le placement
+        // multi-joueur/par-voie est un raffinement différé). Anneau vide si aucun joueur (le
+        // director ne spawne alors pas, mais on retombe sur l'origine par sûreté).
+        let spawn_count = actions
+            .iter()
+            .filter(|a| matches!(a, crate::population_director::DirectorAction::Spawn { .. }))
+            .count() as u32;
+        let placement_anchor = player_positions.first().copied().unwrap_or((0.0, 0.0, 0.0));
+        let crowd_placements = crate::crowd_producer::CrowdPlacement::from_world_config(
+            &crate::stub::WorldConfig::crowd_defaults(),
+        )
+        .positions(spawn_count, placement_anchor);
+        let mut placement_cursor = 0usize;
         for action in actions {
             match action {
                 crate::population_director::DirectorAction::Spawn { archetype_id, .. } => {
@@ -625,6 +650,20 @@ impl Server {
                         .records
                         .insert(id, NpcRecord::new(id, archetype_id));
                     self.world.add_player(id);
+                    // Pose le PNJ à sa position d'anneau (au lieu de le laisser à l'origine).
+                    if let Some(&(x, y, z, yaw)) = crowd_placements.get(placement_cursor) {
+                        placement_cursor += 1;
+                        self.world.set_pose(
+                            id,
+                            Pose {
+                                x,
+                                y,
+                                z,
+                                yaw,
+                                ..Default::default()
+                            },
+                        );
+                    }
                 }
                 crate::population_director::DirectorAction::Despawn { excess, .. } => {
                     let to_remove: Vec<ClientId> = registry
@@ -2637,19 +2676,29 @@ mod tests {
         for _ in 0..5 {
             server.tick(&mut t);
         }
+        // Le PNJ naît désormais placé par `CrowdProducer` (anneau autour du joueur), plus à
+        // l'origine — donc on ne teste plus l'égalité à (0,0) mais l'IMMOBILITÉ : sa position doit
+        // être IDENTIQUE d'un tick à l'autre (sans graphe, `decide_destination` peut proposer une
+        // destination mais aucun chemin n'est planifiable, donc aucun déplacement). C'est le vrai
+        // sens du test (« never moves »), indépendant de l'endroit exact du spawn.
         let sent = t.take_sent(1);
-        let npc_position = sent.iter().find_map(|bytes| {
-            let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
-            let snap = env.msg_as_snapshot()?;
-            snap.npcs()?.iter().next().map(|n| {
-                let p = n.position().unwrap();
-                (crate::quant::dq_pos(p.x()), crate::quant::dq_pos(p.y()))
+        let positions: Vec<(f32, f32)> = sent
+            .iter()
+            .filter_map(|bytes| {
+                let env = flatbuffers::root::<ServerEnvelope>(bytes).ok()?;
+                let snap = env.msg_as_snapshot()?;
+                snap.npcs()?.iter().next().map(|n| {
+                    let p = n.position().unwrap();
+                    (crate::quant::dq_pos(p.x()), crate::quant::dq_pos(p.y()))
+                })
             })
-        });
-        assert_eq!(
-            npc_position,
-            Some((0.0, 0.0)),
-            "sans graphe de navigation, le PNJ reste à sa Pose par défaut (0,0)"
+            .collect();
+        assert!(!positions.is_empty(), "le PNJ doit apparaître sur le fil");
+        let first = positions[0];
+        assert!(
+            positions.iter().all(|&p| p == first),
+            "sans graphe de navigation, le PNJ ne bouge jamais de sa position de spawn \
+             (positions observées : {positions:?})"
         );
     }
 
