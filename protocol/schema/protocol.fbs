@@ -56,7 +56,11 @@ table PlayerActionReport { action:ubyte; param:uint; }
 table EmoteReport { emote:uint; start:bool; }
 
 // Rapport d'interaction client -> serveur : « le joueur a fait X sur l'entité #N » (spec modèle
-// serveur §1). kind : 0=Menace/attaque 1=Parle 2=Interagit 3=Mount 4=Unmount (extensible) ;
+// serveur §1). kind : 0=Menace/attaque 1=Parle 2=Interagit 3=Mount(véhicule) 4=Unmount(véhicule)
+//              5=Attaque 6=MountElevator 7=UnmountElevator (extensible) ; pour kind=6/7, `target`
+//              est un `elevator_id` (EntityID arbitraire, ADR 0012 §2.5), JAMAIS un id de la plage
+//              véhicule — le kind seul distingue les deux domaines, `elevator_id` n'a pas de plage
+//              réservée et peut numériquement chevaucher n'importe quel ClientId (ADR 0013) ;
 // param = contexte (dégâts, id dialogue…), sauf pour Mount/Unmount où param = index de siège désiré
 // (0 = conducteur/premier siège) — spec véhicules autonomes §3 : PlayerActionReport.param (32b) est
 // trop court pour un id d'entité 64b, le mount passe donc par EntityInteraction, dont `target:ulong`
