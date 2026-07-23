@@ -138,6 +138,12 @@ pub fn parse_and_validate(toml_str: &str) -> Result<ElevatorCatalog, ElevatorCat
         let id: u64 =
             e.id.parse()
                 .map_err(|_| ElevatorCatalogError::InvalidElevatorId(e.id.clone()))?;
+        if id == 0 {
+            // 0 est réservé à `crate::frame::WORLD_FRAME` (ADR 0013) : `FrameRegistry::set_transform`
+            // panique si on le lui passe. Un ascenseur ne peut donc jamais porter cet id — rejeté au
+            // parsing plutôt que de laisser un panic surprendre le premier tick après boot.
+            return Err(ElevatorCatalogError::InvalidElevatorId(e.id.clone()));
+        }
         if entries.iter().any(|(_, s)| s.elevator_id == id) {
             return Err(ElevatorCatalogError::DuplicateElevatorId(id));
         }
@@ -279,6 +285,16 @@ mod tests {
         assert!(
             matches!(err, ElevatorCatalogError::InvalidElevatorId(ref id) if id == "not-a-number")
         );
+    }
+
+    #[test]
+    fn an_elevator_id_of_zero_is_rejected() {
+        // 0 est réservé à crate::frame::WORLD_FRAME (ADR 0013) : FrameRegistry::set_transform
+        // panique dessus. Un ascenseur avec cet id ferait planter sync_elevator_frames au premier
+        // tick s'il avait une position d'étage connue — rejeté ici, avant que ça n'arrive.
+        let toml = VALID.replace(r#"id = "9939278384122899325""#, r#"id = "0""#);
+        let err = parse_and_validate(&toml).unwrap_err();
+        assert!(matches!(err, ElevatorCatalogError::InvalidElevatorId(ref id) if id == "0"));
     }
 
     #[test]
