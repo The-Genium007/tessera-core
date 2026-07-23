@@ -47,21 +47,15 @@ public class TesseraLobbyPopup extends InGamePopup {
     backdrop.SetOpacity(1.0); // PLEINEMENT OPAQUE (retour Lucas) — plus aucun résidu du monde
     backdrop.Reparent(root, 0);
 
-    // FOND DE MENU : COULEUR UNIE (retour Lucas 2026-07-23 : le dégradé rouge faisait « rouge en
-    // haut / transparent en bas »). On garde juste le voile opaque uni ci-dessus + une déco tech
-    // TRÈS faible dans un seul coin (référence native, jamais copiée) pour la texture, sans
-    // recréer de dégradé plein écran.
-    let fluffA: ref<inkImage> = new inkImage();
-    fluffA.SetName(n"bg_fluffA");
-    fluffA.SetAtlasResource(r"base\\gameplay\\gui\\common\\shapes\\atlas_shapes_sync.inkatlas");
-    fluffA.SetTexturePart(n"fluff_protocol1");
-    fluffA.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
-    fluffA.BindProperty(n"tintColor", n"MainColors.Red");
-    fluffA.SetOpacity(0.05);
-    fluffA.SetSize(820.0, 820.0);
-    fluffA.SetAnchor(inkEAnchor.TopRight);
-    fluffA.SetAnchorPoint(Vector2(1.0, 0.0));
-    fluffA.Reparent(root, 1);
+    // FOND DE MENU ANIMÉ — reconstruction du « fluff » des menus natifs (retour Lucas : reprendre
+    // le fond animé de l'inventaire). La sonde ink (TesseraInkProbe, 2026-07-23) a montré que ces
+    // décos (Left_lines/Right_lines : `side_element` empilés + colonnes binaires ; bottom fluff)
+    // vivent DANS l'arbre du hub-menu, pas dans un .inkwidget autonome → pas de SpawnFromExternal.
+    // On les RECONSTRUIT ici en primitives (rectangles + texte 0/1) — aucune dépendance d'atlas,
+    // donc rendu garanti — animées en boucle (opacité ping-pong) pour l'effet « menu vivant ».
+    this.BuildSideFluff(root, true);   // barres animées + binaire, bord gauche (rouge)
+    this.BuildSideFluff(root, false);  // bord droit (cyan)
+    this.BuildBottomFluff(root);       // bande de segments animés en bas
 
     // Conteneur plus haut pour aérer (retour Lucas : le bouton mangeait les infos/l'état).
     this.m_container.SetHeight(1010.0);
@@ -134,6 +128,112 @@ public class TesseraLobbyPopup extends InGamePopup {
     this.m_connect.GetRootWidget().SetMargin(inkMargin(0.0, 34.0, 0.0, 0.0));
     this.m_connect.GetRootWidget().SetHAlign(inkEHorizontalAlign.Left);
     this.m_connect.RegisterToCallback(n"OnBtnClick", this, n"OnConnect");
+  }
+
+  // Joue une animation d'opacité en boucle (ping-pong infini) sur un widget — donne l'effet
+  // « vivant » du fluff natif sans dépendre d'un atlas. API ink standard vérifiée au dump RTTI.
+  private func LoopOpacity(target: wref<inkWidget>, from: Float, to: Float, dur: Float) {
+    let def: ref<inkAnimDef> = new inkAnimDef();
+    let a: ref<inkAnimTransparency> = new inkAnimTransparency();
+    a.SetStartTransparency(from);
+    a.SetEndTransparency(to);
+    a.SetDuration(dur);
+    a.SetType(inkanimInterpolationType.Linear);
+    a.SetMode(inkanimInterpolationMode.EasyIn);
+    def.AddInterpolator(a);
+    let opts: inkAnimOptions;
+    opts.loopType = inkanimLoopType.PingPong;
+    opts.loopInfinite = true;
+    target.PlayAnimationWithOptions(def, opts);
+  }
+
+  // Colonne de « fluff » sur un bord : pile de barres fines de largeurs variées (façon
+  // `side_element`) + une colonne binaire, animée en boucle. Rouge à gauche, cyan à droite (DA).
+  private func BuildSideFluff(root: wref<inkCompoundWidget>, isLeft: Bool) {
+    let col: ref<inkVerticalPanel> = new inkVerticalPanel();
+    col.SetChildMargin(inkMargin(0.0, 7.0, 0.0, 7.0));
+    if isLeft {
+      col.SetName(n"fluff_left");
+      col.SetAnchor(inkEAnchor.LeftFillVerticaly);
+      col.SetMargin(inkMargin(34.0, 150.0, 0.0, 150.0));
+      col.SetHAlign(inkEHorizontalAlign.Left);
+    } else {
+      col.SetName(n"fluff_right");
+      col.SetAnchor(inkEAnchor.RightFillVerticaly);
+      col.SetMargin(inkMargin(0.0, 150.0, 34.0, 150.0));
+      col.SetHAlign(inkEHorizontalAlign.Right);
+    }
+    col.Reparent(root, 1);
+
+    let i: Int32 = 0;
+    while i < 13 {
+      let bar: ref<inkRectangle> = new inkRectangle();
+      bar.SetName(n"bar");
+      bar.SetSize(48.0 + Cast<Float>((i * 41) % 66), 3.0);
+      bar.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
+      if isLeft {
+        bar.BindProperty(n"tintColor", n"MainColors.Red");
+        bar.SetHAlign(inkEHorizontalAlign.Left);
+      } else {
+        bar.BindProperty(n"tintColor", n"MainColors.Blue");
+        bar.SetHAlign(inkEHorizontalAlign.Right);
+      }
+      bar.SetOpacity(0.85);
+      bar.Reparent(col);
+      i += 1;
+    }
+    this.LoopOpacity(col, 0.28, 0.72, 1.3);
+
+    // Colonne binaire (texte 0/1) sous les barres.
+    let bin: String = "";
+    let k: Int32 = 0;
+    while k < 18 {
+      if (k * 7) % 3 == 0 { bin = bin + "0\n"; } else { bin = bin + "1\n"; }
+      k += 1;
+    }
+    let bits: ref<inkText> = new inkText();
+    bits.SetName(n"fluff_bits");
+    bits.SetFontFamily("base\\gameplay\\gui\\fonts\\raj\\raj.inkfontfamily");
+    bits.SetFontStyle(n"Medium");
+    bits.SetFontSize(16);
+    bits.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
+    if isLeft {
+      bits.BindProperty(n"tintColor", n"MainColors.Red");
+      bits.SetAnchor(inkEAnchor.BottomLeft);
+      bits.SetAnchorPoint(Vector2(0.0, 1.0));
+      bits.SetMargin(inkMargin(34.0, 0.0, 0.0, 140.0));
+    } else {
+      bits.BindProperty(n"tintColor", n"MainColors.Blue");
+      bits.SetAnchor(inkEAnchor.BottomRight);
+      bits.SetAnchorPoint(Vector2(1.0, 1.0));
+      bits.SetMargin(inkMargin(0.0, 0.0, 34.0, 140.0));
+    }
+    bits.SetText(bin);
+    bits.Reparent(root, 1);
+    this.LoopOpacity(bits, 0.12, 0.4, 2.1);
+  }
+
+  // Bande de segments animés en bas (façon frise de fluff du bas des menus).
+  private func BuildBottomFluff(root: wref<inkCompoundWidget>) {
+    let rowp: ref<inkHorizontalPanel> = new inkHorizontalPanel();
+    rowp.SetName(n"fluff_bottom");
+    rowp.SetAnchor(inkEAnchor.BottomFillHorizontaly);
+    rowp.SetMargin(inkMargin(90.0, 0.0, 90.0, 30.0));
+    rowp.SetChildMargin(inkMargin(0.0, 0.0, 10.0, 0.0));
+    rowp.SetHAlign(inkEHorizontalAlign.Left);
+    rowp.Reparent(root, 1);
+    let i: Int32 = 0;
+    while i < 24 {
+      let seg: ref<inkRectangle> = new inkRectangle();
+      seg.SetName(n"seg");
+      seg.SetSize(16.0, 3.0);
+      seg.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
+      seg.BindProperty(n"tintColor", n"MainColors.Red");
+      seg.SetOpacity(0.5);
+      seg.Reparent(rowp);
+      i += 1;
+    }
+    this.LoopOpacity(rowp, 0.2, 0.55, 1.8);
   }
 
   // Carte de personnage : canvas + cell_bg (fond nine-slice) + cell_fg (cadre, re-teinté à la
