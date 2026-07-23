@@ -18,4 +18,15 @@ registerHotkey("TesseraUiKitDemo", "Tessera UiKit : panneau démo", function()
   player:Tessera_ShowUiKitDemo()
 end)
 
-print("[TesseraUiKit] hotkey enregistré")
+-- Lobby d'arrivée v1 (UiKitLobby.reds) — écran chronologiquement premier du parcours joueur.
+registerHotkey("TesseraUiKitLobby", "Tessera UiKit : lobby d'arrivée", function()
+  local player = Game.GetPlayer()
+  if player == nil then
+    print("[TesseraUiKit] pas de joueur (menu principal ?) — entre en jeu d'abord")
+    return
+  end
+  print("[TesseraUiKit] hotkey pressé — appel de Tessera_ShowLobby")
+  player:Tessera_ShowLobby()
+end)
+
+print("[TesseraUiKit] hotkeys enregistrés")

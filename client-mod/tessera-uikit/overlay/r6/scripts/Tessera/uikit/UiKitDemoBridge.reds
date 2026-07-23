@@ -40,3 +40,14 @@ public func Tessera_ShowUiKitDemo() -> Void {
     FTLog("[Tessera/UiKit] contrôleur non capturé — ouvre/ferme le menu pause une fois, puis réessaie");
   }
 }
+
+// Appelée depuis CET. Ouvre le LOBBY D'ARRIVÉE v1 (UiKitLobby.reds) — même mécanisme de requester.
+@addMethod(PlayerPuppet)
+public func Tessera_ShowLobby() -> Void {
+  if IsDefined(this.m_tesseraUiKitController) {
+    TesseraLobbyPopup.Show(this.m_tesseraUiKitController);
+    FTLog("[Tessera/UiKit] lobby d'arrivée ouvert");
+  } else {
+    FTLog("[Tessera/UiKit] contrôleur non capturé — ouvre/ferme le menu pause une fois, puis réessaie");
+  }
+}
