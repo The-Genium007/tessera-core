@@ -106,14 +106,20 @@
   .srv{left:2.4%;top:calc(4.5% + 2.6em);font-family:"Share Tech Mono",monospace;font-size:.68em;color:var(--dim);letter-spacing:.12em;}
   .srv b{color:var(--cyan);font-weight:400;}
 
-  /* ---- TESSERA : nametags sur joueurs distants ---- */
+  /* ---- TESSERA : nametags — NOM SEUL (pas de rôle), INVISIBLE tant que le joueur ne s'est pas
+     PRÉSENTÉ à toi ; une fois présenté → visible pour toujours (preuve qu'on s'est croisés).
+     Décision Lucas 2026-07-22. ---- */
   .player{position:absolute;display:grid;place-items:center;}
   .player .sil{width:1.6em;height:4.2em;background:rgba(0,0,0,.55);clip-path:polygon(30% 0,70% 0,80% 18%,72% 22%,88% 55%,60% 55%,60% 100%,40% 100%,40% 55%,12% 55%,28% 22%,20% 18%);}
   .ntag{position:absolute;bottom:110%;text-align:center;white-space:nowrap;}
   .ntag .n{font-weight:600;font-size:.92em;color:var(--white);text-shadow:0 1px 3px #000;letter-spacing:.05em;}
   .ntag .n b{color:var(--cyan);font-weight:600;}
-  .ntag .r{font-family:"Share Tech Mono",monospace;font-size:.6em;letter-spacing:.18em;color:var(--amber);text-transform:uppercase;}
   .ntag .pin{width:0;height:0;margin:.2em auto 0;border-left:.35em solid transparent;border-right:.35em solid transparent;border-top:.4em solid rgba(75,227,247,.7);}
+  /* Interactions de proximité avec un joueur (3 pour l'instant) — liste façon choix de dialogue. */
+  .meet{position:absolute;display:flex;flex-direction:column;gap:2px;font-size:.8em;}
+  .meet .o{display:flex;align-items:center;gap:.5em;padding:.24em .6em;background:rgba(6,10,14,.85);border-left:2px solid transparent;color:var(--readable);}
+  .meet .o.on{border-left-color:var(--cyan);color:var(--cyan);background:rgba(75,227,247,.08);}
+  .meet .k2{font-family:"Share Tech Mono",monospace;border:1px solid var(--cyan);color:var(--cyan);font-size:.72em;padding:0 .35em;}
 
   /* ---- TESSERA : vocal pendant le push-to-talk, bas-centre — sans bordure ni fond, PETIT logo
      micro entouré d'un ÉGALISEUR CIRCULAIRE (anneau de barres qui pulsent). Pas de texte.
@@ -121,15 +127,23 @@
      retombait sur ses 300px par défaut (bug "logo géant" corrigé ici). ---- */
   .voice{left:50%;bottom:5%;transform:translateX(-50%);display:none;}
   .voice.talk{display:block;}
-  .voice .wrap{display:block;position:relative;width:2.6em;height:2.6em;}
-  .voice svg{position:absolute;left:33%;top:33%;width:34%;height:34%;color:var(--cyan);filter:drop-shadow(0 0 6px rgba(75,227,247,.6));}
-  .voice .ring{position:absolute;inset:0;}
-  .voice .ring b{position:absolute;left:calc(50% - 1px);top:50%;width:2px;height:.42em;
-    background:var(--cyan);box-shadow:0 0 4px rgba(75,227,247,.6);
-    transform:rotate(var(--a)) translateY(-1.12em);
-    animation:ringp .9s infinite ease-in-out;animation-delay:var(--d);}
-  @keyframes ringp{50%{opacity:.15;height:.26em;}}
-  @media (prefers-reduced-motion: reduce){.voice .ring b{animation:none;}}
+  /* Cadre CARRÉ chanfreiné (DA) dont les BORDURES réagissent comme un égaliseur : 8 segments
+     d'arête (2 par côté) qui pulsent en épaisseur/opacité, en décalé. Micro petit au centre. */
+  .voice .wrap{display:block;position:relative;width:2.4em;height:2.4em;
+    clip-path:polygon(6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%,0 6px);
+    border:1px solid rgba(75,227,247,.30);}
+  .voice svg{position:absolute;left:31%;top:31%;width:38%;height:38%;color:var(--cyan);filter:drop-shadow(0 0 6px rgba(75,227,247,.6));}
+  .voice .seg{position:absolute;background:var(--cyan);box-shadow:0 0 5px rgba(75,227,247,.7);
+    animation:eqb .8s infinite ease-in-out;animation-delay:var(--d);}
+  .voice .seg.h{height:2px;width:38%;}
+  .voice .seg.v{width:2px;height:38%;}
+  .voice .s1{top:0;left:8%;}   .voice .s2{top:0;right:8%;}
+  .voice .s3{bottom:0;left:8%;}.voice .s4{bottom:0;right:8%;}
+  .voice .s5{left:0;top:8%;}   .voice .s6{left:0;bottom:8%;}
+  .voice .s7{right:0;top:8%;}  .voice .s8{right:0;bottom:8%;}
+  .voice .seg.h{transform-origin:center;} .voice .seg.v{transform-origin:center;}
+  @keyframes eqb{50%{opacity:.2;transform:scale(.55);}}
+  @media (prefers-reduced-motion: reduce){.voice .seg{animation:none;}}
 
   /* ---- TESSERA : toast serveur haut-centre (bandeau DA à liseré cyan) ---- */
   .toast{left:50%;top:4%;transform:translateX(-50%);display:flex;align-items:center;gap:.7em;background:rgba(8,10,14,.85);border:1px solid rgba(75,227,247,.2);border-left:4px solid var(--cyan);padding:.45em 1em;}
@@ -186,26 +200,35 @@
     </div>
     <div class="hud srv tsr">TESSERA <b>dev-01</b> · PING <b>24MS</b> · <b>12/64</b></div>
     <div class="hud toast tsr"><span class="tx">Annonce serveur — event Kabuki dans 10 min</span></div>
-    <div class="hud voice talk tsr" id="voice" title="C11 — petit micro + égaliseur circulaire autour, visible pendant le push-to-talk (bouton ou touche V pour simuler)">
+    <div class="hud voice talk tsr" id="voice" title="C11 — petit micro dans un cadre chanfreiné dont les bordures pulsent en égaliseur (bouton ou touche V pour simuler)">
       <span class="wrap">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-label="micro actif"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5.3-3a5.3 5.3 0 0 1-10.6 0H4.9a7.1 7.1 0 0 0 6.2 6.9V21h1.8v-3.1a7.1 7.1 0 0 0 6.2-6.9h-1.8z"/></svg>
-        <span class="ring" id="voiceRing"></span>
+        <span class="seg h s1" style="--d:0s"></span><span class="seg h s2" style="--d:.2s"></span>
+        <span class="seg h s3" style="--d:.4s"></span><span class="seg h s4" style="--d:.1s"></span>
+        <span class="seg v s5" style="--d:.3s"></span><span class="seg v s6" style="--d:.5s"></span>
+        <span class="seg v s7" style="--d:.15s"></span><span class="seg v s8" style="--d:.35s"></span>
       </span>
     </div>
-    <div class="hud player tsr" style="left:38%;top:52%">
-      <span class="ntag"><span class="n">Dex<b>_</b>Carter</span><br><span class="r">Corpo</span><span class="pin"></span></span>
+    <!-- Joueur CONNU (s'est déjà présenté à nous) : nom seul, rien d'autre. -->
+    <div class="hud player tsr" style="left:38%;top:52%" title="C15 — nom visible : ce joueur s'est déjà présenté (persistant)">
+      <span class="ntag"><span class="n">Dex<b>_</b>Carter</span><span class="pin"></span></span>
       <span class="sil"></span>
     </div>
-    <div class="hud player tsr" style="left:57%;top:56%;font-size:.8em">
-      <span class="ntag"><span class="n">Sana<b>_</b>R.</span><br><span class="r">Médic</span><span class="pin"></span></span>
+    <!-- Joueur INCONNU (jamais présenté) : AUCUN nametag — et à l'approche, les 3 interactions. -->
+    <div class="hud player tsr" style="left:57%;top:56%;font-size:.8em" title="C15 — inconnu : pas de nom tant qu'il ne s'est pas présenté">
       <span class="sil"></span>
+    </div>
+    <div class="hud meet tsr" style="left:62%;top:57%" title="Interactions de proximité (3 pour l'instant)">
+      <span class="o on"><span class="k2">E</span> Se présenter</span>
+      <span class="o"><span class="k2">↑E</span> Se présenter à tous</span>
+      <span class="o"><span class="k2">R</span> Échanger</span>
     </div>
   </div>
 
   <div class="legend">
     <div class="lg nat"><b>Natif — intouché, données serveur</b>Vie/armure (C8), minimap, hex-widgets, consommables, hints. L'UI reste vanilla ; les PV deviennent serveur-autoritaires par l'état local. <b>Retirés : étoiles de police</b> (heat serveur sans affichage) <b>et tracker de quêtes</b> (pas de quêtes en RP — tracker natif masqué).<span class="mono">état-piloté · spec 2026-07-22-ui-native-branchement-multi</span></div>
     <div class="lg"><b>Tessera — faim & soif (C14)</b>2 jauges verticales à gauche de la minimap (ambre = faim, aqua = soif). Seul élément de HUD permanent ajouté.<span class="mono">overlay ink · DA §5</span></div>
-    <div class="lg"><b>Tessera — social (C15/C11/C19)</b>Nametags (nom cyan + rôle ambre) au-dessus des joueurs ; vocal = <b>logo micro seul (égaliseur intégré dans la capsule), sans bordure ni fond, bas-centre, pendant le push-to-talk</b> ; toasts serveur haut-centre. <b>Roue d'action rapide</b> (émotes incluses) sur <b>G</b> (touche provisoire) — système de roues R34.<span class="mono">worldui + overlay</span></div>
+    <div class="lg"><b>Tessera — social (C15/C11/C19)</b>Nametags = <b>NOM SEUL</b>, invisible tant que le joueur ne s'est pas <b>présenté</b> à toi ; une fois présenté → visible pour toujours. À l'approche d'un inconnu, 3 interactions : <b>Se présenter · Se présenter à tous · Échanger</b>. Vocal = petit micro dans un <b>cadre chanfreiné dont les bordures pulsent en égaliseur</b>. Toasts haut-centre. <b>Roue d'action rapide</b> sur <b>G</b>.<span class="mono">worldui + overlay + registre serveur des présentations</span></div>
     <div class="lg"><b>Tessera — micro-statut (C12/C13)</b>Serveur · ping · joueurs, en mono discret sous la vie. Debug-friendly, quasi invisible.<span class="mono">overlay ink</span></div>
   </div>
 
@@ -224,14 +247,6 @@
     ptt.textContent = on ? 'Micro PTT : appuyé' : 'Micro PTT : relâché';
   }
   ptt.addEventListener('click', () => setPtt(!voice.classList.contains('talk')));
-  // Égaliseur circulaire : 12 barres autour du micro, pulsation décalée.
-  const ring = document.getElementById('voiceRing');
-  for (let i = 0; i < 12; i++) {
-    const b = document.createElement('b');
-    b.style.setProperty('--a', (i * 30) + 'deg');
-    b.style.setProperty('--d', (i * 0.07) + 's');
-    ring.appendChild(b);
-  }
   document.addEventListener('keydown', e => { if (e.key === 'v' || e.key === 'V') setPtt(true); });
   document.addEventListener('keyup',   e => { if (e.key === 'v' || e.key === 'V') setPtt(false); });
 </script>
