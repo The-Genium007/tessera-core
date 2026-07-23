@@ -105,6 +105,12 @@ pub struct Server {
     /// hystérésis à chaque tick via `DegradationPolicy::tier_for_p99`. Défaut `Normal` : un `Server`
     /// qui vient de démarrer (aucun tick mesuré) n'est jamais dégradé par défaut.
     degradation_tier: crate::degradation::DegradationTier,
+    /// Repères mobiles actifs (ADR 0013) — aujourd'hui uniquement les cabines d'ascenseur ayant
+    /// une position d'étage connue (`FloorSpec.position`). Tenu à jour à chaque tick par
+    /// `sync_elevator_frames`, juste après `tick_elevators`. Un `Server` sans ascenseur (ou dont
+    /// aucun étage n'a de position renseignée) a un registre vide — c'est un état normal, pas
+    /// `Option` : `FrameRegistry::new()` ne coûte rien et il n'y a qu'un seul état "aucun repère".
+    frame_registry: crate::frame::FrameRegistry,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -168,6 +174,7 @@ impl Server {
             pending_combat_events: Vec::new(),
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
+            frame_registry: crate::frame::FrameRegistry::new(),
         }
     }
 
@@ -196,6 +203,7 @@ impl Server {
             pending_combat_events: Vec::new(),
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
+            frame_registry: crate::frame::FrameRegistry::new(),
         }
     }
 
@@ -235,6 +243,7 @@ impl Server {
             pending_combat_events: Vec::new(),
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
+            frame_registry: crate::frame::FrameRegistry::new(),
         }
     }
 
@@ -307,6 +316,7 @@ impl Server {
             pending_combat_events: Vec::new(),
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
+            frame_registry: crate::frame::FrameRegistry::new(),
         }
     }
 
@@ -342,6 +352,7 @@ impl Server {
             pending_combat_events: Vec::new(),
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
+            frame_registry: crate::frame::FrameRegistry::new(),
         }
     }
 
@@ -486,6 +497,34 @@ impl Server {
             }
         }
         to_broadcast
+    }
+
+    /// Tient `frame_registry` à jour depuis l'état courant des ascenseurs (ADR 0013). Pose la
+    /// transformée d'un ascenseur si `current_frame_transform` en connaît une, la retire sinon (règle
+    /// de repli explicite : mieux vaut "repère inconnu" qu'une position monde périmée/fausse). Appelé
+    /// à chaque tick, après `tick_elevators` (qui a fait avancer l'état des cabines pour CE tick).
+    fn sync_elevator_frames(&mut self, now_tick: u64) {
+        let Some(registry) = &self.elevator_registry else {
+            return;
+        };
+        for state in &registry.states {
+            match state.current_frame_transform(now_tick) {
+                Some(transform) => self
+                    .frame_registry
+                    .set_transform(state.elevator_id, transform),
+                None => self.frame_registry.remove_transform(state.elevator_id),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_elevator_frames_for_test(&mut self, now_tick: u64) {
+        self.sync_elevator_frames(now_tick);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn frame_registry_for_test(&self) -> &crate::frame::FrameRegistry {
+        &self.frame_registry
     }
 
     /// État courant de TOUTES les cabines — à envoyer à un client qui vient d'arriver (connexion,
@@ -892,6 +931,7 @@ impl Server {
                 transport.send(id, &bytes);
             }
         }
+        self.sync_elevator_frames(self.world.tick());
         // Diffusion immédiate d'un appel accepté en pleine course (finding revue de branche
         // finale, cf. doc de `pending_elevator_broadcasts`) : un appel qui ajoute un étage SANS
         // changer `target_floor`/`movement_state` de la cabine (déjà en route ailleurs) n'est vu
@@ -1105,6 +1145,34 @@ impl Server {
                                     }
                                 }
                             }
+                        }
+                    } else if ei.kind() == 6 {
+                        // Nouveau (câblage mounting ascenseur, ADR 0013) : kind=6=MountElevator.
+                        // `target` est un elevator_id (EntityID arbitraire, ADR 0012 §2.5), jamais
+                        // un id de véhicule — distinct de kind=3 par construction (le kind seul
+                        // désambiguïse, cf. Global Constraints de ce plan). Un elevator_id inconnu
+                        // du registre est ignoré silencieusement : le serveur ne fabrique jamais
+                        // de repère sur la foi d'un message client (même garde que
+                        // `handle_elevator_call`).
+                        let known = self
+                            .elevator_registry
+                            .as_ref()
+                            .is_some_and(|r| r.states.iter().any(|s| s.elevator_id == ei.target()));
+                        if known {
+                            if let Some(mut pose) = self.world.pose_of(from) {
+                                pose.frame = ei.target();
+                                self.world.set_pose(from, pose);
+                            }
+                        }
+                    } else if ei.kind() == 7 {
+                        // kind=7=UnmountElevator : reposer le joueur dans le repère monde. Aucune
+                        // vérification d'appartenance nécessaire ici (contrairement au Mount) —
+                        // redescendre vers WORLD_FRAME est toujours sûr, même si le joueur n'était
+                        // pas réellement monté (no-op silencieux, même esprit que
+                        // `VehicleRecord::unmount` sur un non-passager).
+                        if let Some(mut pose) = self.world.pose_of(from) {
+                            pose.frame = crate::frame::WORLD_FRAME;
+                            self.world.set_pose(from, pose);
                         }
                     }
                 }
@@ -3045,6 +3113,58 @@ mod tests {
         assert_eq!(last.movement_state(), 1, "1 = MovingUp");
     }
 
+    #[test]
+    fn sync_elevator_frames_populates_the_frame_registry_when_the_elevator_has_known_positions() {
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+            position_x = 5.0
+            position_y = 6.0
+            position_z = 7.0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+        server.sync_elevator_frames_for_test(0);
+        let transform = server
+            .frame_registry_for_test()
+            .transform_of(100)
+            .expect("le repère 100 doit être connu après synchronisation");
+        assert_eq!(transform.position, [5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn sync_elevator_frames_does_not_populate_the_registry_for_an_elevator_without_known_positions()
+    {
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+        server.sync_elevator_frames_for_test(0);
+        assert_eq!(
+            server.frame_registry_for_test().transform_of(100),
+            None,
+            "un ascenseur sans position connue ne doit jamais peupler le FrameRegistry"
+        );
+    }
+
     /// Encode un `ClientEnvelope::ElevatorCall` — même patron que `encode_position` juste
     /// au-dessus, pour injecter un VRAI message d'appel via le transport plutôt que d'appeler
     /// `Server::handle_elevator_call` directement (nécessaire ici : le fix testé vit dans le
@@ -3300,6 +3420,110 @@ mod tests {
             saw_elevator,
             "le même Server doit AUSSI diffuser l'état de l'ascenseur configuré — les deux \
              registres doivent coexister, pas s'exclure"
+        );
+    }
+
+    #[test]
+    fn mounting_a_known_elevator_sets_the_player_pose_frame() {
+        // Task 5 : kind=6=MountElevator pose Pose.frame = elevator_id, mais UNIQUEMENT si
+        // l'elevator_id est connu du registre (même garde que handle_elevator_call — le serveur ne
+        // fabrique jamais de repère sur la foi d'un message client).
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 6, 0),
+        });
+        server.tick(&mut t);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(pose.frame, 100);
+    }
+
+    #[test]
+    fn unmounting_resets_the_player_pose_frame_to_world() {
+        // kind=7=UnmountElevator repose Pose.frame = WORLD_FRAME inconditionnellement.
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 6, 0),
+        });
+        server.tick(&mut t);
+        assert_eq!(
+            server.world.pose_of(1).unwrap().frame,
+            100,
+            "précondition: monté"
+        );
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 7, 0),
+        });
+        server.tick(&mut t);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(pose.frame, crate::frame::WORLD_FRAME);
+    }
+
+    #[test]
+    fn mounting_an_unknown_elevator_id_is_silently_ignored() {
+        // Aucun elevator_registry configuré (Server::new) — un elevator_id ne correspondant à
+        // AUCUN ascenseur connu ne doit jamais monter le joueur dans un repère fictif.
+        let mut server = Server::new(50.0);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(999, 6, 0),
+        });
+        server.tick(&mut t);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(
+            pose.frame,
+            crate::frame::WORLD_FRAME,
+            "un elevator_id inconnu ne doit jamais monter le joueur dans un repère fictif"
         );
     }
 

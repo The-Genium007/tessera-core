@@ -32,6 +32,16 @@ struct RawFloor {
     hidden: bool,
     #[serde(default)]
     inactive: bool,
+    /// Position monde de la porte d'étage — TROIS champs TOML séparés (pas un tableau) pour rester
+    /// facile à écrire à la main dans un catalogue d'opérateur. `Option` : un catalogue existant
+    /// sans ces champs continue de parser exactement comme avant ce plan (`serde(default)` produit
+    /// `None` pour chacun, combinés en `None` par `parse_and_validate`, Step 4).
+    #[serde(default)]
+    position_x: Option<f32>,
+    #[serde(default)]
+    position_y: Option<f32>,
+    #[serde(default)]
+    position_z: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +138,12 @@ pub fn parse_and_validate(toml_str: &str) -> Result<ElevatorCatalog, ElevatorCat
         let id: u64 =
             e.id.parse()
                 .map_err(|_| ElevatorCatalogError::InvalidElevatorId(e.id.clone()))?;
+        if id == 0 {
+            // 0 est réservé à `crate::frame::WORLD_FRAME` (ADR 0013) : `FrameRegistry::set_transform`
+            // panique si on le lui passe. Un ascenseur ne peut donc jamais porter cet id — rejeté au
+            // parsing plutôt que de laisser un panic surprendre le premier tick après boot.
+            return Err(ElevatorCatalogError::InvalidElevatorId(e.id.clone()));
+        }
         if entries.iter().any(|(_, s)| s.elevator_id == id) {
             return Err(ElevatorCatalogError::DuplicateElevatorId(id));
         }
@@ -146,6 +162,10 @@ pub fn parse_and_validate(toml_str: &str) -> Result<ElevatorCatalog, ElevatorCat
                 index: f.index,
                 hidden: f.hidden,
                 inactive: f.inactive,
+                position: match (f.position_x, f.position_y, f.position_z) {
+                    (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                    _ => None,
+                },
             });
         }
         if !floors.iter().any(|f| f.index == e.start_floor) {
@@ -268,6 +288,16 @@ mod tests {
     }
 
     #[test]
+    fn an_elevator_id_of_zero_is_rejected() {
+        // 0 est réservé à crate::frame::WORLD_FRAME (ADR 0013) : FrameRegistry::set_transform
+        // panique dessus. Un ascenseur avec cet id ferait planter sync_elevator_frames au premier
+        // tick s'il avait une position d'étage connue — rejeté ici, avant que ça n'arrive.
+        let toml = VALID.replace(r#"id = "9939278384122899325""#, r#"id = "0""#);
+        let err = parse_and_validate(&toml).unwrap_err();
+        assert!(matches!(err, ElevatorCatalogError::InvalidElevatorId(ref id) if id == "0"));
+    }
+
+    #[test]
     fn malformed_toml_is_rejected_with_a_parse_error() {
         let err = parse_and_validate("not valid toml {{{").unwrap_err();
         assert!(matches!(err, ElevatorCatalogError::Parse(_)));
@@ -284,5 +314,67 @@ mod tests {
             Some("megabuilding-h10-little-china"),
             "le vrai EntityID mesuré en jeu doit survivre à l'aller-retour depuis le fichier livré"
         );
+    }
+
+    #[test]
+    fn a_floor_with_all_three_position_fields_parses_a_known_position() {
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 1000
+            travel_time_ms = 4000
+            [[elevator.floors]]
+            index = 0
+            position_x = 10.0
+            position_y = 20.0
+            position_z = 30.0
+        "#;
+        let catalog = parse_and_validate(toml).expect("catalogue valide");
+        let states = catalog.into_states();
+        assert_eq!(states[0].floors[0].position, Some([10.0, 20.0, 30.0]));
+    }
+
+    #[test]
+    fn a_floor_missing_one_position_field_has_no_known_position() {
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 1000
+            travel_time_ms = 4000
+            [[elevator.floors]]
+            index = 0
+            position_x = 10.0
+            position_y = 20.0
+        "#;
+        let catalog = parse_and_validate(toml).expect("catalogue valide");
+        let states = catalog.into_states();
+        assert_eq!(
+            states[0].floors[0].position, None,
+            "position_z manquant => aucune position connue, jamais une position à moitié renseignée"
+        );
+    }
+
+    #[test]
+    fn a_floor_with_no_position_fields_has_no_known_position() {
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 1000
+            travel_time_ms = 4000
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).expect("catalogue valide");
+        let states = catalog.into_states();
+        assert_eq!(states[0].floors[0].position, None);
     }
 }

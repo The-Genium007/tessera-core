@@ -16,6 +16,11 @@ pub struct Pose {
     pub move_dir: u8,
     pub flags: u8,
     pub sustained: u32,
+    /// Repère dans lequel `x`/`y`/`z` sont exprimés (ADR 0013). `WORLD_FRAME` (0, le défaut
+    /// `Default`) = position monde directe. Un repère non-nul (ex. cabine d'ascenseur) exige de
+    /// résoudre via `FrameRegistry::world_position` avant toute comparaison de distance monde —
+    /// voir `snapshot_for_resolved`.
+    pub frame: crate::frame::FrameId,
 }
 
 /// Coordonnée de cellule de grille (division entière de x/y par la taille de cellule).
@@ -186,6 +191,50 @@ impl World {
             }
         }
         result
+    }
+
+    /// Comme `snapshot_for`, mais résout chaque pose à travers son `frame` avant de calculer la
+    /// distance et de la retourner — jamais un mélange d'offset local et de position monde (ADR 0013).
+    /// Un passager dont le repère est inconnu de `frames` est OMIS du résultat (règle de repli
+    /// explicite) plutôt que placé à une position fausse.
+    pub fn snapshot_for_resolved(
+        &self,
+        viewer: ClientId,
+        radius: f32,
+        frames: &crate::frame::FrameRegistry,
+    ) -> Vec<(ClientId, Pose)> {
+        let Some(&viewer_pose) = self.players.get(&viewer) else {
+            return Vec::new();
+        };
+        let Some(viewer_world) = frames.world_position(
+            viewer_pose.frame,
+            [viewer_pose.x, viewer_pose.y, viewer_pose.z],
+        ) else {
+            return Vec::new();
+        };
+        self.players
+            .iter()
+            .filter(|&(&id, _)| id != viewer)
+            .filter_map(|(&id, &pose)| {
+                let world_pos = frames.world_position(pose.frame, [pose.x, pose.y, pose.z])?;
+                let dx = world_pos[0] - viewer_world[0];
+                let dy = world_pos[1] - viewer_world[1];
+                if (dx * dx + dy * dy).sqrt() <= radius {
+                    let mut resolved = pose;
+                    resolved.x = world_pos[0];
+                    resolved.y = world_pos[1];
+                    resolved.z = world_pos[2];
+                    // Les coordonnées sont maintenant en espace MONDE : le repère d'origine ne
+                    // doit plus être réappliqué. Sans ce reset, un futur appelant qui repasserait
+                    // ce `Pose` à `world_position` doublerait la transformation (revue finale
+                    // 2026-07-23).
+                    resolved.frame = crate::frame::WORLD_FRAME;
+                    Some((id, resolved))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn player_ids(&self) -> Vec<ClientId> {
@@ -457,6 +506,72 @@ mod tests {
                 "viewer {viewer_id} : l'ensemble de voisins doit être identique au scan linéaire de référence"
             );
         }
+    }
+
+    #[test]
+    fn default_pose_is_in_the_world_frame() {
+        let mut w = World::new();
+        w.add_player(1);
+        let pose = w.pose_of(1).unwrap();
+        assert_eq!(pose.frame, crate::frame::WORLD_FRAME);
+    }
+
+    #[test]
+    fn snapshot_for_resolved_translates_a_passenger_pose_through_its_frame() {
+        let mut w = World::new();
+        w.add_player(1); // viewer, dans le monde à l'origine
+        w.add_player(2); // passager d'un ascenseur (repère 7)
+        w.set_pose(
+            2,
+            Pose {
+                x: 0.5, // offset local dans la cabine
+                y: 0.0,
+                z: 0.0,
+                frame: 7,
+                ..Default::default()
+            },
+        );
+        let mut frames = crate::frame::FrameRegistry::new();
+        frames.set_transform(
+            7,
+            crate::frame::FrameTransform {
+                position: [10.0, 0.0, 40.0], // la cabine est au monde (10, 0, 40)
+                yaw: 0.0,
+            },
+        );
+        let snap = w.snapshot_for_resolved(1, 1000.0, &frames);
+        assert_eq!(snap.len(), 1);
+        let (_, resolved_pose) = snap[0];
+        assert_eq!(resolved_pose.x, 10.5, "10 (cabine) + 0.5 (offset local)");
+        assert_eq!(resolved_pose.z, 40.0);
+        assert_eq!(
+            resolved_pose.frame,
+            crate::frame::WORLD_FRAME,
+            "une pose résolue en monde ne doit plus porter son ancien repère, sous peine de \
+             double transformation si un futur appelant la repasse à world_position"
+        );
+    }
+
+    #[test]
+    fn snapshot_for_resolved_excludes_a_passenger_whose_frame_is_unknown() {
+        // Règle de repli ADR 0013 : un repère détruit/inconnu ne doit jamais produire une position
+        // fausse — l'entité est omise plutôt que mal placée.
+        let mut w = World::new();
+        w.add_player(1);
+        w.add_player(2);
+        w.set_pose(
+            2,
+            Pose {
+                frame: 999, // jamais enregistré dans le FrameRegistry
+                ..Default::default()
+            },
+        );
+        let frames = crate::frame::FrameRegistry::new();
+        let snap = w.snapshot_for_resolved(1, 1000.0, &frames);
+        assert!(
+            snap.is_empty(),
+            "un passager dans un repère inconnu ne doit jamais apparaître avec une position fausse"
+        );
     }
 
     #[test]
