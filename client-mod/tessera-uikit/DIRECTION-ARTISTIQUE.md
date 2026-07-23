@@ -60,8 +60,8 @@ Chaque couleur a un RÔLE strict :
   texte « canal X parle » (décision 2026-07-22).
 - Vie/armure : barres natives (état-piloté serveur, spec `2026-07-22-ui-native-branchement-multi`).
 - **« Roue d'action rapide »** (nom officiel du système de roues R34, émotes incluses) — touche
-  provisoire **G**. Indicateur vocal PTT = **logo micro SEUL, sans bordure ni fond**, avec
-  l'égaliseur animé **intégré dans la capsule** du micro (discret) — jamais de texte.
+  provisoire **G**. Indicateur vocal PTT = **PETIT logo micro, sans bordure ni fond**, entouré d'un
+  **égaliseur circulaire** (anneau de barres qui pulsent autour du logo) — jamais de texte.
 
 ## 6. Application
 

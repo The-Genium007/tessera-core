@@ -115,21 +115,21 @@
   .ntag .r{font-family:"Share Tech Mono",monospace;font-size:.6em;letter-spacing:.18em;color:var(--amber);text-transform:uppercase;}
   .ntag .pin{width:0;height:0;margin:.2em auto 0;border-left:.35em solid transparent;border-right:.35em solid transparent;border-top:.4em solid rgba(75,227,247,.7);}
 
-  /* ---- TESSERA : vocal pendant le push-to-talk, bas-centre — SANS bordure ni fond (retour
-     Lucas) : juste le logo micro, avec l'égaliseur INTÉGRÉ au logo (les barres animées forment la
-     grille de la capsule). Discret. Pas de texte. ---- */
-  .voice{left:50%;bottom:5.5%;transform:translateX(-50%);display:none;}
+  /* ---- TESSERA : vocal pendant le push-to-talk, bas-centre — sans bordure ni fond, PETIT logo
+     micro entouré d'un ÉGALISEUR CIRCULAIRE (anneau de barres qui pulsent). Pas de texte.
+     NB : le conteneur DOIT être display:block — un span inline ignorait width/height et le SVG
+     retombait sur ses 300px par défaut (bug "logo géant" corrigé ici). ---- */
+  .voice{left:50%;bottom:5%;transform:translateX(-50%);display:none;}
   .voice.talk{display:block;}
-  .voice .wrap{position:relative;width:2.1em;height:2.1em;}
-  .voice svg{width:100%;height:100%;color:var(--cyan);filter:drop-shadow(0 0 7px rgba(75,227,247,.55));}
-  /* barres sombres par-dessus la capsule : le micro semble "chanter" */
-  .voice .eq{position:absolute;left:50%;top:17%;transform:translateX(-50%);display:flex;align-items:flex-end;gap:1.5px;height:35%;}
-  .voice .eq i{width:2.5px;background:#05070a;animation:eq .7s infinite ease-in-out;transform-origin:bottom;}
-  .voice .eq i:nth-child(1){height:45%;animation-delay:0s;}
-  .voice .eq i:nth-child(2){height:90%;animation-delay:.12s;}
-  .voice .eq i:nth-child(3){height:60%;animation-delay:.24s;}
-  @keyframes eq{50%{transform:scaleY(.35);}}
-  @media (prefers-reduced-motion: reduce){.voice .eq i{animation:none;}}
+  .voice .wrap{display:block;position:relative;width:2.6em;height:2.6em;}
+  .voice svg{position:absolute;left:33%;top:33%;width:34%;height:34%;color:var(--cyan);filter:drop-shadow(0 0 6px rgba(75,227,247,.6));}
+  .voice .ring{position:absolute;inset:0;}
+  .voice .ring b{position:absolute;left:calc(50% - 1px);top:50%;width:2px;height:.42em;
+    background:var(--cyan);box-shadow:0 0 4px rgba(75,227,247,.6);
+    transform:rotate(var(--a)) translateY(-1.12em);
+    animation:ringp .9s infinite ease-in-out;animation-delay:var(--d);}
+  @keyframes ringp{50%{opacity:.15;height:.26em;}}
+  @media (prefers-reduced-motion: reduce){.voice .ring b{animation:none;}}
 
   /* ---- TESSERA : toast serveur haut-centre (bandeau DA à liseré cyan) ---- */
   .toast{left:50%;top:4%;transform:translateX(-50%);display:flex;align-items:center;gap:.7em;background:rgba(8,10,14,.85);border:1px solid rgba(75,227,247,.2);border-left:4px solid var(--cyan);padding:.45em 1em;}
@@ -186,10 +186,10 @@
     </div>
     <div class="hud srv tsr">TESSERA <b>dev-01</b> · PING <b>24MS</b> · <b>12/64</b></div>
     <div class="hud toast tsr"><span class="tx">Annonce serveur — event Kabuki dans 10 min</span></div>
-    <div class="hud voice talk tsr" id="voice" title="C11 — logo micro à égaliseur intégré, visible pendant le push-to-talk (bouton ou touche V pour simuler)">
+    <div class="hud voice talk tsr" id="voice" title="C11 — petit micro + égaliseur circulaire autour, visible pendant le push-to-talk (bouton ou touche V pour simuler)">
       <span class="wrap">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-label="micro actif"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5.3-3a5.3 5.3 0 0 1-10.6 0H4.9a7.1 7.1 0 0 0 6.2 6.9V21h1.8v-3.1a7.1 7.1 0 0 0 6.2-6.9h-1.8z"/></svg>
-        <span class="eq"><i></i><i></i><i></i></span>
+        <span class="ring" id="voiceRing"></span>
       </span>
     </div>
     <div class="hud player tsr" style="left:38%;top:52%">
@@ -224,6 +224,14 @@
     ptt.textContent = on ? 'Micro PTT : appuyé' : 'Micro PTT : relâché';
   }
   ptt.addEventListener('click', () => setPtt(!voice.classList.contains('talk')));
+  // Égaliseur circulaire : 12 barres autour du micro, pulsation décalée.
+  const ring = document.getElementById('voiceRing');
+  for (let i = 0; i < 12; i++) {
+    const b = document.createElement('b');
+    b.style.setProperty('--a', (i * 30) + 'deg');
+    b.style.setProperty('--d', (i * 0.07) + 's');
+    ring.appendChild(b);
+  }
   document.addEventListener('keydown', e => { if (e.key === 'v' || e.key === 'V') setPtt(true); });
   document.addEventListener('keyup',   e => { if (e.key === 'v' || e.key === 'V') setPtt(false); });
 </script>
