@@ -34,6 +34,18 @@ public class TesseraLobbyPopup extends InGamePopup {
     super.OnCreate(); // vignette rouge + m_container centré (~1550x840)
     this.m_selected = -1;
 
+    // SENSATION DE MENU (retour Lucas 2026-07-23) : sans ceci, le lobby flottait au-dessus du
+    // gameplay. Voile quasi opaque plein écran INSÉRÉ DERRIÈRE (index 0) la vignette/le contenu —
+    // le monde disparaît, comme dans les menus natifs. Le flou + la dilatation du temps
+    // d'InGamePopup s'ajoutent par-dessus.
+    let backdrop: ref<inkRectangle> = new inkRectangle();
+    backdrop.SetName(n"backdrop");
+    backdrop.SetAnchor(inkEAnchor.Fill);
+    backdrop.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
+    backdrop.BindProperty(n"tintColor", n"MainColors.Fullscreen_PrimaryBackgroundDarkest");
+    backdrop.SetOpacity(0.96);
+    backdrop.Reparent(this.GetRootCompoundWidget(), 0);
+
     let layout: ref<inkVerticalPanel> = new inkVerticalPanel();
     layout.SetName(n"lobby_layout");
     layout.SetAnchor(inkEAnchor.Fill);
