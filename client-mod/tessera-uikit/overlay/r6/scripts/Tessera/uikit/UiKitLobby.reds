@@ -53,80 +53,87 @@ public class TesseraLobbyPopup extends InGamePopup {
     // vivent DANS l'arbre du hub-menu, pas dans un .inkwidget autonome → pas de SpawnFromExternal.
     // On les RECONSTRUIT ici en primitives (rectangles + texte 0/1) — aucune dépendance d'atlas,
     // donc rendu garanti — animées en boucle (opacité ping-pong) pour l'effet « menu vivant ».
-    this.BuildSideFluff(root, true);   // barres animées + binaire, bord gauche (rouge)
-    this.BuildSideFluff(root, false);  // bord droit (cyan)
-    this.BuildBottomFluff(root);       // bande de segments animés en bas
+    // Barres de flanc RETIRÉES (retour Lucas : pas jolies). On garde le voile + la frise du bas.
+    this.BuildBottomFluff(root);
 
-    // Conteneur plus haut pour aérer (retour Lucas : le bouton mangeait les infos/l'état).
-    this.m_container.SetHeight(1010.0);
+    // Conteneur plus haut/large pour aérer — structure en ZONES ANCRÉES (pas un simple
+    // empilement) : barre serveur en haut, cartes centrées, pied de page (notice + CONNEXION)
+    // ANCRÉ EN BAS, séparé des cartes — plus proche de la maquette (retour Lucas 2026-07-23).
+    this.m_container.SetWidth(1400.0);
+    this.m_container.SetHeight(880.0);
 
-    let layout: ref<inkVerticalPanel> = new inkVerticalPanel();
-    layout.SetName(n"lobby_layout");
-    layout.SetAnchor(inkEAnchor.Fill);
-    layout.SetMargin(inkMargin(90.0, 60.0, 90.0, 60.0));
-    layout.SetChildMargin(inkMargin(0.0, 14.0, 0.0, 14.0));
-    layout.Reparent(this.m_container);
+    // ---- Barre serveur (haut) : « TESSERA // SERVEUR RP » ----
+    let topbar: ref<inkText> = new inkText();
+    topbar.SetName(n"topbar");
+    topbar.SetFontFamily("base\\gameplay\\gui\\fonts\\raj\\raj.inkfontfamily");
+    topbar.SetFontStyle(n"Bold");
+    topbar.SetFontSize(40);
+    topbar.SetLetterCase(textLetterCase.UpperCase);
+    topbar.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
+    topbar.BindProperty(n"tintColor", n"MainColors.Blue");
+    topbar.SetText("Tessera // Serveur RP");
+    topbar.SetAnchor(inkEAnchor.TopLeft);
+    topbar.SetMargin(inkMargin(60.0, 40.0, 0.0, 0.0));
+    topbar.Reparent(this.m_container);
 
-    // Titre — « TESSERA // SERVEUR RP » (raj, gras, bleu de la charte).
-    let title: ref<inkText> = new inkText();
-    title.SetName(n"title");
-    title.SetFontFamily("base\\gameplay\\gui\\fonts\\raj\\raj.inkfontfamily");
-    title.SetFontStyle(n"Bold");
-    title.SetFontSize(54);
-    title.SetLetterCase(textLetterCase.UpperCase);
-    title.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
-    title.BindProperty(n"tintColor", n"MainColors.Blue");
-    title.SetText("Tessera // Serveur RP");
-    title.Reparent(layout);
-
-    // Sous-titre.
     let sub: ref<inkText> = new inkText();
     sub.SetName(n"subtitle");
     sub.SetFontFamily("base\\gameplay\\gui\\fonts\\raj\\raj.inkfontfamily");
     sub.SetFontStyle(n"Medium");
-    sub.SetFontSize(30);
+    sub.SetFontSize(24);
     sub.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
     sub.BindProperty(n"tintColor", n"MainColors.ReadableMedium");
     sub.SetText("Choisis ton personnage — ou crées-en un.");
-    sub.Reparent(layout);
+    sub.SetAnchor(inkEAnchor.TopLeft);
+    sub.SetMargin(inkMargin(60.0, 96.0, 0.0, 0.0));
+    sub.Reparent(this.m_container);
 
-    // Rangée de cartes.
+    // ---- Cartes : centrées au milieu de l'écran, indépendantes du pied de page ----
     let row: ref<inkHorizontalPanel> = new inkHorizontalPanel();
     row.SetName(n"cards_row");
-    row.SetHAlign(inkEHorizontalAlign.Center);
     row.SetChildMargin(inkMargin(0.0, 0.0, 26.0, 0.0));
-    row.SetMargin(inkMargin(0.0, 26.0, 0.0, 40.0));
-    row.Reparent(layout);
+    row.SetAnchor(inkEAnchor.Centered);
+    row.SetAnchorPoint(Vector2(0.5, 0.5));
+    row.SetMargin(inkMargin(0.0, -20.0, 0.0, 0.0));
+    row.Reparent(this.m_container);
 
     // v1 : données locales de démo — remplacées plus tard par CharacterList (tranche A serveur).
     this.CreateCharacterCard(row, 0, "Vika Moreno", "Nomade · Médic", "Vu il y a 2 j · Watson");
     this.CreateCharacterCard(row, 1, "Dex Carter", "Corpo · NetWatch", "Vu il y a 9 j · City Center");
     this.CreateCreateCard(row);
 
+    // ---- Pied de page : ANCRÉ TOUT EN BAS, loin des cartes (notice puis CONNEXION dessous). ----
+    let footer: ref<inkVerticalPanel> = new inkVerticalPanel();
+    footer.SetName(n"footer");
+    footer.SetAnchor(inkEAnchor.BottomFillHorizontaly);
+    footer.SetHAlign(inkEHorizontalAlign.Center);
+    footer.SetMargin(inkMargin(0.0, 0.0, 0.0, 48.0));
+    footer.SetChildMargin(inkMargin(0.0, 18.0, 0.0, 0.0));
+    footer.Reparent(this.m_container);
+
     // Ligne d'état (hint), réécrite au fil des clics.
     let status: ref<inkText> = new inkText();
     status.SetName(n"status");
     status.SetFontFamily("base\\gameplay\\gui\\fonts\\raj\\raj.inkfontfamily");
     status.SetFontStyle(n"Medium");
-    status.SetFontSize(26);
+    status.SetFontSize(24);
     status.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
     status.BindProperty(n"tintColor", n"MainColors.MildRed");
     status.SetText("Sélectionne un personnage pour activer la connexion.");
-    status.SetMargin(inkMargin(0.0, 12.0, 0.0, 12.0));
-    status.Reparent(layout);
+    status.SetHAlign(inkEHorizontalAlign.Center);
+    status.Reparent(footer);
     this.m_status = status;
 
-    // CONNEXION — SimpleButton (validé H2), grisé tant qu'aucun perso n'est choisi.
+    // CONNEXION — SimpleButton (validé H2), grisé tant qu'aucun perso n'est choisi. Franchement
+    // détaché des cartes/descriptions (retour Lucas : « baisse le bouton »).
     this.m_connect = SimpleButton.Create();
     this.m_connect.SetName(n"btn_connect");
     this.m_connect.SetText("CONNEXION");
     this.m_connect.ToggleAnimations(true);
     this.m_connect.ToggleSounds(true);
     this.m_connect.SetDisabled(true);
-    this.m_connect.Reparent(layout);
-    // Descend le bouton pour qu'il n'écrase plus la ligne d'état / les infos (retour Lucas).
-    this.m_connect.GetRootWidget().SetMargin(inkMargin(0.0, 34.0, 0.0, 0.0));
-    this.m_connect.GetRootWidget().SetHAlign(inkEHorizontalAlign.Left);
+    this.m_connect.Reparent(footer);
+    this.m_connect.GetRootWidget().SetHAlign(inkEHorizontalAlign.Center);
     this.m_connect.RegisterToCallback(n"OnBtnClick", this, n"OnConnect");
   }
 
@@ -145,72 +152,6 @@ public class TesseraLobbyPopup extends InGamePopup {
     opts.loopType = inkanimLoopType.PingPong;
     opts.loopInfinite = true;
     target.PlayAnimationWithOptions(def, opts);
-  }
-
-  // Colonne de « fluff » sur un bord : pile de barres fines de largeurs variées (façon
-  // `side_element`) + une colonne binaire, animée en boucle. Rouge à gauche, cyan à droite (DA).
-  private func BuildSideFluff(root: wref<inkCompoundWidget>, isLeft: Bool) {
-    let col: ref<inkVerticalPanel> = new inkVerticalPanel();
-    col.SetChildMargin(inkMargin(0.0, 7.0, 0.0, 7.0));
-    if isLeft {
-      col.SetName(n"fluff_left");
-      col.SetAnchor(inkEAnchor.LeftFillVerticaly);
-      col.SetMargin(inkMargin(34.0, 150.0, 0.0, 150.0));
-      col.SetHAlign(inkEHorizontalAlign.Left);
-    } else {
-      col.SetName(n"fluff_right");
-      col.SetAnchor(inkEAnchor.RightFillVerticaly);
-      col.SetMargin(inkMargin(0.0, 150.0, 34.0, 150.0));
-      col.SetHAlign(inkEHorizontalAlign.Right);
-    }
-    col.Reparent(root, 1);
-
-    let i: Int32 = 0;
-    while i < 13 {
-      let bar: ref<inkRectangle> = new inkRectangle();
-      bar.SetName(n"bar");
-      bar.SetSize(48.0 + Cast<Float>((i * 41) % 66), 3.0);
-      bar.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
-      if isLeft {
-        bar.BindProperty(n"tintColor", n"MainColors.Red");
-        bar.SetHAlign(inkEHorizontalAlign.Left);
-      } else {
-        bar.BindProperty(n"tintColor", n"MainColors.Blue");
-        bar.SetHAlign(inkEHorizontalAlign.Right);
-      }
-      bar.SetOpacity(0.85);
-      bar.Reparent(col);
-      i += 1;
-    }
-    this.LoopOpacity(col, 0.28, 0.72, 1.3);
-
-    // Colonne binaire (texte 0/1) sous les barres.
-    let bin: String = "";
-    let k: Int32 = 0;
-    while k < 18 {
-      if (k * 7) % 3 == 0 { bin = bin + "0\n"; } else { bin = bin + "1\n"; }
-      k += 1;
-    }
-    let bits: ref<inkText> = new inkText();
-    bits.SetName(n"fluff_bits");
-    bits.SetFontFamily("base\\gameplay\\gui\\fonts\\raj\\raj.inkfontfamily");
-    bits.SetFontStyle(n"Medium");
-    bits.SetFontSize(16);
-    bits.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
-    if isLeft {
-      bits.BindProperty(n"tintColor", n"MainColors.Red");
-      bits.SetAnchor(inkEAnchor.BottomLeft);
-      bits.SetAnchorPoint(Vector2(0.0, 1.0));
-      bits.SetMargin(inkMargin(34.0, 0.0, 0.0, 140.0));
-    } else {
-      bits.BindProperty(n"tintColor", n"MainColors.Blue");
-      bits.SetAnchor(inkEAnchor.BottomRight);
-      bits.SetAnchorPoint(Vector2(1.0, 1.0));
-      bits.SetMargin(inkMargin(0.0, 0.0, 34.0, 140.0));
-    }
-    bits.SetText(bin);
-    bits.Reparent(root, 1);
-    this.LoopOpacity(bits, 0.12, 0.4, 2.1);
   }
 
   // Bande de segments animés en bas (façon frise de fluff du bas des menus).
@@ -268,11 +209,12 @@ public class TesseraLobbyPopup extends InGamePopup {
     ArrayPush(this.m_frames, frame);
     ArrayPush(this.m_cardNames, name);
 
-    // Pile de textes ancrée en bas de la carte.
+    // Pile de textes ancrée en bas de la carte — descendue près du bord (retour Lucas : « baisse
+    // les descriptions sous les cartes »).
     let meta: ref<inkVerticalPanel> = new inkVerticalPanel();
     meta.SetName(n"meta");
     meta.SetAnchor(inkEAnchor.BottomFillHorizontaly);
-    meta.SetMargin(inkMargin(18.0, 0.0, 18.0, 20.0));
+    meta.SetMargin(inkMargin(18.0, 0.0, 18.0, 8.0));
     meta.SetChildMargin(inkMargin(0.0, 2.0, 0.0, 2.0));
     meta.SetFitToContent(true);
     meta.Reparent(card);
