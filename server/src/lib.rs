@@ -52,6 +52,7 @@ pub mod shard;
 pub mod shard_boundary_bridge;
 pub mod shutdown;
 pub mod snapshot_merge;
+pub mod stub;
 pub mod transport;
 pub mod vehicle;
 pub mod world;
