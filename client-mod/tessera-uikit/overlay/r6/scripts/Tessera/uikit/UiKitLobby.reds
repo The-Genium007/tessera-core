@@ -44,7 +44,7 @@ public class TesseraLobbyPopup extends InGamePopup {
     backdrop.SetAnchor(inkEAnchor.Fill);
     backdrop.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
     backdrop.BindProperty(n"tintColor", n"MainColors.Fullscreen_PrimaryBackgroundDarkest");
-    backdrop.SetOpacity(0.96);
+    backdrop.SetOpacity(1.0); // PLEINEMENT OPAQUE (retour Lucas) — plus aucun résidu du monde
     backdrop.Reparent(root, 0);
 
     // FOND GRAPHIQUE DE MENU (retour Lucas 2026-07-23 : « le fond comme derrière l'inventaire »).
