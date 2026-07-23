@@ -66,12 +66,9 @@
     repeating-linear-gradient(-30deg, rgba(75,227,247,.05) 0 2px, transparent 2px 18px), #071013;}
   .minimap .clock{position:absolute;top:-1.5em;right:0;font-family:"Share Tech Mono",monospace;font-size:.78em;color:var(--amber);}
   .minimap .tagn{position:absolute;bottom:2px;left:4px;font-family:"Share Tech Mono",monospace;font-size:.62em;color:var(--dim);letter-spacing:.14em;}
-  /* NATIF : wanted sous la minimap */
-  .wanted{right:2.6%;top:calc(4.5% + 10.2em);display:flex;gap:.3em;}
-  .star{width:1em;height:1em;color:var(--red);filter:drop-shadow(0 0 4px rgba(229,52,46,.6));}
-  .star.off{color:#3a2326;filter:none;}
-  /* NATIF : tracker de quête (placeholder) */
-  .quest{right:2.6%;top:calc(4.5% + 12.2em);width:12.5em;color:var(--amber);}
+  /* Wanted : RETIRÉ du HUD (décision 2026-07-22) — pas d'étoiles de police affichées. */
+  /* NATIF : tracker de quête (placeholder), remonté sous la minimap */
+  .quest{right:2.6%;top:calc(4.5% + 10.4em);width:12.5em;color:var(--amber);}
   .quest .qt{font-weight:600;font-size:.85em;letter-spacing:.06em;text-transform:uppercase;}
   .quest .qo{font-size:.78em;color:var(--readable);margin-top:.2em;}
 
@@ -120,11 +117,13 @@
   .ntag .r{font-family:"Share Tech Mono",monospace;font-size:.6em;letter-spacing:.18em;color:var(--amber);text-transform:uppercase;}
   .ntag .pin{width:0;height:0;margin:.2em auto 0;border-left:.35em solid transparent;border-right:.35em solid transparent;border-top:.4em solid rgba(75,227,247,.7);}
 
-  /* ---- TESSERA : indicateur vocal (au-dessus des hints) ---- */
-  .voice{right:2.6%;bottom:calc(5% + 5.2em);display:flex;align-items:center;gap:.5em;font-family:"Share Tech Mono",monospace;font-size:.75em;color:var(--cyan);letter-spacing:.1em;}
-  .voice .mic{width:.8em;height:.8em;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan);animation:pulse 1.6s infinite;}
-  @keyframes pulse{50%{opacity:.35;}}
-  @media (prefers-reduced-motion: reduce){.voice .mic{animation:none;}}
+  /* ---- TESSERA : vocal = LOGO MICRO seul, bas-centre, visible UNIQUEMENT pendant le
+     push-to-talk (décision 2026-07-22 — plus de texte "canal X parle"). Démo : maintiens V. ---- */
+  .voice{left:50%;bottom:6%;transform:translateX(-50%);display:none;}
+  .voice.talk{display:block;}
+  .voice svg{width:2.2em;height:2.2em;color:var(--cyan);filter:drop-shadow(0 0 10px rgba(75,227,247,.7));animation:pulse 1.2s infinite;}
+  @keyframes pulse{50%{opacity:.45;}}
+  @media (prefers-reduced-motion: reduce){.voice svg{animation:none;}}
 
   /* ---- TESSERA : toast serveur haut-centre (bandeau DA à liseré cyan) ---- */
   .toast{left:50%;top:4%;transform:translateX(-50%);display:flex;align-items:center;gap:.7em;background:rgba(8,10,14,.85);border:1px solid rgba(75,227,247,.2);border-left:4px solid var(--cyan);padding:.45em 1em;}
@@ -143,9 +142,10 @@
 
   <div class="eyebrow">Tessera · Maquette · DA officielle</div>
   <h1>HUD en jeu — natif + ajouts Tessera</h1>
-  <p class="note">Placements vérifiés sur les captures (minimap HAUT-DROITE, wanted dessous, hex-widgets
-    bas-gauche, hints rouges bas-droite). Le natif reste intouché — ses données deviennent
-    serveur-autoritaires (état-piloté). Utilise le bouton pour surligner ce que Tessera AJOUTE.</p>
+  <p class="note">Placements vérifiés sur les captures (minimap HAUT-DROITE, hex-widgets bas-gauche,
+    hints rouges bas-droite). Étoiles de police RETIRÉES (décision). Le natif reste intouché — ses
+    données deviennent serveur-autoritaires (état-piloté). Bouton pour surligner les ajouts Tessera ;
+    <b>maintiens V</b> pour voir le logo micro du push-to-talk (bas-centre).</p>
   <div class="toolbar"><button type="button" class="tg" id="tgl">Surligner les ajouts Tessera</button></div>
 
   <div class="screen" id="scr">
@@ -155,13 +155,7 @@
     <div class="hud vitals"><div class="lab"><span>SANTÉ ·  NATIF (état-piloté)</span><span>168/240</span></div>
       <div class="hp"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="e"></i><i class="e"></i><i class="e"></i></div></div>
     <div class="hud minimap"><span class="clock">14:02</span><span class="tagn">MINIMAP NATIVE</span></div>
-    <div class="hud wanted">
-      <svg class="star" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z"/></svg>
-      <svg class="star" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z"/></svg>
-      <svg class="star off" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z"/></svg>
-      <svg class="star off" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z"/></svg>
-      <svg class="star off" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z"/></svg>
-    </div>
+    <!-- Étoiles wanted RETIRÉES (décision Lucas 2026-07-22) : pas d'affichage de heat au HUD. -->
     <div class="hud quest"><div class="qt">Contrat · Escorte Kabuki</div><div class="qo">Rejoindre le point de rendez-vous</div></div>
     <div class="hud hexes"><span class="hex">📱</span><span class="hex">🚗</span></div>
     <div class="hud slots2">
@@ -181,7 +175,9 @@
     </div>
     <div class="hud srv tsr">TESSERA <b>dev-01</b> · PING <b>24MS</b> · <b>12/64</b></div>
     <div class="hud toast tsr"><span class="tx">Annonce serveur — event Kabuki dans 10 min</span></div>
-    <div class="hud voice tsr"><span class="mic"></span> CANAL 1 · VIKA PARLE</div>
+    <div class="hud voice tsr" id="voice" title="C11 — logo micro, visible pendant le push-to-talk (maintiens V pour la démo)">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-label="micro actif"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5.3-3a5.3 5.3 0 0 1-10.6 0H4.9a7.1 7.1 0 0 0 6.2 6.9V21h1.8v-3.1a7.1 7.1 0 0 0 6.2-6.9h-1.8z"/></svg>
+    </div>
     <div class="hud player tsr" style="left:38%;top:52%">
       <span class="ntag"><span class="n">Dex<b>_</b>Carter</span><br><span class="r">Corpo</span><span class="pin"></span></span>
       <span class="sil"></span>
@@ -193,9 +189,9 @@
   </div>
 
   <div class="legend">
-    <div class="lg nat"><b>Natif — intouché, données serveur</b>Vie/armure (C8), wanted (C9), minimap, tracker, hex-widgets, consommables, hints. L'UI reste vanilla ; PV et heat deviennent serveur-autoritaires par l'état local.<span class="mono">état-piloté · spec 2026-07-22-ui-native-branchement-multi</span></div>
+    <div class="lg nat"><b>Natif — intouché, données serveur</b>Vie/armure (C8), minimap, tracker, hex-widgets, consommables, hints. L'UI reste vanilla ; les PV deviennent serveur-autoritaires par l'état local. <b>Étoiles de police : retirées</b> (le heat serveur existe, sans affichage HUD).<span class="mono">état-piloté · spec 2026-07-22-ui-native-branchement-multi</span></div>
     <div class="lg"><b>Tessera — faim & soif (C14)</b>2 jauges verticales à gauche de la minimap (ambre = faim, aqua = soif). Seul élément de HUD permanent ajouté.<span class="mono">overlay ink · DA §5</span></div>
-    <div class="lg"><b>Tessera — social (C15/C11/C19)</b>Nametags (nom cyan + rôle ambre) au-dessus des joueurs, indicateur vocal au-dessus des hints, toasts serveur en haut-centre (bandeau à liseré cyan).<span class="mono">worldui + overlay</span></div>
+    <div class="lg"><b>Tessera — social (C15/C11/C19)</b>Nametags (nom cyan + rôle ambre) au-dessus des joueurs ; vocal = <b>logo micro seul, bas-centre, visible pendant le push-to-talk</b> (maintiens V en démo) ; toasts serveur haut-centre. <b>Roue des émotes : plus tard</b> (système de roues R34).<span class="mono">worldui + overlay</span></div>
     <div class="lg"><b>Tessera — micro-statut (C12/C13)</b>Serveur · ping · joueurs, en mono discret sous la vie. Debug-friendly, quasi invisible.<span class="mono">overlay ink</span></div>
   </div>
 
@@ -204,6 +200,10 @@
     this.classList.toggle('on');
     document.getElementById('scr').classList.toggle('hl');
   });
+  // Démo push-to-talk : le logo micro n'apparaît QUE pendant l'appui (maintiens V).
+  const voice = document.getElementById('voice');
+  document.addEventListener('keydown', e => { if (e.key === 'v' || e.key === 'V') voice.classList.add('talk'); });
+  document.addEventListener('keyup',   e => { if (e.key === 'v' || e.key === 'V') voice.classList.remove('talk'); });
 </script>
 </div>
 </body>

@@ -53,8 +53,12 @@ Chaque couleur a un RÔLE strict :
 
 - **Minimap native en HAUT-DROITE — intouchée**, pas de boussole ajoutée.
 - **Faim/soif** : 2 jauges verticales **à gauche de la minimap** (ambre = faim, aqua = soif).
-- **Étoiles wanted natives sous la minimap** — restent en place.
+- **Étoiles wanted : RETIRÉES du HUD** (décision 2026-07-22) — le heat serveur existe mais sans
+  affichage d'étoiles.
+- **Vocal : logo micro SEUL, bas-centre**, visible **uniquement pendant le push-to-talk** — pas de
+  texte « canal X parle » (décision 2026-07-22).
 - Vie/armure : barres natives (état-piloté serveur, spec `2026-07-22-ui-native-branchement-multi`).
+- **Roue des émotes** : différée — arrivera via le système de roues radiales (R34).
 
 ## 6. Application
 
