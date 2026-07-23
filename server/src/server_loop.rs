@@ -1146,6 +1146,34 @@ impl Server {
                                 }
                             }
                         }
+                    } else if ei.kind() == 6 {
+                        // Nouveau (câblage mounting ascenseur, ADR 0013) : kind=6=MountElevator.
+                        // `target` est un elevator_id (EntityID arbitraire, ADR 0012 §2.5), jamais
+                        // un id de véhicule — distinct de kind=3 par construction (le kind seul
+                        // désambiguïse, cf. Global Constraints de ce plan). Un elevator_id inconnu
+                        // du registre est ignoré silencieusement : le serveur ne fabrique jamais
+                        // de repère sur la foi d'un message client (même garde que
+                        // `handle_elevator_call`).
+                        let known = self
+                            .elevator_registry
+                            .as_ref()
+                            .is_some_and(|r| r.states.iter().any(|s| s.elevator_id == ei.target()));
+                        if known {
+                            if let Some(mut pose) = self.world.pose_of(from) {
+                                pose.frame = ei.target();
+                                self.world.set_pose(from, pose);
+                            }
+                        }
+                    } else if ei.kind() == 7 {
+                        // kind=7=UnmountElevator : reposer le joueur dans le repère monde. Aucune
+                        // vérification d'appartenance nécessaire ici (contrairement au Mount) —
+                        // redescendre vers WORLD_FRAME est toujours sûr, même si le joueur n'était
+                        // pas réellement monté (no-op silencieux, même esprit que
+                        // `VehicleRecord::unmount` sur un non-passager).
+                        if let Some(mut pose) = self.world.pose_of(from) {
+                            pose.frame = crate::frame::WORLD_FRAME;
+                            self.world.set_pose(from, pose);
+                        }
                     }
                 }
             }
@@ -3392,6 +3420,110 @@ mod tests {
             saw_elevator,
             "le même Server doit AUSSI diffuser l'état de l'ascenseur configuré — les deux \
              registres doivent coexister, pas s'exclure"
+        );
+    }
+
+    #[test]
+    fn mounting_a_known_elevator_sets_the_player_pose_frame() {
+        // Task 5 : kind=6=MountElevator pose Pose.frame = elevator_id, mais UNIQUEMENT si
+        // l'elevator_id est connu du registre (même garde que handle_elevator_call — le serveur ne
+        // fabrique jamais de repère sur la foi d'un message client).
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 6, 0),
+        });
+        server.tick(&mut t);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(pose.frame, 100);
+    }
+
+    #[test]
+    fn unmounting_resets_the_player_pose_frame_to_world() {
+        // kind=7=UnmountElevator repose Pose.frame = WORLD_FRAME inconditionnellement.
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 6, 0),
+        });
+        server.tick(&mut t);
+        assert_eq!(
+            server.world.pose_of(1).unwrap().frame,
+            100,
+            "précondition: monté"
+        );
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 7, 0),
+        });
+        server.tick(&mut t);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(pose.frame, crate::frame::WORLD_FRAME);
+    }
+
+    #[test]
+    fn mounting_an_unknown_elevator_id_is_silently_ignored() {
+        // Aucun elevator_registry configuré (Server::new) — un elevator_id ne correspondant à
+        // AUCUN ascenseur connu ne doit jamais monter le joueur dans un repère fictif.
+        let mut server = Server::new(50.0);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(999, 6, 0),
+        });
+        server.tick(&mut t);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(
+            pose.frame,
+            crate::frame::WORLD_FRAME,
+            "un elevator_id inconnu ne doit jamais monter le joueur dans un repère fictif"
         );
     }
 
