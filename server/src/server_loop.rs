@@ -114,10 +114,27 @@ pub struct Server {
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
-/// (config immuable), et les enregistrements PNJ actifs (mutables à chaque tick).
+/// (config immuable), le POOL DE STUBS (liste maître du monde vivant, spec §7.1), et les
+/// enregistrements PNJ actifs.
+///
+/// Architecture cible (monde vivant, big-bang) : `stubs` est la VÉRITÉ — chaque PNJ de foule existe
+/// d'abord comme `EntityStub` `Dormant` (léger, hors-champ), promu en corps `Live` près d'un joueur.
+/// Un `NpcRecord` (+ entrée `World` + `nav_state`) n'existe QUE pour un stub `Live` : les
+/// `records` DÉCOULENT des stubs, ils ne sont plus la source. La démotion (despawn) est LOD-PAR-
+/// DISTANCE (le socle `StubPool`), plus par surpopulation de district (cf. `tick_npcs`).
 struct NpcRegistry {
     catalog: NpcCatalog,
     director: PopulationDirector,
+    /// Liste maître des stubs de foule (spec §1/§7.1). Contient TOUS les PNJ de foule connus, qu'ils
+    /// soient `Dormant` (hors-champ, ni record ni entrée monde), `Materializing`, `Live` (corps
+    /// complet), `Expired`/`Disposing`. C'est le pool que les deux passes découplées font vivre.
+    stubs: crate::stub::StubPool,
+    /// Constantes de portée/temps du cycle de vie de la FOULE (rayons spawn/despawn, délais) — un
+    /// `WorldConfig` par producteur (spec §2 : police/trafic ont leurs propres distances). Ici la
+    /// foule ; figé au boot du registre, jamais muté par tick.
+    world_config: crate::stub::WorldConfig,
+    /// Corps live : un `NpcRecord` par stub `Live` UNIQUEMENT (créé à la matérialisation, retiré à
+    /// la disposal). Un `Dormant`/`Materializing` n'a PAS d'entrée ici (spec §7.1).
     records: std::collections::HashMap<ClientId, NpcRecord>,
     next_npc_id: ClientId,
     /// Chemin/progression courants par PNJ (Task 3/5, plan navigation). Absent d'un id =
@@ -226,6 +243,8 @@ impl Server {
             npc_registry: Some(NpcRegistry {
                 catalog,
                 director,
+                stubs: crate::stub::StubPool::new(),
+                world_config: crate::stub::WorldConfig::crowd_defaults(),
                 records: std::collections::HashMap::new(),
                 next_npc_id: crate::world::NPC_ID_RANGE_START,
                 nav_states: std::collections::HashMap::new(),
@@ -588,38 +607,15 @@ impl Server {
         &mut self,
         pre_tick_behaviors: Option<std::collections::HashMap<ClientId, EntityBehavior>>,
     ) {
-        let Some(registry) = &mut self.npc_registry else {
-            return;
-        };
-        // Trouvé en revue finale de branche (plan navigation) : player_ids() renvoie TOUT le
-        // monde dans World, PNJ compris (mêmes add_player/remove_player, décision délibérée de la
-        // fondation PNJ pour réutiliser snapshot_for/la grille spatiale telles quelles). Sans ce
-        // filtre, dès qu'au moins un PNJ existe, ce compte ne retombe jamais à zéro même si tous
-        // les vrais joueurs se déconnectent — le chemin de despawn-sur-district-vide
-        // (population_director.rs, !has_players) devient inatteignable en pratique. Bug
-        // préexistant à ce plan (présent depuis la fondation PNJ), corrigé ici car c'est ce même
-        // plan qui l'a fait échouer pour de vrai (test de nettoyage nav_states, Task 6).
-        let player_count = self
-            .world
-            .player_ids()
-            .into_iter()
-            .filter(|id| !crate::world::is_npc_id(*id))
-            .count() as u32;
-        let players_by_district =
-            std::collections::HashMap::from([("default".to_string(), player_count)]);
-        let existing_by_district = std::collections::HashMap::from([(
-            "default".to_string(),
-            registry.records.len() as u32,
-        )]);
-        let actions = registry.director.reconcile(
-            &registry.catalog,
-            &players_by_district,
-            &existing_by_district,
-        );
-        // PLACEMENT (incrément 2/3 du monde vivant) : avant, un spawn faisait `add_player` SANS
-        // `set_pose` — toute la foule apparaissait empilée à l'origine (0,0,0), loin du joueur. On
-        // place désormais chaque PNJ via `CrowdProducer` (semis en anneau autour d'un joueur réel).
-        // Positions des VRAIS joueurs (non-PNJ) de ce shard, ancre du placement.
+        // ── Positions des VRAIS joueurs, collectées AVANT toute prise du registre (contrainte
+        // d'emprunt de la mission) : `update_pass`/le placement en ont besoin, et `self.world` est
+        // un champ DISJOINT de `self.npc_registry`. On les capture ici pour ne pas ré-emprunter
+        // `self.world` au milieu des branches qui tiennent `&mut registry`.
+        //
+        // Filtre `!is_npc_id` : `player_ids()` renvoie TOUT le monde dans World, PNJ `Live` compris
+        // (mêmes `add_player`/`remove_player`). Sans ce filtre, dès qu'un PNJ est matérialisé le
+        // compte de joueurs ne retomberait jamais à zéro et le despawn-sur-district-vide serait
+        // inatteignable (bug de la fondation PNJ, corrigé au plan navigation, préservé ici).
         let player_positions: Vec<(f32, f32, f32)> = self
             .world
             .player_ids()
@@ -627,59 +623,105 @@ impl Server {
             .filter(|id| !crate::world::is_npc_id(*id))
             .filter_map(|id| self.world.pose_of(id).map(|p| (p.x, p.y, p.z)))
             .collect();
-        // Pré-calcul des positions pour tous les spawns de ce tick (spirale déterministe autour du
-        // 1er joueur — mono-district, cf. simplification `"default"` ci-dessus ; le placement
-        // multi-joueur/par-voie est un raffinement différé). Anneau vide si aucun joueur (le
-        // director ne spawne alors pas, mais on retombe sur l'origine par sûreté).
+        let player_count = player_positions.len() as u32;
+        // Horloge ms déterministe dérivée du compteur de ticks (même formule qu'`apply_damage`,
+        // l.~1180) : le cycle de vie du socle raisonne en ms, les tests contrôlent le nb de ticks.
+        let now_ms = self.world.tick() * (1000 / crate::default_tick_rate_hz() as u64);
+
+        let Some(registry) = &mut self.npc_registry else {
+            return;
+        };
+        let cfg = registry.world_config;
+
+        // ── ÉTAPE 1 — le director dit COMBIEN peupler (spec §7.1). Le `StubPool` est désormais la
+        // LISTE MAÎTRE : la densité se compare au nombre de STUBS (tous cycles de vie confondus),
+        // pas au seul nombre de records `Live`. Un PNJ hors-champ (`Dormant`) compte déjà pour la
+        // cible de densité — sinon le director sur-produirait tant qu'aucun n'est matérialisé.
+        let players_by_district =
+            std::collections::HashMap::from([("default".to_string(), player_count)]);
+        let existing_by_district =
+            std::collections::HashMap::from([("default".to_string(), registry.stubs.len() as u32)]);
+        let actions = registry.director.reconcile(
+            &registry.catalog,
+            &players_by_district,
+            &existing_by_district,
+        );
+        // Placement des NOUVEAUX stubs de ce tick : semis en anneau (déterministe) autour du 1er
+        // joueur. Le stub naît `Dormant` au transform posé — il ne devient un corps live qu'à
+        // l'étape 2, quand le socle le promeut par proximité (spec §1). Anneau vide si aucun joueur
+        // (le director ne spawne alors pas ; repli origine par sûreté).
         let spawn_count = actions
             .iter()
             .filter(|a| matches!(a, crate::population_director::DirectorAction::Spawn { .. }))
             .count() as u32;
         let placement_anchor = player_positions.first().copied().unwrap_or((0.0, 0.0, 0.0));
-        let crowd_placements = crate::crowd_producer::CrowdPlacement::from_world_config(
-            &crate::stub::WorldConfig::crowd_defaults(),
-        )
-        .positions(spawn_count, placement_anchor);
+        let crowd_placements = crate::crowd_producer::CrowdPlacement::from_world_config(&cfg)
+            .positions(spawn_count, placement_anchor);
         let mut placement_cursor = 0usize;
         for action in actions {
             match action {
                 crate::population_director::DirectorAction::Spawn { archetype_id, .. } => {
+                    // Chaque Spawn crée un `EntityStub` `Dormant` DANS LE POOL — PAS de record ni
+                    // d'entrée monde encore (spec §7.1 : un corps live ne naît qu'à la matérialisation).
                     let id = registry.next_npc_id;
                     registry.next_npc_id += 1;
-                    registry
-                        .records
-                        .insert(id, NpcRecord::new(id, archetype_id));
-                    self.world.add_player(id);
-                    // Pose le PNJ à sa position d'anneau (au lieu de le laisser à l'origine).
-                    if let Some(&(x, y, z, yaw)) = crowd_placements.get(placement_cursor) {
-                        placement_cursor += 1;
-                        self.world.set_pose(
-                            id,
-                            Pose {
-                                x,
-                                y,
-                                z,
-                                yaw,
-                                ..Default::default()
-                            },
-                        );
-                    }
+                    let (x, y, z, yaw) =
+                        crowd_placements.get(placement_cursor).copied().unwrap_or((
+                            placement_anchor.0,
+                            placement_anchor.1,
+                            placement_anchor.2,
+                            0.0,
+                        ));
+                    placement_cursor += 1;
+                    registry.stubs.insert(crate::stub::EntityStub::new_dormant(
+                        id,
+                        crate::stub::EntityKind::Pedestrian,
+                        archetype_id,
+                        (x, y, z),
+                        yaw,
+                        crate::stub::ProducerId::Crowd,
+                    ));
                 }
                 crate::population_director::DirectorAction::Despawn { excess, .. } => {
-                    let to_remove: Vec<ClientId> = registry
-                        .records
-                        .keys()
-                        .take(excess as usize)
-                        .copied()
-                        .collect();
-                    for id in to_remove {
-                        registry.records.remove(&id);
-                        registry.nav_states.remove(&id);
-                        self.world.remove_player(id);
-                    }
+                    // Despawn DIRECTOR (district vidé / densité abaissée) — distinct du despawn
+                    // LOD-par-distance (étape 3). Passe par le socle : drop des `Dormant` en
+                    // priorité, sinon EXPIRE des `Live` (retrait unifié par la disposal, étape 3).
+                    // On ne détruit donc jamais un corps live directement ici (collect-then-dispose).
+                    registry.stubs.director_despawn(excess);
                 }
             }
         }
+
+        // ── ÉTAPE 2 — PASSE DE DÉCISION du socle : transitionne les cycles de vie selon la
+        // proximité joueur et retourne les stubs devenus `Materializing`. Pour chacun : on crée
+        // son corps live (`NpcRecord` + entrée monde + pose au transform stocké) puis on le promeut
+        // `Live` (spec §7.1). C'est ICI, et NULLE PART AILLEURS, qu'un PNJ de foule devient visible.
+        let to_materialize = registry.stubs.update_pass(&player_positions, now_ms, &cfg);
+        for id in to_materialize {
+            let Some(stub) = registry.stubs.get_mut(id) else {
+                continue; // ne devrait pas arriver (id issu du pool), défensif
+            };
+            let archetype = stub.archetype;
+            let (x, y, z) = stub.position;
+            let yaw = stub.yaw;
+            registry.records.insert(id, NpcRecord::new(id, archetype));
+            self.world.add_player(id);
+            self.world.set_pose(
+                id,
+                Pose {
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    ..Default::default()
+                },
+            );
+            // Idempotent : marque le stub `Live` une fois le corps réellement placé.
+            if let Some(stub) = registry.stubs.get_mut(id) {
+                stub.mark_materialized();
+            }
+        }
+
         const NPC_SPEED_UNITS_PER_SEC: f32 = 3.0; // marche (spec parle de vitesse par brique/archétype
                                                   // via .aiarch, différé — constante v1 uniforme ici,
                                                   // documentée comme simplification assumée).
@@ -805,6 +847,20 @@ impl Server {
                     },
                 );
             }
+        }
+
+        // ── ÉTAPE 3 — PASSE DE DISPOSAL du socle (collect-then-dispose, RE §4bis) : retourne les
+        // ids des stubs `Expired` (sortis du rayon de despawn 45 m pendant > le délai 10 s à
+        // l'étape 2, OU expirés par le director à l'étape 1). Pour chacun on défait le corps live :
+        // `NpcRecord` + `nav_state` + entrée monde. C'est la SEULE voie de destruction d'un PNJ de
+        // foule — jamais dans la passe de décision. Le despawn est donc piloté par la DISTANCE (le
+        // socle), plus par la surpopulation de district : le director ne fait plus que dimensionner
+        // la densité, il ne détruit plus directement (spec §7.1).
+        let disposed = registry.stubs.disposal_pass();
+        for id in disposed {
+            registry.records.remove(&id);
+            registry.nav_states.remove(&id);
+            self.world.remove_player(id);
         }
 
         // Décroissance temporelle du heat (spec §3 : "decay temporel"), une fois par tick, hors de
@@ -2704,13 +2760,20 @@ mod tests {
 
     #[test]
     fn a_despawned_npc_has_its_nav_state_removed_not_leaked() {
-        // Trouvé en revue finale de branche (plan navigation) : le despawn (population director,
-        // fondation PNJ) retirait bien le NpcRecord et l'entrée World, mais laissait l'entrée
-        // nav_states orpheline — fuite de mémoire lente (non bornée) sur un Shard longue durée à
-        // fort churn spawn/despawn (les ids ne sont jamais réutilisés, next_npc_id ne fait
-        // qu'augmenter). Ce test verrouille le nettoyage : après un cycle spawn -> déconnexion du
-        // seul joueur présent (qui déclenche le despawn total du district "default",
-        // population_director.rs) -> tick, le nombre d'entrées de nav_states doit être revenu à 0.
+        // Trouvé en revue finale de branche (plan navigation) : le despawn retirait bien le
+        // NpcRecord et l'entrée World, mais laissait l'entrée nav_states orpheline — fuite de
+        // mémoire lente (non bornée) sur un Shard longue durée à fort churn spawn/despawn (les ids
+        // ne sont jamais réutilisés, next_npc_id ne fait qu'augmenter). Ce test verrouille le
+        // nettoyage : après un cycle spawn -> déconnexion du seul joueur présent -> tick, le nombre
+        // d'entrées de nav_states doit être revenu à 0.
+        //
+        // INTENT PRÉSERVÉ, MÉCANISME CHANGÉ (big-bang monde vivant) : avant, la déconnexion du seul
+        // joueur faisait despawn le PNJ par SURPOPULATION de district (le director voyait le
+        // district vide et détruisait directement le record). Désormais elle passe par le socle :
+        // le director émet toujours `Despawn` sur un district vidé, mais `director_despawn` EXPIRE le
+        // stub `Live` (-> `Expired`) et c'est la `disposal_pass` qui retire record + nav_state +
+        // entrée monde (collect-then-dispose). Le résultat observable (records=0, nav_states=0) est
+        // identique — d'où un test inchangé dans ses assertions, seule l'explication évolue.
         use crate::nav_graph::{NavGraph, Vec3 as NavVec3};
         use crate::npc_catalog::parse_and_validate;
         use crate::population_director::PopulationDirector;
@@ -2900,6 +2963,13 @@ mod tests {
         // "default" non-vide pendant tout le scénario — le test prouve ainsi la vraie sémantique
         // LOD spec'd : « persistant hors de PORTÉE », pas « zéro joueur au monde ».
         //
+        // ⚠️ Depuis le big-bang monde vivant, le despawn est LOD-PAR-DISTANCE : le second joueur à
+        // (500,500) est > 45 m du PNJ près de l'origine, donc son timer de despawn est ARMÉ dès
+        // qu'il s'éloigne. Le PNJ ne survit ici que parce que le scénario (~35 ticks) reste bien en
+        // deçà du délai de 10 s (200 ticks à 20 Hz) — c'est intentionnel et suffisant pour prouver
+        // le dead-reckoning. Ne pas rallonger la boucle au-delà de ~190 ticks sans rapprocher le
+        // second joueur, sinon le PNJ serait légitimement disposé par distance avant l'observation.
+        //
         // Piège de fixture : le brief d'origine de cette tâche proposait un graphe à 2 nœuds, (0,0,0)
         // et (200,0,0) — EXACTEMENT le même piège que Task 5 a trouvé et documenté dans
         // `a_npc_with_a_nav_graph_and_an_errer_brique_moves_over_several_ticks` : ce PNJ utilise la
@@ -2992,6 +3062,166 @@ mod tests {
              (position observée = {npc_position:?})"
         );
     }
+
+    // ── Architecture cible « monde vivant » (big-bang) : le StubPool est la liste maître ; un
+    // `NpcRecord` (corps live + entrée monde) n'existe QUE pour un stub `Live`. Les deux tests
+    // suivants verrouillent le cœur de ce modèle : matérialisation PAR PROXIMITÉ et despawn
+    // LOD-PAR-DISTANCE — les deux propriétés que ce refactor introduit (spec §7.1).
+
+    #[test]
+    fn a_crowd_stub_materializes_a_body_only_once_a_player_enters_the_spawn_radius() {
+        // (a) Un stub `Dormant` posé LOIN de tout joueur ne reçoit NI `NpcRecord` NI entrée monde
+        // tant qu'aucun joueur n'entre dans son rayon de promotion (spawn_dist 40 m). Dès qu'un
+        // joueur s'en approche, le socle le promeut `Materializing` -> l'appelant crée le corps
+        // live -> `Live`, et il apparaît alors (et seulement alors). Preuve directe que les records
+        // DÉCOULENT des stubs par proximité, ils ne sont plus créés au spawn du director.
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"m\"\nbriques = [\"flaner-sur-place\"]\n",
+        )
+        .unwrap();
+        // Densité cible 1 : avec exactement 1 stub dans le pool, le director ne produit ni spawn ni
+        // despawn (existing == target) — il ne perturbe donc pas le stub qu'on pose à la main.
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+
+        // Stub `Dormant` planté LOIN (1000,1000), bien au-delà du rayon de promotion de tout joueur
+        // à l'origine. Accès direct au registre : `mod tests` est enfant de `server_loop` (mêmes
+        // privilèges que le test de despawn ci-dessus qui lit `r.records`/`r.nav_states`).
+        let stub_id = crate::world::NPC_ID_RANGE_START + 777;
+        server
+            .npc_registry
+            .as_mut()
+            .unwrap()
+            .stubs
+            .insert(crate::stub::EntityStub::new_dormant(
+                stub_id,
+                crate::stub::EntityKind::Pedestrian,
+                1,
+                (1000.0, 1000.0, 0.0),
+                0.0,
+                crate::stub::ProducerId::Crowd,
+            ));
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1)); // joueur à l'origine (Pose par défaut 0,0,0)
+        server.tick(&mut t);
+        server.tick(&mut t);
+
+        // Le stub est resté `Dormant` : aucun corps live, aucune entrée monde.
+        assert!(
+            !server
+                .npc_registry
+                .as_ref()
+                .unwrap()
+                .records
+                .contains_key(&stub_id),
+            "un stub loin de tout joueur ne doit PAS avoir de NpcRecord (pas encore matérialisé)"
+        );
+        assert!(
+            server.world.pose_of(stub_id).is_none(),
+            "un stub Dormant ne doit PAS avoir d'entrée dans le monde"
+        );
+
+        // Le joueur se déplace SUR le stub (1000,1000) — désormais dans le rayon de promotion.
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position(1000.0, 1000.0, 0.0, 0.0),
+        });
+        server.tick(&mut t);
+
+        // Le socle a promu le stub, l'appelant a créé le corps live : record + entrée monde présents.
+        assert!(
+            server
+                .npc_registry
+                .as_ref()
+                .unwrap()
+                .records
+                .contains_key(&stub_id),
+            "une fois le joueur dans le rayon de spawn, le stub doit être matérialisé (record créé)"
+        );
+        assert!(
+            server.world.pose_of(stub_id).is_some(),
+            "le corps live matérialisé doit avoir une entrée monde au transform stocké"
+        );
+    }
+
+    #[test]
+    fn a_live_crowd_npc_is_disposed_when_the_player_leaves_beyond_45m_for_over_10s() {
+        // (b) Despawn LOD-PAR-DISTANCE (le cœur du big-bang) : un PNJ matérialisé dont le joueur
+        // s'éloigne au-delà du rayon de despawn (45 m) pendant plus que le délai (10 s = 200 ticks
+        // à 20 Hz) est EXPIRÉ par le socle puis DISPOSÉ (record + nav_state + entrée monde retirés).
+        // Ce n'est plus la surpopulation de district qui despawn, mais la distance — comme le jeu.
+        use crate::npc_catalog::parse_and_validate;
+        use crate::population_director::PopulationDirector;
+        use std::collections::HashMap;
+
+        let catalog = parse_and_validate(
+            "format_version = 1\n[[archetype]]\nid = 1\nname = \"m\"\nbriques = [\"flaner-sur-place\"]\n",
+        )
+        .unwrap();
+        let director = PopulationDirector::new(HashMap::from([("default".to_string(), 1)]));
+        let mut server = Server::new_with_npcs(50.0, catalog, director);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1)); // joueur à l'origine
+        server.tick(&mut t); // director spawne un stub (anneau autour de l'origine), placé <= 40 m
+        server.tick(&mut t); // le socle le promeut Live (joueur dans le rayon de spawn) -> record
+
+        // Récupère l'id du PNJ matérialisé (le seul record présent).
+        let live_id = {
+            let reg = server.npc_registry.as_ref().unwrap();
+            *reg.records
+                .keys()
+                .next()
+                .expect("le director doit avoir matérialisé un PNJ près du joueur")
+        };
+        assert!(
+            server.world.pose_of(live_id).is_some(),
+            "précondition : le PNJ matérialisé a une entrée monde"
+        );
+
+        // Le joueur s'exile très loin (au-delà de 45 m) et y reste. Le premier tick post-éloignement
+        // arme le timer de despawn ; il faut ensuite > 10 s (200 ticks) hors-portée pour expirer.
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_position(5000.0, 5000.0, 0.0, 0.0),
+        });
+        server.tick(&mut t); // arme le timer (out_of_range_since = maintenant)
+        assert!(
+            server
+                .npc_registry
+                .as_ref()
+                .unwrap()
+                .records
+                .contains_key(&live_id),
+            "juste après l'éloignement (< délai), le PNJ ne doit PAS encore être disposé"
+        );
+
+        // Assez de ticks pour dépasser le délai de 10 s (200 ticks) largement.
+        for _ in 0..210 {
+            server.tick(&mut t);
+        }
+
+        // Le PNJ d'origine a été disposé : plus de record, plus de nav_state, plus d'entrée monde.
+        let reg = server.npc_registry.as_ref().unwrap();
+        assert!(
+            !reg.records.contains_key(&live_id),
+            "après > 10 s au-delà de 45 m, le PNJ doit être disposé (despawn LOD par distance)"
+        );
+        assert!(
+            !reg.nav_states.contains_key(&live_id),
+            "le nav_state du PNJ disposé ne doit pas fuiter"
+        );
+        assert!(
+            server.world.pose_of(live_id).is_none(),
+            "l'entrée monde du PNJ disposé doit être retirée"
+        );
+    }
+
     #[test]
     fn a_server_without_elevators_never_emits_an_elevator_state() {
         // Comportement historique strictement préservé.

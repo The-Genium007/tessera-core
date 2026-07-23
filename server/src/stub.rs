@@ -171,6 +171,23 @@ impl EntityStub {
         }
     }
 
+    /// Force l'expiration d'un stub `Live` (→ `Expired`) HORS du prédicat de distance/durée : c'est
+    /// la voie de démotion PILOTÉE PAR LE DIRECTOR (district vidé de ses joueurs, ou densité cible
+    /// abaissée), distincte de la démotion LOD-par-distance de `update_lifecycle`. Passe quand même
+    /// par l'état `Expired`, donc la SUPPRESSION reste unifiée dans `disposal_pass` (collect-then-
+    /// dispose, RE §4bis) — le serveur ne détruit toujours rien hors de la passe de disposal, quelle
+    /// que soit la cause de l'expiration. No-op sur un stub non `Live` (un `Dormant`/`Materializing`
+    /// n'a ni record ni entrée monde à libérer ; un `Expired`/`Disposing` est déjà en cours de retrait).
+    /// Retourne `true` si l'appel a effectivement expiré le stub (utile pour ne compter que les vrais).
+    pub fn mark_expired_by_director(&mut self) -> bool {
+        if self.lifecycle == Lifecycle::Live {
+            self.lifecycle = Lifecycle::Expired;
+            true
+        } else {
+            false
+        }
+    }
+
     /// PASSE DE DÉCISION (par tick, par stub) : transitionne le cycle de vie selon la proximité du
     /// joueur le plus proche. `nearest_dist_sq` = distance² au joueur le plus proche du shard
     /// (`None` = aucun joueur — traité comme « hors de tout rayon »). `now_ms` : horloge de tick
@@ -270,6 +287,18 @@ impl StubPool {
             .count()
     }
 
+    /// Accès mutable à un stub par id (l'appelant a besoin de `mark_materialized` après avoir placé
+    /// le corps live). `None` si l'id n'est pas/plus dans le pool.
+    pub fn get_mut(&mut self, id: ClientId) -> Option<&mut EntityStub> {
+        self.stubs.iter_mut().find(|s| s.id == id)
+    }
+
+    /// Position stockée d'un stub par id — la promotion place le corps live AU TRANSFORM STOCKÉ
+    /// (spec §1, RE §0), pas à une position recalculée. `None` si l'id n'est pas/plus dans le pool.
+    pub fn position_of(&self, id: ClientId) -> Option<(f32, f32, f32)> {
+        self.stubs.iter().find(|s| s.id == id).map(|s| s.position)
+    }
+
     /// PASSE DE DÉCISION sur tout le pool. `player_positions` : positions monde des joueurs du shard.
     /// Pour chaque stub, calcule la distance² au joueur le plus proche et transitionne son cycle de
     /// vie. Retourne les ids des stubs devenus `Materializing` ce tick (l'appelant doit les PLACER
@@ -290,6 +319,46 @@ impl StubPool {
             }
         }
         to_materialize
+    }
+
+    /// Démotion PILOTÉE PAR LE DIRECTOR : réduit le pool de `excess` stubs (district vidé de ses
+    /// joueurs, ou densité cible abaissée — spec §7.1). Distincte de la démotion LOD-par-distance
+    /// (`update_pass`), c'est la voie « il y en a trop / plus personne pour les observer ».
+    ///
+    /// Politique : on retire d'abord les `Dormant` (jamais matérialisés — aucun record ni entrée
+    /// monde, donc RIEN à libérer côté appelant : on les drop directement), puis, s'il en faut
+    /// encore, on EXPIRE des `Live` (→ `Expired`, retrait unifié par `disposal_pass` au tour suivant
+    /// de collecte). Retirer les `Dormant` en priorité est le moins coûteux (aucun corps live à
+    /// défaire) et le plus fidèle : on ne détruit un PNJ visible que si on ne peut pas faire autrement.
+    /// Retourne les ids des `Live` qu'on a expirés (l'appelant les verra ressortir de `disposal_pass`).
+    pub fn director_despawn(&mut self, excess: u32) -> usize {
+        let mut remaining = excess as usize;
+        // 1) Drop des Dormant en priorité (rien à libérer côté monde/record).
+        if remaining > 0 {
+            let before = self.stubs.len();
+            let mut dropped = 0usize;
+            self.stubs.retain(|s| {
+                if dropped < remaining && s.lifecycle == Lifecycle::Dormant {
+                    dropped += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            remaining -= before - self.stubs.len();
+        }
+        // 2) S'il en faut encore, expirer des Live (démotion réelle, via Expired → disposal_pass).
+        let mut expired = 0usize;
+        for stub in &mut self.stubs {
+            if remaining == 0 {
+                break;
+            }
+            if stub.mark_expired_by_director() {
+                remaining -= 1;
+                expired += 1;
+            }
+        }
+        expired
     }
 
     /// PASSE DE DISPOSAL (séparée de la décision, RE §4bis collect-then-dispose). Collecte les stubs
@@ -518,6 +587,63 @@ mod tests {
         let disposed = pool.disposal_pass();
         assert_eq!(disposed, vec![crate::world::NPC_ID_RANGE_START + 1]);
         assert_eq!(pool.len(), 1, "seul le dormant lointain subsiste");
+    }
+
+    #[test]
+    fn director_despawn_drops_dormant_first_then_expires_live() {
+        // Un Dormant (rien à libérer) + un Live (corps à défaire). Un despawn director de 1 doit
+        // sacrifier le Dormant EN PRIORITÉ (moins coûteux, plus fidèle) et laisser le Live intact.
+        let cfg = WorldConfig::crowd_defaults();
+        let mut pool = StubPool::new();
+        let mut live = dormant_at(0.0, 0.0);
+        live.update_lifecycle(Some(100.0), 0, &cfg);
+        live.mark_materialized(); // Live
+        pool.insert(live);
+        pool.insert(EntityStub::new_dormant(
+            crate::world::NPC_ID_RANGE_START + 9,
+            EntityKind::Pedestrian,
+            216,
+            (1000.0, 1000.0, 0.0),
+            0.0,
+            ProducerId::Crowd,
+        )); // Dormant
+
+        let expired = pool.director_despawn(1);
+        assert_eq!(
+            expired, 0,
+            "le Dormant absorbe le despawn, aucun Live expiré"
+        );
+        assert_eq!(pool.len(), 1, "le Dormant a été retiré directement");
+        assert_eq!(pool.live_count(), 1, "le Live survit");
+
+        // Un second despawn director doit maintenant mordre sur le Live (plus de Dormant).
+        let expired = pool.director_despawn(1);
+        assert_eq!(expired, 1, "plus de Dormant -> un Live est expiré");
+        // Expired mais pas encore retiré (collect-then-dispose) : disposal_pass le sort.
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.disposal_pass().len(), 1);
+        assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn position_of_returns_the_stored_transform() {
+        let mut pool = StubPool::new();
+        pool.insert(EntityStub::new_dormant(
+            crate::world::NPC_ID_RANGE_START + 3,
+            EntityKind::Pedestrian,
+            216,
+            (12.0, 34.0, 5.0),
+            0.0,
+            ProducerId::Crowd,
+        ));
+        assert_eq!(
+            pool.position_of(crate::world::NPC_ID_RANGE_START + 3),
+            Some((12.0, 34.0, 5.0))
+        );
+        assert_eq!(
+            pool.position_of(crate::world::NPC_ID_RANGE_START + 99),
+            None
+        );
     }
 
     #[test]
