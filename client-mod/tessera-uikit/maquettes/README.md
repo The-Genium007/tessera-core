@@ -31,6 +31,9 @@ redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquette
   (minimap haut-droite, hex-widgets, hints ; wanted et tracker RETIRÉS) + les AJOUTS Tessera
   (faim/soif, nametags à présentation, micro PTT à cadre-égaliseur, toasts, micro-statut) —
   bouton pour surligner les ajouts.
+- **`maquette-ecran-mort.html`** — **MAQUETTE D'ÉCRAN : à terre / mort** (C20). Timer serveur,
+  attendre les secours (réanimation médic) vs Abandonner (maintenir → hôpital), vignette rouge
+  battante + ECG. Démo interactive.
 - **`maquette-menu-pause.html`** — **MAQUETTE D'ÉCRAN : menu pause reworké** (C24). Natif conservé
   (Reprendre/Réglages) + ajouts Tessera : Retour au choix de personnage, Commandes (keybindings),
   Quitter wrappé (Leave d'abord — démo au clic), panneau de session (serveur/perso/ping/temps).
