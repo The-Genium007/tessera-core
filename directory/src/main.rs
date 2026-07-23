@@ -144,6 +144,23 @@ fn cmd_publish(manifest_path: &std::path::Path, out_dir: &std::path::Path) -> an
 /// profondeur), puis confirme via le CMS que ce slug n'est pas révoqué. `false` pour toute étape
 /// manquante/en échec — jamais bloquant pour la publication (spec §objectif : repli silencieux,
 /// pas d'erreur fatale).
+/// Récupère le JWT d'attestation courant depuis l'endpoint interne du serveur de jeu
+/// (`TESSERA_INTERNAL_ATTESTATION_URL`, réponse `{"token": "<jwt>"}`). `None` pour toute
+/// défaillance (variable absente, endpoint injoignable, réponse illisible) — jamais bloquant,
+/// factorisé depuis `resolve_attestation` (même logique de récupération, réutilisée ici pour
+/// le transport register/heartbeat en plus de la vérification publish).
+fn fetch_current_attestation_token() -> Option<String> {
+    let internal_attestation_url = std::env::var("TESSERA_INTERNAL_ATTESTATION_URL").ok()?;
+    let client = reqwest::blocking::Client::new();
+    let body = client
+        .get(&internal_attestation_url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.json::<serde_json::Value>())
+        .ok()?;
+    body.get("token")?.as_str().map(str::to_string)
+}
+
 fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
     if manifest.identity.kind != server::manifest::ServerKind::Official {
         // Pas la peine d'interroger quoi que ce soit si le manifeste ne déclare même pas
@@ -152,14 +169,11 @@ fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
         return false;
     }
 
-    let internal_attestation_url = match std::env::var("TESSERA_INTERNAL_ATTESTATION_URL") {
-        Ok(url) => url,
-        Err(_) => {
-            eprintln!(
-                "TESSERA_INTERNAL_ATTESTATION_URL absente — impossible de vérifier l'attestation, kind rétrogradé à community"
-            );
-            return false;
-        }
+    let Some(token) = fetch_current_attestation_token() else {
+        eprintln!(
+            "aucun token d'attestation disponible (TESSERA_INTERNAL_ATTESTATION_URL absente/injoignable) — kind rétrogradé à community"
+        );
+        return false;
     };
     let public_key_pem = match std::env::var("TESSERA_ATTESTATION_PUBLIC_KEY") {
         Ok(v) => v.replace("\\n", "\n"), // tolère les \n échappés en env
@@ -172,28 +186,6 @@ fn resolve_attestation(manifest: &server::manifest::Manifest) -> bool {
         Ok(url) => url,
         Err(_) => {
             eprintln!("TESSERA_CMS_URL absente — kind rétrogradé à community");
-            return false;
-        }
-    };
-
-    let client = reqwest::blocking::Client::new();
-    let token = match client
-        .get(&internal_attestation_url)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .and_then(|r| r.json::<serde_json::Value>())
-    {
-        Ok(body) => match body.get("token").and_then(|t| t.as_str()) {
-            Some(t) => t.to_string(),
-            None => {
-                eprintln!("aucun token d'attestation disponible sur {internal_attestation_url}");
-                return false;
-            }
-        },
-        Err(e) => {
-            eprintln!(
-                "endpoint d'attestation interne injoignable ({internal_attestation_url}) : {e}"
-            );
             return false;
         }
     };
@@ -291,7 +283,8 @@ fn cmd_register(
     let manifest = server::manifest::load(manifest_path).map_err(|e| anyhow::anyhow!(e))?;
     let key = server_identity::load_or_create(identity_path).map_err(|e| anyhow::anyhow!(e))?;
     let public_key_b64 = signing::public_b64(&key);
-    let payload = build_register_payload(&manifest, public_key_b64);
+    let attestation_token = fetch_current_attestation_token();
+    let payload = build_register_payload(&manifest, public_key_b64, attestation_token);
 
     let client = reqwest::blocking::Client::new();
     let resp = client
@@ -316,19 +309,31 @@ struct RegisterPayload {
     name: String,
     public_key_b64: String,
     metadata: derive::DirectoryEntry,
+    /// JWT d'attestation courant (cf. resolve_attestation), transmis UNIQUEMENT quand le
+    /// manifeste déclare identity.kind=Official — jamais pour un manifeste "community", même
+    /// si un token a été récupéré par ailleurs (config incohérente). platform-api revérifie
+    /// intégralement ce token (signature/issuer/expiration/sub) avant d'accorder
+    /// kind="official" — ce champ n'est qu'un TRANSPORT, aucune confiance n'est faite ici.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestation: Option<String>,
 }
 
 fn build_register_payload(
     manifest: &server::manifest::Manifest,
     public_key_b64: String,
+    attestation_token: Option<String>,
 ) -> RegisterPayload {
+    let attestation = if manifest.identity.kind == server::manifest::ServerKind::Official {
+        attestation_token
+    } else {
+        None
+    };
     RegisterPayload {
         id: manifest.identity.id.clone(),
         name: manifest.identity.name.clone(),
         public_key_b64,
-        // register/heartbeat n'établissent pas l'attestation officielle (c'est `publish` qui la
-        // résout, via resolve_attestation) — le metadata annoncé reste plafonné à "community".
         metadata: derive_entry(manifest, false),
+        attestation,
     }
 }
 
@@ -397,7 +402,8 @@ fn cmd_heartbeat(
 
     // Register d'abord (upsert idempotent) : le serveur s'annonce dès son lancement.
     let public_key_b64 = signing::public_b64(&key);
-    let payload = build_register_payload(&manifest, public_key_b64);
+    let attestation_token = fetch_current_attestation_token();
+    let payload = build_register_payload(&manifest, public_key_b64, attestation_token);
     let resp = client
         .post(format!("{platform_url}/v1/servers/register"))
         .json(&payload)
@@ -442,7 +448,7 @@ mod register_tests {
     #[test]
     fn build_register_payload_uses_manifest_identity() {
         let manifest = sample_manifest();
-        let payload = build_register_payload(&manifest, "fake-pubkey-b64".to_string());
+        let payload = build_register_payload(&manifest, "fake-pubkey-b64".to_string(), None);
         assert_eq!(payload.id, manifest.identity.id);
         assert_eq!(payload.name, manifest.identity.name);
         assert_eq!(payload.public_key_b64, "fake-pubkey-b64");
@@ -451,7 +457,7 @@ mod register_tests {
     #[test]
     fn register_payload_carries_full_directory_entry_as_metadata() {
         let manifest = sample_manifest();
-        let payload = build_register_payload(&manifest, "fake-pubkey-b64".to_string());
+        let payload = build_register_payload(&manifest, "fake-pubkey-b64".to_string(), None);
         let json = serde_json::to_value(&payload).unwrap();
         // Le metadata doit être l'entrée launcher camelCase, dérivée du manifeste.
         assert_eq!(
@@ -467,6 +473,38 @@ mod register_tests {
             manifest.identity.required_modset
         );
         assert!(json["metadata"]["launchArgs"].is_array());
+    }
+
+    #[test]
+    fn build_register_payload_has_no_attestation_when_manifest_is_community() {
+        let manifest = sample_manifest(); // kind=Community par défaut
+        let payload = build_register_payload(&manifest, "pubkey".to_string(), None);
+        assert_eq!(payload.attestation, None);
+    }
+
+    #[test]
+    fn build_register_payload_carries_attestation_when_manifest_declares_official() {
+        let mut manifest = sample_manifest();
+        manifest.identity.kind = server::manifest::ServerKind::Official;
+        let payload = build_register_payload(
+            &manifest,
+            "pubkey".to_string(),
+            Some("fake-jwt-token".to_string()),
+        );
+        assert_eq!(payload.attestation, Some("fake-jwt-token".to_string()));
+    }
+
+    #[test]
+    fn build_register_payload_omits_attestation_even_if_provided_when_manifest_is_community() {
+        // Un token récupéré par accident (config incohérente) ne doit jamais être transmis pour
+        // un manifeste qui ne déclare même pas "official" — évite d'envoyer un JWT inutilement.
+        let manifest = sample_manifest();
+        let payload = build_register_payload(
+            &manifest,
+            "pubkey".to_string(),
+            Some("fake-jwt-token".to_string()),
+        );
+        assert_eq!(payload.attestation, None);
     }
 }
 
