@@ -67,10 +67,8 @@
   .minimap .clock{position:absolute;top:-1.5em;right:0;font-family:"Share Tech Mono",monospace;font-size:.78em;color:var(--amber);}
   .minimap .tagn{position:absolute;bottom:2px;left:4px;font-family:"Share Tech Mono",monospace;font-size:.62em;color:var(--dim);letter-spacing:.14em;}
   /* Wanted : RETIRÉ du HUD (décision 2026-07-22) — pas d'étoiles de police affichées. */
-  /* NATIF : tracker de quête (placeholder), remonté sous la minimap */
-  .quest{right:2.6%;top:calc(4.5% + 10.4em);width:12.5em;color:var(--amber);}
-  .quest .qt{font-weight:600;font-size:.85em;letter-spacing:.06em;text-transform:uppercase;}
-  .quest .qo{font-size:.78em;color:var(--readable);margin-top:.2em;}
+  /* Tracker de quêtes : RETIRÉ (décision 2026-07-22) — pas de quêtes en RP, le tracker natif
+     sera masqué. */
 
   /* ---- TESSERA : faim/soif à GAUCHE de la minimap ---- */
   .needs{right:calc(2.6% + 13.4em);top:4.5%;display:flex;gap:.55em;height:9.5em;}
@@ -154,10 +152,13 @@
   <div class="eyebrow">Tessera · Maquette · DA officielle</div>
   <h1>HUD en jeu — natif + ajouts Tessera</h1>
   <p class="note">Placements vérifiés sur les captures (minimap HAUT-DROITE, hex-widgets bas-gauche,
-    hints rouges bas-droite). Étoiles de police RETIRÉES (décision). Le natif reste intouché — ses
-    données deviennent serveur-autoritaires (état-piloté). Bouton pour surligner les ajouts Tessera ;
-    <b>maintiens V</b> pour voir le logo micro du push-to-talk (bas-centre).</p>
-  <div class="toolbar"><button type="button" class="tg" id="tgl">Surligner les ajouts Tessera</button></div>
+    hints rouges bas-droite). Étoiles de police RETIRÉES, tracker de quêtes RETIRÉ (pas de quêtes
+    en RP). Le micro PTT (bas-centre) est <b>affiché par défaut</b> ici pour juger le design — en
+    jeu il n'apparaît que pendant l'appui (bouton ou touche V pour simuler).</p>
+  <div class="toolbar">
+    <button type="button" class="tg" id="tgl">Surligner les ajouts Tessera</button>
+    <button type="button" class="tg on" id="ptt">Micro PTT : appuyé</button>
+  </div>
 
   <div class="screen" id="scr">
     <div class="bg"><i class="b b1"></i><i class="b b2"></i><i class="street"></i><i class="lantern"></i></div>
@@ -166,8 +167,9 @@
     <div class="hud vitals"><div class="lab"><span>SANTÉ ·  NATIF (état-piloté)</span><span>168/240</span></div>
       <div class="hp"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="e"></i><i class="e"></i><i class="e"></i></div></div>
     <div class="hud minimap"><span class="clock">14:02</span><span class="tagn">MINIMAP NATIVE</span></div>
-    <!-- Étoiles wanted RETIRÉES (décision Lucas 2026-07-22) : pas d'affichage de heat au HUD. -->
-    <div class="hud quest"><div class="qt">Contrat · Escorte Kabuki</div><div class="qo">Rejoindre le point de rendez-vous</div></div>
+    <!-- Étoiles wanted RETIRÉES + tracker de quêtes RETIRÉ (pas de quêtes en RP) — décisions
+         Lucas 2026-07-22. -->
+
     <div class="hud hexes"><span class="hex">📱</span><span class="hex">🚗</span></div>
     <div class="hud slots2">
       <span class="cons"><span class="q">3</span><span class="k">X</span></span>
@@ -187,7 +189,7 @@
     </div>
     <div class="hud srv tsr">TESSERA <b>dev-01</b> · PING <b>24MS</b> · <b>12/64</b></div>
     <div class="hud toast tsr"><span class="tx">Annonce serveur — event Kabuki dans 10 min</span></div>
-    <div class="hud voice tsr" id="voice" title="C11 — plaque micro + égaliseur, visible pendant le push-to-talk (maintiens V pour la démo)">
+    <div class="hud voice talk tsr" id="voice" title="C11 — plaque micro + égaliseur, visible pendant le push-to-talk (bouton ou touche V pour simuler)">
       <svg viewBox="0 0 24 24" fill="currentColor" aria-label="micro actif"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5.3-3a5.3 5.3 0 0 1-10.6 0H4.9a7.1 7.1 0 0 0 6.2 6.9V21h1.8v-3.1a7.1 7.1 0 0 0 6.2-6.9h-1.8z"/></svg>
       <span class="eq"><i></i><i></i><i></i><i></i><i></i></span>
     </div>
@@ -202,7 +204,7 @@
   </div>
 
   <div class="legend">
-    <div class="lg nat"><b>Natif — intouché, données serveur</b>Vie/armure (C8), minimap, tracker, hex-widgets, consommables, hints. L'UI reste vanilla ; les PV deviennent serveur-autoritaires par l'état local. <b>Étoiles de police : retirées</b> (le heat serveur existe, sans affichage HUD).<span class="mono">état-piloté · spec 2026-07-22-ui-native-branchement-multi</span></div>
+    <div class="lg nat"><b>Natif — intouché, données serveur</b>Vie/armure (C8), minimap, hex-widgets, consommables, hints. L'UI reste vanilla ; les PV deviennent serveur-autoritaires par l'état local. <b>Retirés : étoiles de police</b> (heat serveur sans affichage) <b>et tracker de quêtes</b> (pas de quêtes en RP — tracker natif masqué).<span class="mono">état-piloté · spec 2026-07-22-ui-native-branchement-multi</span></div>
     <div class="lg"><b>Tessera — faim & soif (C14)</b>2 jauges verticales à gauche de la minimap (ambre = faim, aqua = soif). Seul élément de HUD permanent ajouté.<span class="mono">overlay ink · DA §5</span></div>
     <div class="lg"><b>Tessera — social (C15/C11/C19)</b>Nametags (nom cyan + rôle ambre) au-dessus des joueurs ; vocal = <b>plaque micro + égaliseur animé, bas-centre, pendant le push-to-talk</b> (maintiens V en démo) ; toasts serveur haut-centre. <b>Roue d'action rapide</b> (émotes incluses) sur <b>G</b> (touche provisoire) — système de roues R34.<span class="mono">worldui + overlay</span></div>
     <div class="lg"><b>Tessera — micro-statut (C12/C13)</b>Serveur · ping · joueurs, en mono discret sous la vie. Debug-friendly, quasi invisible.<span class="mono">overlay ink</span></div>
@@ -213,10 +215,18 @@
     this.classList.toggle('on');
     document.getElementById('scr').classList.toggle('hl');
   });
-  // Démo push-to-talk : le logo micro n'apparaît QUE pendant l'appui (maintiens V).
+  // Démo push-to-talk : visible PAR DÉFAUT dans la maquette (pour juger le design) ; en jeu, il
+  // ne s'affiche que pendant l'appui. Bouton ou touche V pour simuler appui/relâche.
   const voice = document.getElementById('voice');
-  document.addEventListener('keydown', e => { if (e.key === 'v' || e.key === 'V') voice.classList.add('talk'); });
-  document.addEventListener('keyup',   e => { if (e.key === 'v' || e.key === 'V') voice.classList.remove('talk'); });
+  const ptt = document.getElementById('ptt');
+  function setPtt(on){
+    voice.classList.toggle('talk', on);
+    ptt.classList.toggle('on', on);
+    ptt.textContent = on ? 'Micro PTT : appuyé' : 'Micro PTT : relâché';
+  }
+  ptt.addEventListener('click', () => setPtt(!voice.classList.contains('talk')));
+  document.addEventListener('keydown', e => { if (e.key === 'v' || e.key === 'V') setPtt(true); });
+  document.addEventListener('keyup',   e => { if (e.key === 'v' || e.key === 'V') setPtt(false); });
 </script>
 </div>
 </body>

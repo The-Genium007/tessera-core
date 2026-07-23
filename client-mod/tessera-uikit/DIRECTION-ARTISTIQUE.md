@@ -55,6 +55,7 @@ Chaque couleur a un RÔLE strict :
 - **Faim/soif** : 2 jauges verticales **à gauche de la minimap** (ambre = faim, aqua = soif).
 - **Étoiles wanted : RETIRÉES du HUD** (décision 2026-07-22) — le heat serveur existe mais sans
   affichage d'étoiles.
+- **Tracker de quêtes : RETIRÉ** (pas de quêtes en RP) — tracker natif masqué.
 - **Vocal : logo micro SEUL, bas-centre**, visible **uniquement pendant le push-to-talk** — pas de
   texte « canal X parle » (décision 2026-07-22).
 - Vie/armure : barres natives (état-piloté serveur, spec `2026-07-22-ui-native-branchement-multi`).
