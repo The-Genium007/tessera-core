@@ -47,49 +47,30 @@ public class TesseraLobbyPopup extends InGamePopup {
     backdrop.SetOpacity(1.0); // PLEINEMENT OPAQUE (retour Lucas) — plus aucun résidu du monde
     backdrop.Reparent(root, 0);
 
-    // FOND GRAPHIQUE DE MENU (retour Lucas 2026-07-23 : « le fond comme derrière l'inventaire »).
-    // On RÉFÉRENCE (jamais copier) les décos natives de l'atlas de formes du jeu — les mêmes
-    // « fluff » que les écrans plein écran — superposées faiblement, teintées charte, DERRIÈRE la
-    // vignette rouge. Reconstruction (notre composition), pas d'asset embarqué.
-    let sheen: ref<inkImage> = new inkImage();
-    sheen.SetName(n"bg_sheen");
-    sheen.SetAtlasResource(r"base\\gameplay\\gui\\common\\shapes\\atlas_shapes_sync.inkatlas");
-    sheen.SetTexturePart(n"frame_gradient1");
-    sheen.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
-    sheen.BindProperty(n"tintColor", n"MainColors.PanelRed");
-    sheen.SetOpacity(0.35);
-    sheen.SetAnchor(inkEAnchor.Fill);
-    sheen.Reparent(root, 1);
-
+    // FOND DE MENU : COULEUR UNIE (retour Lucas 2026-07-23 : le dégradé rouge faisait « rouge en
+    // haut / transparent en bas »). On garde juste le voile opaque uni ci-dessus + une déco tech
+    // TRÈS faible dans un seul coin (référence native, jamais copiée) pour la texture, sans
+    // recréer de dégradé plein écran.
     let fluffA: ref<inkImage> = new inkImage();
     fluffA.SetName(n"bg_fluffA");
     fluffA.SetAtlasResource(r"base\\gameplay\\gui\\common\\shapes\\atlas_shapes_sync.inkatlas");
     fluffA.SetTexturePart(n"fluff_protocol1");
     fluffA.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
     fluffA.BindProperty(n"tintColor", n"MainColors.Red");
-    fluffA.SetOpacity(0.10);
-    fluffA.SetSize(900.0, 900.0);
+    fluffA.SetOpacity(0.05);
+    fluffA.SetSize(820.0, 820.0);
     fluffA.SetAnchor(inkEAnchor.TopRight);
     fluffA.SetAnchorPoint(Vector2(1.0, 0.0));
     fluffA.Reparent(root, 1);
 
-    let fluffB: ref<inkImage> = new inkImage();
-    fluffB.SetName(n"bg_fluffB");
-    fluffB.SetAtlasResource(r"base\\gameplay\\gui\\common\\shapes\\atlas_shapes_sync.inkatlas");
-    fluffB.SetTexturePart(n"fluffcc35_3");
-    fluffB.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
-    fluffB.BindProperty(n"tintColor", n"MainColors.Blue");
-    fluffB.SetOpacity(0.07);
-    fluffB.SetSize(760.0, 760.0);
-    fluffB.SetAnchor(inkEAnchor.BottomLeft);
-    fluffB.SetAnchorPoint(Vector2(0.0, 1.0));
-    fluffB.Reparent(root, 1);
+    // Conteneur plus haut pour aérer (retour Lucas : le bouton mangeait les infos/l'état).
+    this.m_container.SetHeight(1010.0);
 
     let layout: ref<inkVerticalPanel> = new inkVerticalPanel();
     layout.SetName(n"lobby_layout");
     layout.SetAnchor(inkEAnchor.Fill);
-    layout.SetMargin(inkMargin(90.0, 55.0, 90.0, 55.0));
-    layout.SetChildMargin(inkMargin(0.0, 8.0, 0.0, 8.0));
+    layout.SetMargin(inkMargin(90.0, 60.0, 90.0, 60.0));
+    layout.SetChildMargin(inkMargin(0.0, 14.0, 0.0, 14.0));
     layout.Reparent(this.m_container);
 
     // Titre — « TESSERA // SERVEUR RP » (raj, gras, bleu de la charte).
@@ -120,7 +101,7 @@ public class TesseraLobbyPopup extends InGamePopup {
     row.SetName(n"cards_row");
     row.SetHAlign(inkEHorizontalAlign.Center);
     row.SetChildMargin(inkMargin(0.0, 0.0, 26.0, 0.0));
-    row.SetMargin(inkMargin(0.0, 20.0, 0.0, 20.0));
+    row.SetMargin(inkMargin(0.0, 26.0, 0.0, 40.0));
     row.Reparent(layout);
 
     // v1 : données locales de démo — remplacées plus tard par CharacterList (tranche A serveur).
@@ -137,6 +118,7 @@ public class TesseraLobbyPopup extends InGamePopup {
     status.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
     status.BindProperty(n"tintColor", n"MainColors.MildRed");
     status.SetText("Sélectionne un personnage pour activer la connexion.");
+    status.SetMargin(inkMargin(0.0, 12.0, 0.0, 12.0));
     status.Reparent(layout);
     this.m_status = status;
 
@@ -148,6 +130,9 @@ public class TesseraLobbyPopup extends InGamePopup {
     this.m_connect.ToggleSounds(true);
     this.m_connect.SetDisabled(true);
     this.m_connect.Reparent(layout);
+    // Descend le bouton pour qu'il n'écrase plus la ligne d'état / les infos (retour Lucas).
+    this.m_connect.GetRootWidget().SetMargin(inkMargin(0.0, 34.0, 0.0, 0.0));
+    this.m_connect.GetRootWidget().SetHAlign(inkEHorizontalAlign.Left);
     this.m_connect.RegisterToCallback(n"OnBtnClick", this, n"OnConnect");
   }
 
