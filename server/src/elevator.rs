@@ -37,11 +37,17 @@ pub enum MovementState {
 /// Viabilité PHYSIQUE d'un étage (donnée du jeu). Ne porte PAS d'autorisation par progression solo :
 /// l'accès est par-monde (décision (b) de la spec) et le rejeu client passe par `ForceGoToFloor`,
 /// qui contourne `m_floorsAuthorization` de toute façon.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct FloorSpec {
     pub index: i32,
     pub hidden: bool,
     pub inactive: bool,
+    /// Position monde de la porte d'étage, si connue (relevé manuel/WolvenKit — ADR 0013).
+    /// `None` = position non renseignée : `current_frame_transform` ne pourra alors produire
+    /// aucune transformée pour cet étage, mais tout le reste du modèle (file SCAN, timing)
+    /// continue de fonctionner exactement comme avant ce plan. AUCUNE position de cabine ne
+    /// circule sur le réseau (ADR 0012) — ce champ reste interne au serveur.
+    pub position: Option<[f32; 3]>,
 }
 
 /// État autoritaire d'une cabine. `arrival_tick` est INTERNE au serveur et ne part jamais sur le
@@ -195,6 +201,37 @@ impl ElevatorState {
         self.snapshot_for_change_detection() != before
     }
 
+    /// Position monde interpolée de la cabine à `now_tick`, si connue (ADR 0013 : nourrit le
+    /// `FrameRegistry` du modèle de repère). `None` si l'étage courant (à l'arrêt) ou l'un des deux
+    /// étages du trajet en cours (départ/cible) n'a pas de position renseignée — AUCUNE position de
+    /// cabine ne part jamais sur le réseau (ADR 0012), ce champ reste un détail interne serveur.
+    pub fn current_frame_transform(&self, now_tick: u64) -> Option<crate::frame::FrameTransform> {
+        let floor_position = |index: i32| -> Option<[f32; 3]> {
+            self.floors.iter().find(|f| f.index == index)?.position
+        };
+        match (self.target_floor, self.depart_tick, self.arrival_tick) {
+            (Some(target), Some(depart), Some(arrival)) if arrival > depart => {
+                let from = floor_position(self.active_floor)?;
+                let to = floor_position(target)?;
+                let total = (arrival - depart) as f32;
+                let elapsed = now_tick.saturating_sub(depart) as f32;
+                let t = (elapsed / total).clamp(0.0, 1.0);
+                Some(crate::frame::FrameTransform {
+                    position: [
+                        from[0] + (to[0] - from[0]) * t,
+                        from[1] + (to[1] - from[1]) * t,
+                        from[2] + (to[2] - from[2]) * t,
+                    ],
+                    yaw: 0.0,
+                })
+            }
+            _ => {
+                let position = floor_position(self.active_floor)?;
+                Some(crate::frame::FrameTransform { position, yaw: 0.0 })
+            }
+        }
+    }
+
     /// Empreinte des champs dont un changement doit déclencher une diffusion. Volontairement
     /// distincte de `PartialEq` sur la struct entière : `arrival_tick` est interne et ne justifie
     /// pas à lui seul un message réseau.
@@ -218,6 +255,7 @@ mod scan_tests {
                 index: i,
                 hidden: false,
                 inactive: false,
+                position: None,
             })
             .collect()
     }
@@ -286,6 +324,7 @@ mod lifecycle_tests {
                 index: i,
                 hidden: false,
                 inactive: false,
+                position: None,
             })
             .collect()
     }
@@ -322,16 +361,19 @@ mod lifecycle_tests {
                     index: 0,
                     hidden: false,
                     inactive: false,
+                    position: None,
                 },
                 FloorSpec {
                     index: 1,
                     hidden: true,
                     inactive: false,
+                    position: None,
                 },
                 FloorSpec {
                     index: 2,
                     hidden: false,
                     inactive: true,
+                    position: None,
                 },
             ],
             1000,
@@ -493,5 +535,98 @@ mod lifecycle_tests {
             trace
         }
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn current_frame_transform_is_none_when_stopped_without_a_known_floor_position() {
+        let e = fresh(); // FloorSpec sans position (floors_0_to_5 ne pose aucune position)
+        assert_eq!(e.current_frame_transform(0), None);
+    }
+
+    #[test]
+    fn current_frame_transform_at_rest_returns_the_active_floor_position() {
+        let mut e = ElevatorState::new(
+            42,
+            0,
+            vec![
+                FloorSpec {
+                    index: 0,
+                    position: Some([10.0, 20.0, 30.0]),
+                    ..Default::default()
+                },
+                FloorSpec {
+                    index: 1,
+                    position: Some([10.0, 20.0, 34.0]),
+                    ..Default::default()
+                },
+            ],
+            1000,
+            4000,
+        );
+        let transform = e.current_frame_transform(0).unwrap();
+        assert_eq!(transform.position, [10.0, 20.0, 30.0]);
+        assert_eq!(transform.yaw, 0.0);
+        let _ = &mut e; // évite un warning "unused mut" si aucune mutation n'a lieu avant l'assert
+    }
+
+    #[test]
+    fn current_frame_transform_interpolates_halfway_through_a_trip() {
+        let mut e = ElevatorState::new(
+            42,
+            0,
+            vec![
+                FloorSpec {
+                    index: 0,
+                    position: Some([0.0, 0.0, 0.0]),
+                    ..Default::default()
+                },
+                FloorSpec {
+                    index: 1,
+                    position: Some([0.0, 0.0, 40.0]),
+                    ..Default::default()
+                },
+            ],
+            0,    // start_delay_ms
+            1000, // travel_time_ms
+        );
+        e.request_floor(1);
+        const TICK_MS: u32 = 50; // 1000ms / 50ms = 20 ticks pour tout le trajet
+        e.start_trip_if_idle(0, TICK_MS);
+        // À mi-trajet (tick 10 sur 20), on attend une position z à mi-chemin (~20.0).
+        let transform = e.current_frame_transform(10).unwrap();
+        assert!(
+            (transform.position[2] - 20.0).abs() < 1.0,
+            "z attendu ~20.0 à mi-trajet, obtenu {}",
+            transform.position[2]
+        );
+    }
+
+    #[test]
+    fn current_frame_transform_is_none_during_a_trip_to_a_floor_without_a_known_position() {
+        let mut e = ElevatorState::new(
+            42,
+            0,
+            vec![
+                FloorSpec {
+                    index: 0,
+                    position: Some([0.0, 0.0, 0.0]),
+                    ..Default::default()
+                },
+                FloorSpec {
+                    index: 1,
+                    position: None, // étage cible sans position connue
+                    ..Default::default()
+                },
+            ],
+            0,
+            1000,
+        );
+        e.request_floor(1);
+        e.start_trip_if_idle(0, 50);
+        assert_eq!(
+            e.current_frame_transform(5),
+            None,
+            "un trajet vers un étage sans position connue ne doit produire aucune transformée"
+        );
     }
 }
