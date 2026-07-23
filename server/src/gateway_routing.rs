@@ -686,6 +686,57 @@ mod tests {
         assert_eq!(hwid_hash, "");
     }
 
+    /// Octets d'un `Join` v2 produits par le VRAI encodeur C++ (gel palier 2) : même séquence
+    /// d'appels que `NetworkGameSystem::SendJoin` du fork, même `protocol_generated.h` régénéré
+    /// (flatc 25.12.19, headers flatbuffers 25.12.19 vendorés du fork), compilé MSVC et exécuté le
+    /// 2026-07-23 (outil `dump_wire_v2.cpp`). Join{display_name="Lucas", token="",
+    /// protocol_version=2} — hwid_hash/space_id non posés (défauts, comme le client actuel).
+    const CPP_CLIENT_JOIN_V2: &[u8] = &[
+        0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0e, 0x00, 0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x10, 0x00,
+        0x04, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x08,
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x05, 0x00, 0x00, 0x00, 0x4c, 0x75, 0x63, 0x61, 0x73, 0x00, 0x00, 0x00,
+    ];
+
+    /// Octets d'un `PositionUpdate` v2 produits par le VRAI encodeur C++ (même provenance que
+    /// `CPP_CLIENT_JOIN_V2`) : position (2387, -1295, 63) m quantifiée QVec3, yaw 90° (=0x4000),
+    /// frame/slot 0 — la séquence exacte de `NetworkGameSystem::SendPositionUpdate` après gel.
+    const CPP_CLIENT_POSITION_UPDATE_V2: &[u8] = &[
+        0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x02, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x14, 0x00, 0x08, 0x00,
+        0x06, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0xa6, 0x12, 0x00,
+        0x00, 0xe2, 0xf5, 0x00, 0x00, 0x7e, 0x00,
+    ];
+
+    #[test]
+    fn server_decodes_a_v2_join_encoded_by_the_real_cpp_client_and_accepts_it() {
+        // Le fil, pas chaque côté : ces octets viennent du header C++ régénéré au gel. Si le
+        // schéma bouge sans régénérer le fork (ou l'inverse), ce test rougit en `cargo test` —
+        // sans PC Windows, sans lancer le jeu (piège 2026-07-15/16).
+        let (name, token, version, hwid_hash) = extract_join_fields(CPP_CLIENT_JOIN_V2)
+            .expect("le Join v2 du client C++ doit se décoder");
+        assert_eq!(name, "Lucas");
+        assert_eq!(token, "");
+        assert_eq!(version, CURRENT_PROTOCOL_VERSION);
+        assert_eq!(hwid_hash, ""); // non posé par le client actuel (câblage launcher à venir)
+        assert!(crate::gateway::resolve_protocol_version(version).is_ok());
+    }
+
+    #[test]
+    fn server_decodes_a_v2_position_update_encoded_by_the_real_cpp_client() {
+        // 2387/-1295/63 m sont représentables exactement sur la grille fixed-point (quant.rs) :
+        // la déquantization redonne les valeurs d'origine bit-à-bit, pas « à epsilon près ».
+        assert_eq!(
+            extract_position(CPP_CLIENT_POSITION_UPDATE_V2),
+            Some((2387.0, -1295.0, 63.0))
+        );
+        assert_eq!(
+            extract_position_yaw(CPP_CLIENT_POSITION_UPDATE_V2),
+            Some(90.0)
+        );
+    }
+
     #[test]
     fn a_v1_cpp_client_join_still_decodes_but_is_rejected_by_the_version_check() {
         // Gel palier 2 (v2) : `Join` est resté APPEND-ONLY précisément pour ça — les octets v1 du
