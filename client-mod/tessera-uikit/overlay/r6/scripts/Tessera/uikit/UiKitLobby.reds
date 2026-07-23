@@ -38,13 +38,52 @@ public class TesseraLobbyPopup extends InGamePopup {
     // gameplay. Voile quasi opaque plein écran INSÉRÉ DERRIÈRE (index 0) la vignette/le contenu —
     // le monde disparaît, comme dans les menus natifs. Le flou + la dilatation du temps
     // d'InGamePopup s'ajoutent par-dessus.
+    let root: wref<inkCompoundWidget> = this.GetRootCompoundWidget();
     let backdrop: ref<inkRectangle> = new inkRectangle();
     backdrop.SetName(n"backdrop");
     backdrop.SetAnchor(inkEAnchor.Fill);
     backdrop.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
     backdrop.BindProperty(n"tintColor", n"MainColors.Fullscreen_PrimaryBackgroundDarkest");
     backdrop.SetOpacity(0.96);
-    backdrop.Reparent(this.GetRootCompoundWidget(), 0);
+    backdrop.Reparent(root, 0);
+
+    // FOND GRAPHIQUE DE MENU (retour Lucas 2026-07-23 : « le fond comme derrière l'inventaire »).
+    // On RÉFÉRENCE (jamais copier) les décos natives de l'atlas de formes du jeu — les mêmes
+    // « fluff » que les écrans plein écran — superposées faiblement, teintées charte, DERRIÈRE la
+    // vignette rouge. Reconstruction (notre composition), pas d'asset embarqué.
+    let sheen: ref<inkImage> = new inkImage();
+    sheen.SetName(n"bg_sheen");
+    sheen.SetAtlasResource(r"base\\gameplay\\gui\\common\\shapes\\atlas_shapes_sync.inkatlas");
+    sheen.SetTexturePart(n"frame_gradient1");
+    sheen.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
+    sheen.BindProperty(n"tintColor", n"MainColors.PanelRed");
+    sheen.SetOpacity(0.35);
+    sheen.SetAnchor(inkEAnchor.Fill);
+    sheen.Reparent(root, 1);
+
+    let fluffA: ref<inkImage> = new inkImage();
+    fluffA.SetName(n"bg_fluffA");
+    fluffA.SetAtlasResource(r"base\\gameplay\\gui\\common\\shapes\\atlas_shapes_sync.inkatlas");
+    fluffA.SetTexturePart(n"fluff_protocol1");
+    fluffA.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
+    fluffA.BindProperty(n"tintColor", n"MainColors.Red");
+    fluffA.SetOpacity(0.10);
+    fluffA.SetSize(900.0, 900.0);
+    fluffA.SetAnchor(inkEAnchor.TopRight);
+    fluffA.SetAnchorPoint(Vector2(1.0, 0.0));
+    fluffA.Reparent(root, 1);
+
+    let fluffB: ref<inkImage> = new inkImage();
+    fluffB.SetName(n"bg_fluffB");
+    fluffB.SetAtlasResource(r"base\\gameplay\\gui\\common\\shapes\\atlas_shapes_sync.inkatlas");
+    fluffB.SetTexturePart(n"fluffcc35_3");
+    fluffB.SetStyle(r"base\\gameplay\\gui\\common\\main_colors.inkstyle");
+    fluffB.BindProperty(n"tintColor", n"MainColors.Blue");
+    fluffB.SetOpacity(0.07);
+    fluffB.SetSize(760.0, 760.0);
+    fluffB.SetAnchor(inkEAnchor.BottomLeft);
+    fluffB.SetAnchorPoint(Vector2(0.0, 1.0));
+    fluffB.Reparent(root, 1);
 
     let layout: ref<inkVerticalPanel> = new inkVerticalPanel();
     layout.SetName(n"lobby_layout");
