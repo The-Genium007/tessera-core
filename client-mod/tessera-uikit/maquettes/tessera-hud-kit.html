@@ -112,22 +112,25 @@
   }
   .hud { position: absolute; } /* ancre chaque bloc HUD */
 
-  /* Étoiles wanted — haut-gauche, INCHANGÉ (natif). */
-  .hud.wanted { top: 3.5%; left: 3%; display: flex; gap: .35em; }
+  /* Étoiles wanted — sous la minimap en HAUT-DROITE (position réelle vérifiée sur les captures
+     du 2026-07-22 — pas en haut-gauche comme supposé initialement). INCHANGÉ (natif). */
+  .hud.wanted { top: calc(5% + 13em); right: 3%; display: flex; gap: .35em; }
   .star { width: 1.1em; height: 1.1em; color: var(--red); filter: drop-shadow(0 0 4px rgba(255,59,59,.6)); }
   .star.off { color: var(--dim-2); filter: none; }
 
-  /* Minimap — bas-gauche, INCHANGÉE (native, placeholder ici). */
+  /* Minimap — HAUT-DROITE (position réelle CP2077, vérifiée sur les captures du 2026-07-22 ;
+     l'hypothèse initiale bas-gauche était fausse). INCHANGÉE (native, placeholder ici). */
   .hud.minimap {
-    left: 3%; bottom: 4%; width: 13em; height: 13em;
+    right: 3%; top: 4%; width: 13em; height: 13em;
     border: 1px solid rgba(0,229,255,.3); border-radius: 3px;
     background: repeating-conic-gradient(from 0deg, rgba(0,229,255,.05) 0 10deg, transparent 10deg 20deg), #060b0f;
     display: grid; place-items: center;
   }
   .hud.minimap span { color: var(--dim-2); font-family: "Share Tech Mono", monospace; font-size: .8em; letter-spacing: .2em; }
 
-  /* Faim & soif — VERTICAL, à GAUCHE de la minimap (décision Lucas). */
-  .hud.needs { left: calc(3% + 13.6em); bottom: 4%; display: flex; gap: .6em; height: 13em; }
+  /* Faim & soif — VERTICAL, à GAUCHE de la minimap (décision Lucas), donc en haut-droite
+     puisque la minimap y est (captures 2026-07-22). */
+  .hud.needs { right: calc(3% + 13.6em); top: 4%; display: flex; gap: .6em; height: 13em; }
   .vgauge { width: 1.15em; height: 100%; display: flex; flex-direction: column; align-items: center; gap: .4em; }
   .vgauge .track {
     flex: 1; width: 100%; background: rgba(255,255,255,.06);
