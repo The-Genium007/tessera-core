@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera — Maquette : Roue d'action rapide</title>
+<!--
+  MAQUETTE de la « Roue d'action rapide » (R34, touche provisoire G) — DA officielle + codes de la
+  ROUE NATIVE (capture 144601) : plates rectangulaires sombres à motif circuit et LISERÉ ORANGE,
+  coins cyan, panneau de détail à CADRE ROUGE à droite, hints [Q]/[E] en bas, monde assombri
+  rouge derrière (dilatation du temps).
+  Spécificités Lucas démontrées EN DÉMO :
+  - MULTI-ÉTAGES : le segment « Émotes » ouvre une SOUS-roue (clic hub = retour).
+  - DENSITÉ VARIABLE : Interactions = 6 segments, Émotes = 8, Radio = 4.
+  - NAVIGATION ENTRE ROUES : Q / E font défiler les roues (pages + ticks de position).
+  Survol = sélection (détail à droite) ; clic = activer (simulation). Approximation CSS, aucun
+  asset CDPR.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --cyan:#4be3f7; --red:#e5342e; --orange:#f08a1d; --amber:#f5b13d;
+    --white:#eef6f8; --readable:#a9b6bc; --dim:#6a6f75;
+    font-synthesis:none;
+  }
+  *{box-sizing:border-box;} html,body{margin:0;}
+  body{background:#050307;color:var(--white);
+    font-family:"Rajdhani","Barlow Semi Condensed","Roboto Condensed",system-ui,sans-serif;
+    font-size:16px;line-height:1.45;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1220px;margin:0 auto;padding:34px 20px 80px;}
+  .mono{font-family:"Share Tech Mono",ui-monospace,monospace;}
+  .note{color:var(--dim);font-size:13px;max-width:78ch;margin:10px 0 14px;}
+  h1{font-size:clamp(24px,3.6vw,36px);font-weight:700;margin:4px 0 0;}
+  .eyebrow{font-family:"Share Tech Mono",monospace;font-size:12px;letter-spacing:.32em;text-transform:uppercase;color:var(--cyan);}
+
+  /* ============ ÉCRAN ============ */
+  .screen{position:relative;aspect-ratio:16/9;overflow:hidden;border:1px solid rgba(229,52,46,.25);
+    background:
+      radial-gradient(700px 420px at 50% 45%, rgba(229,52,46,.10), transparent 65%),
+      radial-gradient(900px 560px at 85% 10%, rgba(229,52,46,.07), transparent 60%),
+      linear-gradient(180deg,#100609 0%, #0b070c 55%, #090b0e 100%);
+    font-size:clamp(9px,1.05vw,15px);}
+  .screen::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:8;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,.12) 0 1px,transparent 1px 3px);mix-blend-mode:multiply;}
+
+  /* ---- plaque de titre / pages de roues (pattern lobby) ---- */
+  .plate{position:absolute;left:50%;top:4.5%;transform:translateX(-50%);z-index:4;width:26em;
+    border:1px solid rgba(229,52,46,.4);padding:.4em .8em;display:flex;align-items:center;gap:.7em;background:rgba(10,4,6,.65);}
+  .plate .arr{color:var(--red);}
+  .plate .key{font-family:"Share Tech Mono",monospace;border:1px solid var(--white);color:var(--white);font-size:.75em;padding:.03em .4em;}
+  .plate .t{flex:1;text-align:center;font-weight:700;letter-spacing:.26em;text-transform:uppercase;font-size:1.05em;}
+  .plate .ticks{position:absolute;left:14%;right:14%;bottom:-6px;height:3px;display:flex;gap:6px;}
+  .plate .ticks i{flex:1;background:rgba(229,52,46,.35);} .plate .ticks i.on{background:var(--cyan);}
+
+  /* ---- la roue ---- */
+  .wheelbox{position:absolute;left:38%;top:52%;transform:translate(-50%,-50%);width:0;height:0;z-index:3;}
+  .ringbg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:30em;height:30em;border-radius:50%;
+    border:1px solid rgba(75,227,247,.10);background:radial-gradient(circle, rgba(75,227,247,.05), transparent 62%);}
+  .hub{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:7.5em;height:7.5em;border-radius:50%;
+    border:1px solid rgba(75,227,247,.45);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.2em;
+    background:rgba(6,10,14,.85);cursor:default;z-index:5;text-align:center;}
+  .hub .bc{font-family:"Share Tech Mono",monospace;font-size:.58em;letter-spacing:.14em;color:var(--dim);text-transform:uppercase;max-width:90%;}
+  .hub .nm{font-weight:700;letter-spacing:.14em;font-size:.85em;text-transform:uppercase;color:var(--cyan);}
+  .hub.canback{cursor:pointer;border-color:var(--red);}
+  .hub.canback .back{font-family:"Share Tech Mono",monospace;font-size:.6em;color:var(--red);letter-spacing:.1em;}
+
+  /* segment = plate rectangulaire façon roue native */
+  .seg{position:absolute;left:50%;top:50%;width:10em;height:3.3em;margin:-1.65em 0 0 -5em;cursor:pointer;
+    background:
+      repeating-linear-gradient(105deg, rgba(75,227,247,.05) 0 2px, transparent 2px 9px),
+      linear-gradient(180deg, rgba(10,16,20,.96), rgba(7,10,13,.96));
+    border:1px solid rgba(75,227,247,.16);
+    clip-path:polygon(0 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%);
+    display:flex;align-items:center;gap:.55em;padding:0 .6em 0 0;transition:border-color .1s, box-shadow .1s;}
+  .seg::before{content:"";width:4px;align-self:stretch;background:var(--orange);flex:none;} /* liseré orange natif */
+  .seg .ic{width:1.9em;height:1.9em;border:1px solid rgba(255,255,255,.18);flex:none;margin-left:.5em;
+    background:rgba(75,227,247,.06);display:grid;place-items:center;font-size:.8em;}
+  .seg .lb{flex:1;min-width:0;}
+  .seg .lb .l1{font-weight:600;letter-spacing:.06em;font-size:.92em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .seg .lb .l2{font-family:"Share Tech Mono",monospace;font-size:.62em;color:var(--dim);letter-spacing:.1em;}
+  .seg .badge{font-family:"Share Tech Mono",monospace;font-size:.68em;color:var(--amber);flex:none;}
+  .seg .sub{color:var(--red);font-size:.8em;flex:none;} /* marqueur sous-roue ‹ › */
+  .seg.on{border-color:var(--cyan);box-shadow:0 0 16px rgba(75,227,247,.35);z-index:6;}
+  .seg.on .ic{border-color:var(--cyan);color:var(--cyan);}
+
+  /* ---- panneau de détail à droite (cadre ROUGE natif) ---- */
+  .detail{position:absolute;right:4%;top:50%;transform:translateY(-50%);width:20em;z-index:4;
+    border:1px solid var(--red);background:rgba(10,6,8,.88);padding:1em 1.2em;
+    box-shadow:0 0 24px rgba(229,52,46,.15);}
+  .detail::before{content:"";position:absolute;left:-1px;top:-1px;width:1.2em;height:1.2em;border-top:3px solid var(--red);border-left:3px solid var(--red);}
+  .detail .dt{font-weight:700;letter-spacing:.06em;font-size:1.15em;text-transform:uppercase;}
+  .detail .dk{font-family:"Share Tech Mono",monospace;color:var(--red);font-size:.72em;letter-spacing:.16em;text-transform:uppercase;margin:.2em 0 .7em;}
+  .detail .dd{color:var(--readable);font-size:.9em;border-top:1px solid rgba(229,52,46,.3);padding-top:.7em;}
+
+  /* ---- hints bas (pattern natif [Q]/[E]) ---- */
+  .hints{position:absolute;left:50%;bottom:5%;transform:translateX(-50%);display:flex;gap:2.2em;z-index:4;}
+  .hint{display:flex;align-items:center;gap:.5em;color:var(--red);font-size:.9em;letter-spacing:.04em;}
+  .hint .k{font-family:"Share Tech Mono",monospace;border:1px solid var(--cyan);color:var(--cyan);font-size:.75em;padding:.02em .4em;}
+
+  /* légende */
+  .legend{margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;}
+  .lg{border:1px solid rgba(75,227,247,.12);background:rgba(9,12,16,.6);padding:10px 12px;font-size:12.5px;color:var(--readable);}
+  .lg b{color:var(--white);display:block;margin-bottom:2px;font-size:13px;}
+  .lg .mono{color:var(--cyan);font-size:11px;}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="eyebrow">Tessera · Maquette · DA officielle</div>
+  <h1>Roue d'action rapide <span class="mono" style="font-size:.55em;color:#6a6f75">[G]</span></h1>
+  <p class="note">Codes de la roue native (plates à liseré orange, panneau détail à cadre rouge,
+    hints [Q]/[E]) + les trois spécificités : <b>multi-étages</b> (clique « Émotes » → sous-roue,
+    clique le hub pour revenir), <b>densité variable</b> (6/8/4 segments), <b>navigation entre
+    roues</b> (touches Q / E ou les hints). Survol = sélection, le détail s'affiche à droite.</p>
+
+  <div class="screen" id="scr">
+    <div class="plate">
+      <span class="arr">◁</span><span class="key">Q</span>
+      <span class="t" id="pageTitle">Interactions</span>
+      <span class="key">E</span><span class="arr">▷</span>
+      <span class="ticks" id="ticks"></span>
+    </div>
+
+    <div class="wheelbox" id="wheel">
+      <div class="ringbg"></div>
+      <div class="hub" id="hub"><span class="bc" id="bc">roue 1/3</span><span class="nm" id="hubName">Interactions</span><span class="back" id="backHint" hidden>◄ retour</span></div>
+    </div>
+
+    <div class="detail" id="detail">
+      <div class="dt" id="dTitle">Se présenter</div>
+      <div class="dk" id="dKind">Interaction · proximité</div>
+      <div class="dd" id="dDesc">Révèle ton nom au joueur visé. Il te verra désormais nommé — pour toujours.</div>
+    </div>
+
+    <div class="hints">
+      <span class="hint"><span class="k">Q</span> Roue précédente</span>
+      <span class="hint"><span class="k">CLIC</span> Activer</span>
+      <span class="hint"><span class="k">G</span> relâché : fermer</span>
+      <span class="hint"><span class="k">E</span> Roue suivante</span>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="lg"><b>Multi-étages</b>Un segment marqué ‹ › ouvre une sous-roue (ex. Émotes). Le hub affiche le fil d'Ariane et sert de « retour ».<span class="mono">pile de roues, breadcrumb</span></div>
+    <div class="lg"><b>Densité variable</b>La roue accepte peu ou beaucoup de segments — l'espacement s'adapte (6 / 8 / 4 en démo).<span class="mono">factory paramétrable (nb branches)</span></div>
+    <div class="lg"><b>Navigation entre roues</b>Q / E font défiler les roues de premier niveau (Interactions · Émotes · Radio) — ticks de position sous la plaque de titre.<span class="mono">pattern ‹[Q] titre [E]› + ticks (DA)</span></div>
+    <div class="lg"><b>Codes natifs repris</b>Plates sombres à motif circuit + liseré orange, sélection cyan, panneau détail à cadre rouge, hints [Q]/[E], monde assombri rouge.<span class="mono">capture 144601 · RadialMenuGameController (1a à sonder)</span></div>
+  </div>
+
+<script>
+  // ---- données des roues (démo) ----
+  const WHEELS = [
+    { name:'Interactions', segs:[
+      {l:'Se présenter', k:'Interaction · proximité', d:'Révèle ton nom au joueur visé. Il te verra désormais nommé — pour toujours.'},
+      {l:'Se présenter à tous', k:'Interaction · zone', d:'Révèle ton nom à tous les joueurs autour de toi.'},
+      {l:'Échanger', k:'Interaction · commerce', d:'Propose un échange sécurisé au joueur visé.'},
+      {l:'Émotes', k:'Sous-roue', d:'Ouvre la roue des émotes (multi-étages).', sub:1},
+      {l:'Radio', k:'Comms', d:'Rejoindre / quitter un canal radio.'},
+      {l:'Pouce', k:'Geste rapide', d:'Un geste bref sans passer par la roue émotes.'},
+    ]},
+    { name:'Émotes', segs:[
+      {l:'Saluer', k:'Émote', d:'Lève la main.'},{l:'Pointer', k:'Émote', d:'Montre une direction.'},
+      {l:'Applaudir', k:'Émote', d:'Applaudit.'},{l:'S\'asseoir', k:'Pose', d:'S\'assoit sur place.'},
+      {l:'S\'adosser', k:'Pose', d:'S\'adosse au mur le plus proche.'},{l:'Danser', k:'Émote', d:'Danse.'},
+      {l:'Refuser', k:'Émote', d:'Fait non de la tête.'},{l:'Se croiser les bras', k:'Pose', d:'Croise les bras.'},
+    ]},
+    { name:'Radio', segs:[
+      {l:'Canal 1', k:'Radio', d:'Bascule sur le canal 1.', b:'12'},{l:'Canal 2', k:'Radio', d:'Bascule sur le canal 2.', b:'3'},
+      {l:'Fréquence…', k:'Radio', d:'Saisir une fréquence précise.'},{l:'Couper', k:'Radio', d:'Quitte la radio.'},
+    ]},
+  ];
+
+  const wheel = document.getElementById('wheel');
+  const hub = document.getElementById('hub');
+  const hubName = document.getElementById('hubName');
+  const bc = document.getElementById('bc');
+  const backHint = document.getElementById('backHint');
+  const pageTitle = document.getElementById('pageTitle');
+  const ticks = document.getElementById('ticks');
+  let page = 0;            // roue de premier niveau
+  let stack = [];          // pile des sous-roues (multi-étages)
+  const R = 12.2;          // rayon en em
+
+  function currentWheel(){ return stack.length ? stack[stack.length-1] : WHEELS[page]; }
+
+  function renderTicks(){
+    ticks.innerHTML = WHEELS.map((_,i)=>'<i'+(i===page&&!stack.length?' class="on"':'')+'></i>').join('');
+  }
+  function setDetail(s){
+    document.getElementById('dTitle').textContent = s.l;
+    document.getElementById('dKind').textContent = s.k;
+    document.getElementById('dDesc').textContent = s.d;
+  }
+  function render(){
+    wheel.querySelectorAll('.seg').forEach(e=>e.remove());
+    const w = currentWheel();
+    pageTitle.textContent = stack.length ? WHEELS[page].name + ' › ' + w.name : w.name;
+    hubName.textContent = w.name;
+    bc.textContent = stack.length ? 'sous-roue' : 'roue ' + (page+1) + '/' + WHEELS.length;
+    hub.classList.toggle('canback', !!stack.length);
+    backHint.hidden = !stack.length;
+    renderTicks();
+    const n = w.segs.length;
+    w.segs.forEach((s,i)=>{
+      const a = -90 + i*(360/n); // départ en haut
+      const el = document.createElement('div');
+      el.className = 'seg';
+      el.style.transform = 'rotate('+a+'deg) translate('+R+'em) rotate('+(-a)+'deg)';
+      el.innerHTML = '<span class="ic">◆</span><span class="lb"><span class="l1">'+s.l+'</span><span class="l2">'+s.k+'</span></span>'
+        + (s.b ? '<span class="badge">'+s.b+'</span>' : '')
+        + (s.sub ? '<span class="sub">‹ ›</span>' : '');
+      el.addEventListener('mouseenter', ()=>{ wheel.querySelectorAll('.seg').forEach(x=>x.classList.remove('on')); el.classList.add('on'); setDetail(s); });
+      el.addEventListener('click', ()=>{ if (s.sub) { stack.push(WHEELS[1]); render(); } });
+      wheel.appendChild(el);
+    });
+    const first = wheel.querySelector('.seg'); if (first){ first.classList.add('on'); setDetail(w.segs[0]); }
+  }
+  hub.addEventListener('click', ()=>{ if (stack.length){ stack.pop(); render(); } });
+  document.addEventListener('keydown', e=>{
+    if (e.key==='e'||e.key==='E'){ if(!stack.length){ page=(page+1)%WHEELS.length; render(); } }
+    if (e.key==='q'||e.key==='Q'){ if(!stack.length){ page=(page+WHEELS.length-1)%WHEELS.length; render(); } }
+    if (e.key==='Escape'){ if(stack.length){ stack.pop(); render(); } }
+  });
+  render();
+</script>
+</div>
+</body>
+</html>

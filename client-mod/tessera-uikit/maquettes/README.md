@@ -28,9 +28,13 @@ redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquette
   v2 calibrée captures — LE MODÈLE de la DA. Cartes de personnages + « Créer » (→ creator natif
   modifié), CONNEXION activé à la sélection, navigation Q/D (cliquable en démo).
 - **`maquette-hud-en-jeu.html`** — **MAQUETTE D'ÉCRAN : HUD en jeu.** Le natif à sa vraie place
-  (minimap haut-droite, wanted dessous, hex-widgets, hints) + les AJOUTS Tessera (faim/soif à
-  gauche de la minimap, nametags, indicateur vocal, toasts, micro-statut serveur) — bouton pour
-  surligner les ajouts.
+  (minimap haut-droite, hex-widgets, hints ; wanted et tracker RETIRÉS) + les AJOUTS Tessera
+  (faim/soif, nametags à présentation, micro PTT à cadre-égaliseur, toasts, micro-statut) —
+  bouton pour surligner les ajouts.
+- **`maquette-roue-action-rapide.html`** — **MAQUETTE D'ÉCRAN : Roue d'action rapide (G).**
+  Codes de la roue native (plates à liseré orange, détail à cadre rouge, [Q]/[E]) + multi-étages
+  (Émotes = sous-roue, hub = retour), densité variable (6/8/4) et navigation entre roues (Q/E).
+  Entièrement navigable en démo.
 
 Ouvre-les dans un navigateur. La police Rajdhani se charge depuis Google Fonts (internet requis ;
 repli condensé sinon).
