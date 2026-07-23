@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera — Maquette : lobby d'arrivée (choix du personnage)</title>
+<!--
+  MAQUETTE de l'écran d'arrivée (lobby + gate personnage) — direction Lucas 2026-07-22 :
+  vignette ROUGE en bord d'écran (le cadre du popup natif, celui du panneau H2), fond graphique
+  façon écrans d'inventaire Cyberpunk, MULTI-CHOIX de personnages, bouton CONNEXION actif une fois
+  un perso sélectionné. La CRÉATION s'appuie sur le character creator NATIF (modifié, éléments
+  retirés) — ici seulement son point d'entrée.
+  S'inscrit dans le flux d'arrivée (specs/2026-07-18-flux-arrivee-en-jeu-design.md : gel
+  GameplayTier + bulle d'isolement + gate). Approximation CSS, aucun asset CDPR.
+  La sélection est cliquable (démo) pour sentir le flux : carte → CONNEXION s'active.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --void:#04070a; --scr:#070d12;
+    --blue:#37d6ff; --red:#ff3b3b; --mildred:#ff6a5a; --amber:#ffb03a;
+    --white:#eaf6f9; --readable:#9fb2ba; --dim:#5f6d76; --dim-2:#232e36;
+    --line:rgba(55,214,255,.22); --line-s:rgba(55,214,255,.12); --hi:rgba(55,214,255,.13);
+    font-synthesis:none;
+  }
+  *{box-sizing:border-box;} html,body{margin:0;}
+  body{background:var(--void);color:var(--white);
+    font-family:"Rajdhani","Barlow Semi Condensed","Roboto Condensed",system-ui,sans-serif;
+    font-size:16px;line-height:1.45;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1180px;margin:0 auto;padding:34px 20px 80px;}
+  .mono{font-family:"Share Tech Mono",ui-monospace,monospace;}
+  .note{color:var(--dim);font-size:13px;max-width:72ch;margin:10px 0 20px;}
+  h1{font-size:clamp(24px,3.6vw,36px);font-weight:700;margin:4px 0 0;}
+  .eyebrow{font-family:"Share Tech Mono",monospace;font-size:12px;letter-spacing:.32em;text-transform:uppercase;color:var(--blue);}
+
+  /* ============ L'ÉCRAN ============ */
+  .screen{position:relative;aspect-ratio:16/9;overflow:hidden;border:1px solid var(--line);
+    clip-path:polygon(16px 0,100% 0,100% calc(100% - 16px),calc(100% - 16px) 100%,0 100%,0 16px);
+    background:
+      /* motif « inventaire » : grandes formes angulaires translucides + hachures diagonales */
+      linear-gradient(115deg, transparent 0 55%, rgba(55,214,255,.035) 55% 78%, transparent 78%),
+      linear-gradient(295deg, transparent 0 60%, rgba(255,59,59,.03) 60% 82%, transparent 82%),
+      repeating-linear-gradient(35deg, rgba(55,214,255,.022) 0 16px, transparent 16px 32px),
+      radial-gradient(900px 500px at 20% 110%, rgba(55,214,255,.06), transparent 60%),
+      var(--scr);
+    display:flex;flex-direction:column;
+  }
+  /* scanlines */
+  .screen::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:5;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,.14) 0 1px,transparent 1px 3px);mix-blend-mode:multiply;}
+  /* VIGNETTE ROUGE (le « cadre rouge » du popup natif) */
+  .screen::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:6;
+    box-shadow: inset 0 0 90px rgba(255,59,59,.28), inset 0 0 14px rgba(255,59,59,.30);
+    border:1px solid rgba(255,59,59,.35);}
+
+  .head{display:flex;align-items:baseline;gap:14px;padding:26px 40px 0;position:relative;z-index:2;}
+  .head .t{font-size:clamp(18px,2.6vw,30px);font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--white);}
+  .head .t b{color:var(--red);font-weight:700;}
+  .head .srv{margin-left:auto;font-family:"Share Tech Mono",monospace;font-size:12px;color:var(--dim);letter-spacing:.12em;}
+  .subtitle{padding:2px 40px 0;color:var(--readable);font-size:14px;letter-spacing:.06em;position:relative;z-index:2;}
+
+  /* ---- cartes personnages ---- */
+  .slots{flex:1;display:flex;gap:18px;align-items:center;justify-content:center;padding:10px 40px;position:relative;z-index:2;flex-wrap:wrap;}
+  .slot{width:200px;height:290px;position:relative;background:rgba(9,15,21,.82);border:1px solid var(--line-s);cursor:pointer;
+    clip-path:polygon(12px 0,100% 0,100% calc(100% - 12px),calc(100% - 12px) 100%,0 100%,0 12px);
+    display:flex;flex-direction:column;transition:border-color .15s, background .15s;}
+  .slot:hover{border-color:var(--line);}
+  .slot.sel{border-color:var(--blue);background:var(--hi);box-shadow:0 0 24px rgba(55,214,255,.18);}
+  .slot .doll{flex:1;display:grid;place-items:center;background:radial-gradient(90px 150px at 50% 45%,rgba(55,214,255,.10),transparent 70%);}
+  .slot.sel .doll{background:radial-gradient(90px 150px at 50% 45%,rgba(55,214,255,.20),transparent 72%);}
+  .body{width:56px;height:132px;position:relative;}
+  .body b{position:absolute;background:rgba(55,214,255,.16);border:1px solid var(--line-s);}
+  .b-h{width:27px;height:27px;border-radius:50%;left:14px;top:0;}
+  .b-t{width:42px;height:52px;left:7px;top:30px;}
+  .b-l1{width:16px;height:48px;left:5px;top:84px;} .b-l2{width:16px;height:48px;right:5px;top:84px;}
+  .slot .meta{padding:10px 12px 12px;border-top:1px solid var(--line-s);}
+  .slot .nm{font-weight:600;font-size:16px;letter-spacing:.03em;}
+  .slot .rl{font-family:"Share Tech Mono",monospace;font-size:10.5px;letter-spacing:.14em;color:var(--amber);text-transform:uppercase;margin-top:1px;}
+  .slot .last{font-family:"Share Tech Mono",monospace;font-size:10.5px;color:var(--dim);margin-top:6px;}
+  .slot .selpin{position:absolute;top:8px;right:10px;font-family:"Share Tech Mono",monospace;font-size:10px;color:var(--blue);letter-spacing:.1em;opacity:0;}
+  .slot.sel .selpin{opacity:1;}
+
+  /* carte « créer » */
+  .slot.create{border-style:dashed;border-color:rgba(255,59,59,.4);background:rgba(20,8,8,.5);}
+  .slot.create:hover{border-color:var(--red);}
+  .slot.create .doll{background:none;}
+  .slot.create .plus{font-size:54px;font-weight:500;color:var(--red);line-height:1;}
+  .slot.create .meta{border-top-color:rgba(255,59,59,.25);}
+  .slot.create .nm{color:var(--mildred);}
+  .slot.create .rl{color:var(--dim);}
+
+  /* ---- pied : bouton connexion ---- */
+  .foot{display:flex;align-items:center;gap:18px;padding:0 40px 30px;position:relative;z-index:2;}
+  .hint{font-family:"Share Tech Mono",monospace;font-size:11.5px;color:var(--dim);letter-spacing:.1em;}
+  .cta{margin-left:auto;padding:.8em 2.6em;font-weight:700;letter-spacing:.22em;text-transform:uppercase;font-size:15px;
+    color:var(--dim);background:rgba(9,16,22,.9);border:1px solid var(--dim-2);cursor:not-allowed;transition:.18s;
+    clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);}
+  .cta.on{color:#001014;background:var(--blue);border-color:var(--blue);cursor:pointer;box-shadow:0 0 26px rgba(55,214,255,.35);}
+  .cta.on:hover{background:#7fe6ff;}
+
+  /* légende sous l'écran */
+  .legend{margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;}
+  .lg{border:1px solid var(--line-s);background:rgba(9,15,21,.6);padding:10px 12px;font-size:12.5px;color:var(--readable);}
+  .lg b{color:var(--white);display:block;margin-bottom:2px;font-size:13px;}
+  .lg .mono{color:var(--blue);font-size:11px;}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="eyebrow">Tessera · Maquette</div>
+  <h1>Lobby d'arrivée — choix du personnage</h1>
+  <p class="note">Le jeu est gelé (GameplayTier cinématique, HUD off, bulle d'isolement — spec flux
+    d'arrivée). Vignette rouge native en bord d'écran, fond façon écrans d'inventaire. Clique une
+    carte pour sentir le flux : CONNEXION s'active.</p>
+
+  <div class="screen">
+    <div class="head"><span class="t">Tessera <b>//</b> Serveur RP</span><span class="srv">tessera-dev-01 · 12/64 EN LIGNE</span></div>
+    <div class="subtitle">Choisis ton personnage — ou crées-en un.</div>
+
+    <div class="slots" id="slots">
+      <div class="slot" data-name="Vika Moreno">
+        <span class="selpin">▸ SÉLECTIONNÉ</span>
+        <div class="doll"><div class="body"><b class="b-h"></b><b class="b-t"></b><b class="b-l1"></b><b class="b-l2"></b></div></div>
+        <div class="meta"><div class="nm">Vika Moreno</div><div class="rl">Nomade · Médic</div><div class="last">VU IL Y A 2 J · WATSON</div></div>
+      </div>
+      <div class="slot" data-name="Dex Carter">
+        <span class="selpin">▸ SÉLECTIONNÉ</span>
+        <div class="doll"><div class="body"><b class="b-h"></b><b class="b-t"></b><b class="b-l1"></b><b class="b-l2"></b></div></div>
+        <div class="meta"><div class="nm">Dex Carter</div><div class="rl">Corpo · NetWatch</div><div class="last">VU IL Y A 9 J · CITY CENTER</div></div>
+      </div>
+      <div class="slot create" id="create">
+        <div class="doll"><div class="plus">+</div></div>
+        <div class="meta"><div class="nm">Créer un personnage</div><div class="rl">Ouvre le creator natif (modifié)</div><div class="last">SLOTS : 2/3</div></div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span class="hint" id="hint">// SÉLECTIONNE UN PERSONNAGE POUR ACTIVER LA CONNEXION</span>
+      <button class="cta" id="cta">Connexion</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="lg"><b>Vignette rouge</b>Le cadre natif des popups (celle du panneau H2) — signale « hors du monde ».<span class="mono">vignette.inkatlas · MainColors.Red</span></div>
+    <div class="lg"><b>Multi-personnages</b>Cap par droits : joueur = 1 slot, staff = N. Sélection → CONNEXION envoie SelectCharacter puis entre dans le monde.<span class="mono">CharacterList / SelectCharacter (spec flux d'arrivée §3)</span></div>
+    <div class="lg"><b>Créer</b>Ouvre le character creator NATIF de Cyberpunk, modifié : on retire les éléments hors-RP (stats de départ, choix de vie…) — périmètre exact à trancher.<span class="mono">creator natif · 1a patché (1b)</span></div>
+  </div>
+
+<script>
+  // Démo du flux sélection → activation du bouton (aucune logique réelle).
+  const slots = [...document.querySelectorAll('.slot:not(.create)')];
+  const cta = document.getElementById('cta');
+  const hint = document.getElementById('hint');
+  slots.forEach(s => s.addEventListener('click', () => {
+    slots.forEach(x => x.classList.remove('sel'));
+    s.classList.add('sel');
+    cta.classList.add('on');
+    hint.textContent = '// PRÊT — PERSONNAGE : ' + s.dataset.name.toUpperCase();
+  }));
+  document.getElementById('create').addEventListener('click', () => {
+    hint.textContent = '// OUVRIRAIT LE CHARACTER CREATOR NATIF (MODIFIÉ)';
+  });
+  cta.addEventListener('click', () => {
+    if (cta.classList.contains('on')) hint.textContent = '// CONNEXION AU SERVEUR… (SelectCharacter → entrée dans le monde)';
+  });
+</script>
+</div>
+</body>
+</html>

@@ -20,6 +20,9 @@ redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquette
   référence de design pour la reconstruction en ink.
 - **`tessera-hud-kit.html`** — **NOTRE CIBLE.** Maquette de *nos* écrans (vie, faim/soif…) dans cette
   charte. Pour la phase design de nos écrans, après.
+- **`maquette-lobby-arrivee.html`** — **MAQUETTE D'ÉCRAN : lobby d'arrivée** (choix du personnage).
+  Vignette rouge native, fond façon inventaire, cartes de personnages + carte « Créer » (→ creator
+  natif modifié), bouton CONNEXION activé à la sélection (cliquable en démo).
 
 Ouvre-les dans un navigateur. La police Rajdhani se charge depuis Google Fonts (internet requis ;
 repli condensé sinon).
