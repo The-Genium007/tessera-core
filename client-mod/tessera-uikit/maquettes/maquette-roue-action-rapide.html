@@ -3,18 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tessera — Maquette : Roue d'action rapide</title>
+<title>Tessera — Maquette : Roue d'action rapide (custom)</title>
 <!--
-  MAQUETTE de la « Roue d'action rapide » (R34, touche provisoire G) — DA officielle + codes de la
-  ROUE NATIVE (capture 144601) : plates rectangulaires sombres à motif circuit et LISERÉ ORANGE,
-  coins cyan, panneau de détail à CADRE ROUGE à droite, hints [Q]/[E] en bas, monde assombri
-  rouge derrière (dilatation du temps).
-  Spécificités Lucas démontrées EN DÉMO :
-  - MULTI-ÉTAGES : le segment « Émotes » ouvre une SOUS-roue (clic hub = retour).
-  - DENSITÉ VARIABLE : Interactions = 6 segments, Émotes = 8, Radio = 4.
-  - NAVIGATION ENTRE ROUES : Q / E font défiler les roues (pages + ticks de position).
-  Survol = sélection (détail à droite) ; clic = activer (simulation). Approximation CSS, aucun
-  asset CDPR.
+  MAQUETTE v2 de la « Roue d'action rapide » (R34, touche provisoire G) — ROUE CUSTOM Tessera
+  (plus la copie de la roue d'armes), specs Lucas 2026-07-22 :
+  - Style de tuile NATIF conservé (plate sombre à motif circuit + liseré orange) mais tuiles
+    DYNAMIQUES : CARRÉ si icône seule, RECTANGLE si texte — plus petites, plus rapprochées,
+    moins intrusives (on voit le jeu derrière).
+  - RACINE = CERCLE DE CATÉGORIES (Émotes, Poses, Interactions + remplissage provisoire), on
+    navigue EN PROFONDEUR ; ÉCHAP = retour d'un niveau.
+  - DEUX CERCLES (petit + grand) quand une roue a beaucoup d'éléments (ex. Émotes : 14).
+  - SÉLECTION DIRECTIONNELLE : l'angle + la distance de la souris depuis le centre désignent la
+    tuile (pas besoin de la survoler précisément) ; CLIC = valider.
+  - Survol : effet « CRAN » (accroche instantanée + pop) puis BOUCLE (pulsation).
+  - VALIDATION d'un élément : flash → l'interface SE FERME → reset À LA RACINE → l'action part
+    (toast de démo). G rouvre.
+  - Les 3 modes de contenu coexistent : texte seul (Interactions), icône+texte (Poses, catégories),
+    icône seule (Émotes — glyphes placeholders, le nom s'affiche au hub et en légende).
+  Approximation CSS, aucun asset CDPR.
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -38,68 +44,82 @@
   /* ============ ÉCRAN ============ */
   .screen{position:relative;aspect-ratio:16/9;overflow:hidden;border:1px solid rgba(229,52,46,.25);
     background:
-      radial-gradient(700px 420px at 50% 45%, rgba(229,52,46,.10), transparent 65%),
-      radial-gradient(900px 560px at 85% 10%, rgba(229,52,46,.07), transparent 60%),
+      radial-gradient(700px 420px at 50% 45%, rgba(229,52,46,.09), transparent 65%),
+      radial-gradient(900px 560px at 85% 10%, rgba(229,52,46,.06), transparent 60%),
       linear-gradient(180deg,#100609 0%, #0b070c 55%, #090b0e 100%);
-    font-size:clamp(9px,1.05vw,15px);}
+    font-size:clamp(9px,1.05vw,15px);cursor:crosshair;}
   .screen::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:8;
     background:repeating-linear-gradient(0deg,rgba(0,0,0,.12) 0 1px,transparent 1px 3px);mix-blend-mode:multiply;}
 
-  /* ---- plaque de titre / pages de roues (pattern lobby) ---- */
-  .plate{position:absolute;left:50%;top:4.5%;transform:translateX(-50%);z-index:4;width:26em;
-    border:1px solid rgba(229,52,46,.4);padding:.4em .8em;display:flex;align-items:center;gap:.7em;background:rgba(10,4,6,.65);}
-  .plate .arr{color:var(--red);}
-  .plate .key{font-family:"Share Tech Mono",monospace;border:1px solid var(--white);color:var(--white);font-size:.75em;padding:.03em .4em;}
-  .plate .t{flex:1;text-align:center;font-weight:700;letter-spacing:.26em;text-transform:uppercase;font-size:1.05em;}
-  .plate .ticks{position:absolute;left:14%;right:14%;bottom:-6px;height:3px;display:flex;gap:6px;}
-  .plate .ticks i{flex:1;background:rgba(229,52,46,.35);} .plate .ticks i.on{background:var(--cyan);}
+  /* plaque de titre = fil d'Ariane */
+  .plate{position:absolute;left:50%;top:4.5%;transform:translateX(-50%);z-index:4;min-width:22em;
+    border:1px solid rgba(229,52,46,.4);padding:.35em .9em;text-align:center;background:rgba(10,4,6,.65);}
+  .plate .t{font-weight:700;letter-spacing:.22em;text-transform:uppercase;font-size:1em;}
+  .plate .t .lvl{color:var(--dim);font-weight:500;}
 
-  /* ---- la roue ---- */
-  .wheelbox{position:absolute;left:38%;top:52%;transform:translate(-50%,-50%);width:0;height:0;z-index:3;}
-  .ringbg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:30em;height:30em;border-radius:50%;
-    border:1px solid rgba(75,227,247,.10);background:radial-gradient(circle, rgba(75,227,247,.05), transparent 62%);}
-  .hub{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:7.5em;height:7.5em;border-radius:50%;
-    border:1px solid rgba(75,227,247,.45);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.2em;
-    background:rgba(6,10,14,.85);cursor:default;z-index:5;text-align:center;}
-  .hub .bc{font-family:"Share Tech Mono",monospace;font-size:.58em;letter-spacing:.14em;color:var(--dim);text-transform:uppercase;max-width:90%;}
-  .hub .nm{font-weight:700;letter-spacing:.14em;font-size:.85em;text-transform:uppercase;color:var(--cyan);}
-  .hub.canback{cursor:pointer;border-color:var(--red);}
-  .hub.canback .back{font-family:"Share Tech Mono",monospace;font-size:.6em;color:var(--red);letter-spacing:.1em;}
+  /* ---- roue ---- */
+  #wheelui{position:absolute;inset:0;z-index:3;}
+  #wheelui.closed{display:none;}
+  .center{position:absolute;left:50%;top:52%;width:0;height:0;}
+  .ringmark{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border-radius:50%;
+    border:1px dashed rgba(75,227,247,.08);pointer-events:none;}
+  .hub{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:5.6em;height:5.6em;border-radius:50%;
+    border:1px solid rgba(75,227,247,.4);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.1em;
+    background:rgba(6,10,14,.82);z-index:5;text-align:center;}
+  .hub .nm{font-weight:700;letter-spacing:.08em;font-size:.72em;text-transform:uppercase;color:var(--cyan);max-width:88%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .hub .bc{font-family:"Share Tech Mono",monospace;font-size:.5em;letter-spacing:.12em;color:var(--dim);text-transform:uppercase;}
+  .hub.canback{border-color:var(--red);}
+  .hub.canback .bc{color:var(--red);}
 
-  /* segment = plate rectangulaire façon roue native */
-  .seg{position:absolute;left:50%;top:50%;width:10em;height:3.3em;margin:-1.65em 0 0 -5em;cursor:pointer;
+  /* tuile — style plate natif, dynamique carré/rectangle */
+  .tile{position:absolute;left:0;top:0;cursor:pointer;
     background:
       repeating-linear-gradient(105deg, rgba(75,227,247,.05) 0 2px, transparent 2px 9px),
-      linear-gradient(180deg, rgba(10,16,20,.96), rgba(7,10,13,.96));
-    border:1px solid rgba(75,227,247,.16);
-    clip-path:polygon(0 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%);
-    display:flex;align-items:center;gap:.55em;padding:0 .6em 0 0;transition:border-color .1s, box-shadow .1s;}
-  .seg::before{content:"";width:4px;align-self:stretch;background:var(--orange);flex:none;} /* liseré orange natif */
-  .seg .ic{width:1.9em;height:1.9em;border:1px solid rgba(255,255,255,.18);flex:none;margin-left:.5em;
-    background:rgba(75,227,247,.06);display:grid;place-items:center;font-size:.8em;}
-  .seg .lb{flex:1;min-width:0;}
-  .seg .lb .l1{font-weight:600;letter-spacing:.06em;font-size:.92em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  .seg .lb .l2{font-family:"Share Tech Mono",monospace;font-size:.62em;color:var(--dim);letter-spacing:.1em;}
-  .seg .badge{font-family:"Share Tech Mono",monospace;font-size:.68em;color:var(--amber);flex:none;}
-  .seg .sub{color:var(--red);font-size:.8em;flex:none;} /* marqueur sous-roue ‹ › */
-  .seg.on{border-color:var(--cyan);box-shadow:0 0 16px rgba(75,227,247,.35);z-index:6;}
-  .seg.on .ic{border-color:var(--cyan);color:var(--cyan);}
+      linear-gradient(180deg, rgba(10,16,20,.95), rgba(7,10,13,.95));
+    border:1px solid rgba(75,227,247,.14);
+    clip-path:polygon(0 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%);
+    display:flex;align-items:center;transform:translate(-50%,-50%);}
+  .tile::before{content:"";width:3px;align-self:stretch;background:var(--orange);flex:none;opacity:.85;}
+  .tile.rect{width:7.4em;height:2.5em;gap:.45em;padding-right:.5em;}
+  .tile.sq{width:2.9em;height:2.9em;justify-content:center;}
+  .tile.sq::before{position:absolute;left:0;top:0;bottom:0;}
+  .tile .g{font-size:1.05em;color:var(--readable);flex:none;width:1.6em;text-align:center;}
+  .tile.sq .g{width:auto;font-size:1.15em;}
+  .tile .l1{font-weight:600;letter-spacing:.05em;font-size:.8em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .tile .subm{color:var(--red);font-size:.7em;flex:none;margin-left:auto;padding-left:.3em;}
+  .tile.filler{opacity:.55;}
+  /* CRAN (accroche instantanée + pop) puis BOUCLE (pulsation) */
+  .tile.on{border-color:var(--cyan);z-index:6;
+    animation:crank .13s steps(2,jump-none) 1, loopPulse 1.1s .13s infinite ease-in-out;}
+  .tile.on .g{color:var(--cyan);}
+  @keyframes crank{0%{transform:translate(-50%,-50%) scale(.94);}100%{transform:translate(-50%,-50%) scale(1.07);}}
+  @keyframes loopPulse{0%,100%{box-shadow:0 0 8px rgba(75,227,247,.25);transform:translate(-50%,-50%) scale(1.07);}
+    50%{box-shadow:0 0 18px rgba(75,227,247,.55);transform:translate(-50%,-50%) scale(1.03);}}
+  .tile.validate{animation:val .18s ease-out 1;}
+  @keyframes val{0%{filter:brightness(1);}50%{filter:brightness(2.2);}100%{filter:brightness(1);}}
+  @media (prefers-reduced-motion: reduce){.tile.on{animation:none;box-shadow:0 0 12px rgba(75,227,247,.4);}}
 
-  /* ---- panneau de détail à droite (cadre ROUGE natif) ---- */
-  .detail{position:absolute;right:4%;top:50%;transform:translateY(-50%);width:20em;z-index:4;
-    border:1px solid var(--red);background:rgba(10,6,8,.88);padding:1em 1.2em;
-    box-shadow:0 0 24px rgba(229,52,46,.15);}
-  .detail::before{content:"";position:absolute;left:-1px;top:-1px;width:1.2em;height:1.2em;border-top:3px solid var(--red);border-left:3px solid var(--red);}
-  .detail .dt{font-weight:700;letter-spacing:.06em;font-size:1.15em;text-transform:uppercase;}
-  .detail .dk{font-family:"Share Tech Mono",monospace;color:var(--red);font-size:.72em;letter-spacing:.16em;text-transform:uppercase;margin:.2em 0 .7em;}
-  .detail .dd{color:var(--readable);font-size:.9em;border-top:1px solid rgba(229,52,46,.3);padding-top:.7em;}
+  /* légende de l'élément visé, sous la roue */
+  .caption{position:absolute;left:50%;bottom:12%;transform:translateX(-50%);z-index:4;text-align:center;min-height:2.6em;}
+  .caption .cn{font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-size:1em;}
+  .caption .cd{color:var(--readable);font-size:.8em;max-width:34em;}
 
-  /* ---- hints bas (pattern natif [Q]/[E]) ---- */
-  .hints{position:absolute;left:50%;bottom:5%;transform:translateX(-50%);display:flex;gap:2.2em;z-index:4;}
-  .hint{display:flex;align-items:center;gap:.5em;color:var(--red);font-size:.9em;letter-spacing:.04em;}
+  /* toast d'action lancée (après validation) */
+  .go{position:absolute;left:50%;bottom:6%;transform:translateX(-50%);z-index:4;display:none;
+    align-items:center;gap:.7em;background:rgba(8,10,14,.85);border:1px solid rgba(75,227,247,.2);border-left:4px solid var(--cyan);padding:.45em 1em;}
+  .go.show{display:flex;}
+  .go .tx{font-size:.9em;color:var(--cyan);letter-spacing:.06em;text-transform:uppercase;font-weight:600;}
+
+  /* hint de réouverture quand fermée */
+  .reopen{position:absolute;left:50%;top:52%;transform:translate(-50%,-50%);z-index:3;display:none;
+    font-family:"Share Tech Mono",monospace;color:var(--dim);letter-spacing:.14em;font-size:.9em;}
+  .reopen.show{display:block;}
+  .reopen .k{border:1px solid var(--cyan);color:var(--cyan);padding:.05em .45em;}
+
+  .hints{position:absolute;left:50%;bottom:2.5%;transform:translateX(-50%);display:flex;gap:2em;z-index:4;}
+  .hint{display:flex;align-items:center;gap:.5em;color:var(--red);font-size:.85em;letter-spacing:.04em;}
   .hint .k{font-family:"Share Tech Mono",monospace;border:1px solid var(--cyan);color:var(--cyan);font-size:.75em;padding:.02em .4em;}
 
-  /* légende */
   .legend{margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;}
   .lg{border:1px solid rgba(75,227,247,.12);background:rgba(9,12,16,.6);padding:10px 12px;font-size:12.5px;color:var(--readable);}
   .lg b{color:var(--white);display:block;margin-bottom:2px;font-size:13px;}
@@ -109,121 +129,182 @@
 <body>
 <div class="page">
 
-  <div class="eyebrow">Tessera · Maquette · DA officielle</div>
+  <div class="eyebrow">Tessera · Maquette · DA officielle · v2 custom</div>
   <h1>Roue d'action rapide <span class="mono" style="font-size:.55em;color:#6a6f75">[G]</span></h1>
-  <p class="note">Codes de la roue native (plates à liseré orange, panneau détail à cadre rouge,
-    hints [Q]/[E]) + les trois spécificités : <b>multi-étages</b> (clique « Émotes » → sous-roue,
-    clique le hub pour revenir), <b>densité variable</b> (6/8/4 segments), <b>navigation entre
-    roues</b> (touches Q / E ou les hints). Survol = sélection, le détail s'affiche à droite.</p>
+  <p class="note"><b>Bouge la souris dans l'écran</b> : l'angle + la distance depuis le centre visent
+    une tuile (cran + pulsation). <b>Clic</b> : une catégorie s'ouvre ; un élément se VALIDE (la roue
+    se ferme, reset racine, l'action part). <b>Échap</b> : retour. <b>G</b> : rouvrir. Émotes = 14
+    éléments sur DEUX cercles.</p>
 
   <div class="screen" id="scr">
-    <div class="plate">
-      <span class="arr">◁</span><span class="key">Q</span>
-      <span class="t" id="pageTitle">Interactions</span>
-      <span class="key">E</span><span class="arr">▷</span>
-      <span class="ticks" id="ticks"></span>
+    <div class="plate"><span class="t" id="crumb">Roue d'action rapide</span></div>
+
+    <div id="wheelui">
+      <div class="center" id="center">
+        <div class="hub" id="hub"><span class="nm" id="hubName">Catégories</span><span class="bc" id="hubBc">racine</span></div>
+      </div>
+      <div class="caption" id="cap"><div class="cn" id="capN"></div><div class="cd" id="capD"></div></div>
     </div>
 
-    <div class="wheelbox" id="wheel">
-      <div class="ringbg"></div>
-      <div class="hub" id="hub"><span class="bc" id="bc">roue 1/3</span><span class="nm" id="hubName">Interactions</span><span class="back" id="backHint" hidden>◄ retour</span></div>
-    </div>
-
-    <div class="detail" id="detail">
-      <div class="dt" id="dTitle">Se présenter</div>
-      <div class="dk" id="dKind">Interaction · proximité</div>
-      <div class="dd" id="dDesc">Révèle ton nom au joueur visé. Il te verra désormais nommé — pour toujours.</div>
-    </div>
+    <div class="reopen" id="reopen"><span class="k">G</span> ROUVRIR LA ROUE</div>
+    <div class="go" id="go"><span class="tx" id="goTx"></span></div>
 
     <div class="hints">
-      <span class="hint"><span class="k">Q</span> Roue précédente</span>
-      <span class="hint"><span class="k">CLIC</span> Activer</span>
-      <span class="hint"><span class="k">G</span> relâché : fermer</span>
-      <span class="hint"><span class="k">E</span> Roue suivante</span>
+      <span class="hint"><span class="k">SOURIS</span> Viser</span>
+      <span class="hint"><span class="k">CLIC</span> Ouvrir / Valider</span>
+      <span class="hint"><span class="k">ÉCHAP</span> Retour</span>
+      <span class="hint"><span class="k">G</span> Ouvrir / Fermer</span>
     </div>
   </div>
 
   <div class="legend">
-    <div class="lg"><b>Multi-étages</b>Un segment marqué ‹ › ouvre une sous-roue (ex. Émotes). Le hub affiche le fil d'Ariane et sert de « retour ».<span class="mono">pile de roues, breadcrumb</span></div>
-    <div class="lg"><b>Densité variable</b>La roue accepte peu ou beaucoup de segments — l'espacement s'adapte (6 / 8 / 4 en démo).<span class="mono">factory paramétrable (nb branches)</span></div>
-    <div class="lg"><b>Navigation entre roues</b>Q / E font défiler les roues de premier niveau (Interactions · Émotes · Radio) — ticks de position sous la plaque de titre.<span class="mono">pattern ‹[Q] titre [E]› + ticks (DA)</span></div>
-    <div class="lg"><b>Codes natifs repris</b>Plates sombres à motif circuit + liseré orange, sélection cyan, panneau détail à cadre rouge, hints [Q]/[E], monde assombri rouge.<span class="mono">capture 144601 · RadialMenuGameController (1a à sonder)</span></div>
+    <div class="lg"><b>Racine = catégories</b>Émotes · Poses · Interactions + remplissage provisoire (Radio, Véhicule, Divers — en attendant de définir). On descend en profondeur, Échap remonte.<span class="mono">arbre de roues, breadcrumb</span></div>
+    <div class="lg"><b>Deux cercles</b>Quand une roue est dense (Émotes : 14), les éléments se répartissent sur un petit et un grand cercle — la distance de la souris choisit le cercle, l'angle choisit la tuile.<span class="mono">sélection directionnelle angle+rayon</span></div>
+    <div class="lg"><b>Tuiles dynamiques</b>Style de plate natif (circuit + liseré orange) mais CARRÉ si icône seule, RECTANGLE si texte — rapprochées, plus petites que le natif, moins intrusives. Les 3 modes de contenu coexistent.<span class="mono">texte / icône+texte / icône seule</span></div>
+    <div class="lg"><b>Cran + boucle · validation</b>Le survol accroche d'un coup (cran + pop) puis pulse en boucle. Un clic d'élément : flash → fermeture → reset racine → action lancée (toast).<span class="mono">comportement cible en jeu</span></div>
   </div>
 
 <script>
-  // ---- données des roues (démo) ----
-  const WHEELS = [
-    { name:'Interactions', segs:[
-      {l:'Se présenter', k:'Interaction · proximité', d:'Révèle ton nom au joueur visé. Il te verra désormais nommé — pour toujours.'},
-      {l:'Se présenter à tous', k:'Interaction · zone', d:'Révèle ton nom à tous les joueurs autour de toi.'},
-      {l:'Échanger', k:'Interaction · commerce', d:'Propose un échange sécurisé au joueur visé.'},
-      {l:'Émotes', k:'Sous-roue', d:'Ouvre la roue des émotes (multi-étages).', sub:1},
-      {l:'Radio', k:'Comms', d:'Rejoindre / quitter un canal radio.'},
-      {l:'Pouce', k:'Geste rapide', d:'Un geste bref sans passer par la roue émotes.'},
-    ]},
-    { name:'Émotes', segs:[
-      {l:'Saluer', k:'Émote', d:'Lève la main.'},{l:'Pointer', k:'Émote', d:'Montre une direction.'},
-      {l:'Applaudir', k:'Émote', d:'Applaudit.'},{l:'S\'asseoir', k:'Pose', d:'S\'assoit sur place.'},
-      {l:'S\'adosser', k:'Pose', d:'S\'adosse au mur le plus proche.'},{l:'Danser', k:'Émote', d:'Danse.'},
-      {l:'Refuser', k:'Émote', d:'Fait non de la tête.'},{l:'Se croiser les bras', k:'Pose', d:'Croise les bras.'},
-    ]},
-    { name:'Radio', segs:[
-      {l:'Canal 1', k:'Radio', d:'Bascule sur le canal 1.', b:'12'},{l:'Canal 2', k:'Radio', d:'Bascule sur le canal 2.', b:'3'},
-      {l:'Fréquence…', k:'Radio', d:'Saisir une fréquence précise.'},{l:'Couper', k:'Radio', d:'Quitte la radio.'},
-    ]},
-  ];
+  // ---------- données ----------
+  const T=(l,d,m,g)=>({l,d,m:m||'text',g:g||''});          // item: label, desc, mode, glyphe
+  const C=(l,d,children,filler)=>({l,d,cat:1,children,filler});
+  const ROOT = C("Roue d'action rapide","",[
+    C('Émotes','Gestes animés — 14 éléments sur deux cercles.',[
+      T('Saluer','Lève la main.','icon','✦'),T('Pointer','Montre une direction.','icon','➤'),
+      T('Applaudir','Applaudit.','icon','❖'),T('Danser','Danse.','icon','♪'),
+      T('Refuser','Fait non de la tête.','icon','✕'),T('Acquiescer','Hoche la tête.','icon','✓'),
+      T('Hausser épaules','Hausse les épaules.','icon','∿'),T('Menacer','Geste de menace.','icon','▲'),
+      T('Supplier','Mains jointes.','icon','◇'),T('Rire','Rit franchement.','icon','☼'),
+      T('Pleurer','Sanglote.','icon','☂'),T('Fatigue','S\'étire, épuisé.','icon','≋'),
+      T('Photo','Mime une photo.','icon','▣'),T('Cœur','Petit cœur avec les mains.','icon','♥'),
+    ]),
+    C('Poses','Postures tenues (icône + texte).',[
+      T('S\'asseoir','S\'assoit sur place.','both','◉'),T('S\'adosser','S\'adosse au mur.','both','◫'),
+      T('Bras croisés','Croise les bras.','both','◈'),T('Accroupi','S\'accroupit.','both','▼'),
+      T('Allongé','S\'allonge.','both','▭'),T('Appuyé comptoir','S\'appuie sur un comptoir.','both','◻'),
+    ]),
+    C('Interactions','Interactions joueur (texte seul).',[
+      T('Se présenter','Révèle ton nom au joueur visé — pour toujours.'),
+      T('Se présenter à tous','Révèle ton nom à tous les joueurs autour.'),
+      T('Échanger','Propose un échange sécurisé au joueur visé.'),
+    ]),
+    C('Radio','Remplissage provisoire.',[
+      T('Canal 1','Bascule sur le canal 1.'),T('Canal 2','Bascule sur le canal 2.'),
+      T('Fréquence…','Saisir une fréquence.'),T('Couper','Quitte la radio.'),
+    ],1),
+    C('Véhicule','Remplissage provisoire.',[T('Verrouiller','Verrouille le véhicule.'),T('Moteur','Coupe/démarre le moteur.')],1),
+    C('Divers','Remplissage provisoire.',[T('Dé','Lance un dé.'),T('Pièce','Pile ou face.')],1),
+  ]);
 
-  const wheel = document.getElementById('wheel');
+  // ---------- état ----------
+  const scr = document.getElementById('scr');
+  const ui = document.getElementById('wheelui');
+  const center = document.getElementById('center');
   const hub = document.getElementById('hub');
-  const hubName = document.getElementById('hubName');
-  const bc = document.getElementById('bc');
-  const backHint = document.getElementById('backHint');
-  const pageTitle = document.getElementById('pageTitle');
-  const ticks = document.getElementById('ticks');
-  let page = 0;            // roue de premier niveau
-  let stack = [];          // pile des sous-roues (multi-étages)
-  const R = 12.2;          // rayon en em
+  let stack = [];               // chemin (catégories ouvertes)
+  let tiles = [];               // {el, angle, ring, node}
+  let sel = -1;
+  let open = true;
 
-  function currentWheel(){ return stack.length ? stack[stack.length-1] : WHEELS[page]; }
+  const cur = () => stack.length ? stack[stack.length-1] : ROOT;
 
-  function renderTicks(){
-    ticks.innerHTML = WHEELS.map((_,i)=>'<i'+(i===page&&!stack.length?' class="on"':'')+'></i>').join('');
+  function em(){ return parseFloat(getComputedStyle(scr).fontSize); }
+
+  function layout(nodes){
+    // ≤8 : un cercle ; sinon petit cercle (6) + grand cercle (le reste). Rayons en em (roue compacte).
+    if (nodes.length <= 8) return nodes.map((n,i)=>({n, ring:0, r:7.6, a:-90 + i*360/nodes.length}));
+    const inner = nodes.slice(0,6), outer = nodes.slice(6);
+    return [
+      ...inner.map((n,i)=>({n, ring:0, r:5.4, a:-90 + i*360/inner.length})),
+      ...outer.map((n,i)=>({n, ring:1, r:9.4, a:-90 + i*360/outer.length})),
+    ];
   }
-  function setDetail(s){
-    document.getElementById('dTitle').textContent = s.l;
-    document.getElementById('dKind').textContent = s.k;
-    document.getElementById('dDesc').textContent = s.d;
-  }
+
   function render(){
-    wheel.querySelectorAll('.seg').forEach(e=>e.remove());
-    const w = currentWheel();
-    pageTitle.textContent = stack.length ? WHEELS[page].name + ' › ' + w.name : w.name;
-    hubName.textContent = w.name;
-    bc.textContent = stack.length ? 'sous-roue' : 'roue ' + (page+1) + '/' + WHEELS.length;
+    center.querySelectorAll('.tile,.ringmark').forEach(e=>e.remove());
+    const node = cur();
+    document.getElementById('crumb').innerHTML =
+      ['Roue d\'action rapide', ...stack.map(s=>s.l)].join(' <span class="lvl">›</span> ');
+    document.getElementById('hubName').textContent = stack.length ? node.l : 'Catégories';
+    document.getElementById('hubBc').textContent = stack.length ? '◄ échap : retour' : 'racine';
     hub.classList.toggle('canback', !!stack.length);
-    backHint.hidden = !stack.length;
-    renderTicks();
-    const n = w.segs.length;
-    w.segs.forEach((s,i)=>{
-      const a = -90 + i*(360/n); // départ en haut
+    tiles = [];
+    const pl = layout(node.children);
+    const rings = [...new Set(pl.map(p=>p.r))];
+    rings.forEach(r=>{ const m=document.createElement('i'); m.className='ringmark';
+      m.style.width = m.style.height = (r*2+2.6)+'em'; center.appendChild(m); });
+    pl.forEach(p=>{
       const el = document.createElement('div');
-      el.className = 'seg';
-      el.style.transform = 'rotate('+a+'deg) translate('+R+'em) rotate('+(-a)+'deg)';
-      el.innerHTML = '<span class="ic">◆</span><span class="lb"><span class="l1">'+s.l+'</span><span class="l2">'+s.k+'</span></span>'
-        + (s.b ? '<span class="badge">'+s.b+'</span>' : '')
-        + (s.sub ? '<span class="sub">‹ ›</span>' : '');
-      el.addEventListener('mouseenter', ()=>{ wheel.querySelectorAll('.seg').forEach(x=>x.classList.remove('on')); el.classList.add('on'); setDetail(s); });
-      el.addEventListener('click', ()=>{ if (s.sub) { stack.push(WHEELS[1]); render(); } });
-      wheel.appendChild(el);
+      const mode = p.n.cat ? 'both' : p.n.m;
+      el.className = 'tile ' + (mode==='icon' ? 'sq' : 'rect') + (p.n.filler ? ' filler' : '');
+      const rad = p.a*Math.PI/180;
+      el.style.left = (Math.cos(rad)*p.r)+'em';
+      el.style.top  = (Math.sin(rad)*p.r)+'em';
+      el.innerHTML = (mode!=='text' ? '<span class="g">'+(p.n.cat?'▦':p.n.g)+'</span>' : '')
+        + (mode!=='icon' ? '<span class="l1">'+p.n.l+'</span>' : '')
+        + (p.n.cat ? '<span class="subm">‹ ›</span>' : '');
+      center.appendChild(el);
+      tiles.push({el, a:((p.a%360)+360)%360, ring:p.ring, node:p.n});
     });
-    const first = wheel.querySelector('.seg'); if (first){ first.classList.add('on'); setDetail(w.segs[0]); }
+    setSel(-1);
   }
-  hub.addEventListener('click', ()=>{ if (stack.length){ stack.pop(); render(); } });
-  document.addEventListener('keydown', e=>{
-    if (e.key==='e'||e.key==='E'){ if(!stack.length){ page=(page+1)%WHEELS.length; render(); } }
-    if (e.key==='q'||e.key==='Q'){ if(!stack.length){ page=(page+WHEELS.length-1)%WHEELS.length; render(); } }
-    if (e.key==='Escape'){ if(stack.length){ stack.pop(); render(); } }
+
+  function setSel(i){
+    if (sel>=0 && tiles[sel]) tiles[sel].el.classList.remove('on');
+    sel = i;
+    const capN = document.getElementById('capN'), capD = document.getElementById('capD');
+    if (i>=0){ tiles[i].el.classList.add('on');
+      capN.textContent = tiles[i].node.l; capD.textContent = tiles[i].node.d || '';
+    } else { capN.textContent=''; capD.textContent=''; }
+  }
+
+  // sélection DIRECTIONNELLE : angle + distance de la souris depuis le centre
+  scr.addEventListener('mousemove', e=>{
+    if (!open || !tiles.length) return;
+    const rc = center.getBoundingClientRect();
+    const dx = e.clientX - rc.left, dy = e.clientY - rc.top;
+    const dist = Math.hypot(dx,dy)/em();
+    if (dist < 3){ setSel(-1); return; }              // zone hub : rien
+    const ang = ((Math.atan2(dy,dx)*180/Math.PI)%360+360)%360;
+    const hasOuter = tiles.some(t=>t.ring===1);
+    const ring = hasOuter ? (dist > 7.4 ? 1 : 0) : 0;
+    let best=-1, bd=1e9;
+    tiles.forEach((t,i)=>{ if (t.ring!==ring) return;
+      let d = Math.abs(t.a-ang); d = Math.min(d,360-d);
+      if (d<bd){ bd=d; best=i; } });
+    if (best!==sel) setSel(best);
   });
+
+  scr.addEventListener('click', ()=>{
+    if (!open){ return; }
+    if (sel<0) return;
+    const t = tiles[sel];
+    if (t.node.cat){ stack.push(t.node); render(); return; }
+    // VALIDATION : flash → fermer → reset racine → action (toast)
+    t.el.classList.add('validate');
+    const name = t.node.l;
+    setTimeout(()=>{
+      open = false; ui.classList.add('closed');
+      document.getElementById('reopen').classList.add('show');
+      const go = document.getElementById('go');
+      document.getElementById('goTx').textContent = '▶ Action lancée : ' + name;
+      go.classList.add('show');
+      setTimeout(()=>go.classList.remove('show'), 2200);
+      stack = []; render();                            // reset racine pour la prochaine ouverture
+    }, 180);
+  });
+
+  document.addEventListener('keydown', e=>{
+    if (e.key==='Escape'){ if (open && stack.length){ stack.pop(); render(); } else if (open){ toggleOpen(false); } }
+    if (e.key==='g'||e.key==='G'){ toggleOpen(!open); }
+  });
+  function toggleOpen(v){
+    open = v;
+    ui.classList.toggle('closed', !open);
+    document.getElementById('reopen').classList.toggle('show', !open);
+    if (open){ stack=[]; render(); }
+  }
+
   render();
 </script>
 </div>
