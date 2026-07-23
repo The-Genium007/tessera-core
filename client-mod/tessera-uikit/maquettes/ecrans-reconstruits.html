@@ -121,7 +121,8 @@
   .map .pin.y::before{border-color:var(--amber);background:rgba(255,176,58,.25);}
 
   /* phone */
-  .phone{width:270px;margin-left:auto;background:var(--panel);border:1px solid var(--line);display:flex;flex-direction:column;}
+  /* Téléphone : panneau à GAUCHE (vérifié capture 144518 — pas à droite comme supposé). */
+  .phone{width:270px;margin-right:auto;background:var(--panel);border:1px solid var(--line);display:flex;flex-direction:column;}
   .phone .sb{display:flex;justify-content:space-between;padding:6px 12px;font-family:"Share Tech Mono",monospace;font-size:11px;color:var(--blue);border-bottom:1px solid var(--line-s);}
   .msg{max-width:78%;padding:7px 10px;margin:8px 12px;font-size:13px;background:rgba(55,214,255,.08);border:1px solid var(--line-s);}
   .msg.me{margin-left:auto;background:var(--hi);border-color:var(--line);}

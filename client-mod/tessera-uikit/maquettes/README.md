@@ -25,8 +25,12 @@ redscript ink. Le kit fixe un langage visuel commun pour que toutes les maquette
 - **`tessera-hud-kit.html`** — **NOTRE CIBLE.** Maquette de *nos* écrans (vie, faim/soif…) dans cette
   charte. Pour la phase design de nos écrans, après.
 - **`maquette-lobby-arrivee.html`** — **MAQUETTE D'ÉCRAN : lobby d'arrivée** (choix du personnage).
-  Vignette rouge native, fond façon inventaire, cartes de personnages + carte « Créer » (→ creator
-  natif modifié), bouton CONNEXION activé à la sélection (cliquable en démo).
+  v2 calibrée captures — LE MODÈLE de la DA. Cartes de personnages + « Créer » (→ creator natif
+  modifié), CONNEXION activé à la sélection, navigation Q/D (cliquable en démo).
+- **`maquette-hud-en-jeu.html`** — **MAQUETTE D'ÉCRAN : HUD en jeu.** Le natif à sa vraie place
+  (minimap haut-droite, wanted dessous, hex-widgets, hints) + les AJOUTS Tessera (faim/soif à
+  gauche de la minimap, nametags, indicateur vocal, toasts, micro-statut serveur) — bouton pour
+  surligner les ajouts.
 
 Ouvre-les dans un navigateur. La police Rajdhani se charge depuis Google Fonts (internet requis ;
 repli condensé sinon).
