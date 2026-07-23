@@ -15,6 +15,7 @@ pub mod degradation;
 pub mod elevator;
 pub mod elevator_catalog;
 pub mod escalade_police;
+pub mod frame;
 pub mod framing;
 pub mod gateway;
 pub mod gateway_routing;
