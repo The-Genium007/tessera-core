@@ -69,6 +69,22 @@ impl FrameRegistry {
             transform.position[2] + local_offset[2],
         ])
     }
+
+    /// Inverse de `world_position` : résout une position MONDE en offset local dans `frame`.
+    /// `Some(world_pos)` tel quel si `frame == WORLD_FRAME`. Sinon soustrait la translation du
+    /// repère puis applique la rotation inverse (`-yaw`) — `None` si le repère est inconnu (même
+    /// règle de repli que `world_position`, ADR 0013 § Négatives).
+    pub fn local_offset(&self, frame: FrameId, world_pos: [f32; 3]) -> Option<[f32; 3]> {
+        if frame == WORLD_FRAME {
+            return Some(world_pos);
+        }
+        let transform = self.transform_of(frame)?;
+        let dx = world_pos[0] - transform.position[0];
+        let dy = world_pos[1] - transform.position[1];
+        let dz = world_pos[2] - transform.position[2];
+        let (sin, cos) = (-transform.yaw).sin_cos();
+        Some([dx * cos - dy * sin, dx * sin + dy * cos, dz])
+    }
 }
 
 #[cfg(test)]
@@ -198,5 +214,76 @@ mod tests {
     fn transform_of_an_unknown_frame_is_none() {
         let reg = FrameRegistry::new();
         assert_eq!(reg.transform_of(999), None);
+    }
+
+    #[test]
+    fn local_offset_of_the_world_frame_is_the_world_position_itself() {
+        let reg = FrameRegistry::new();
+        let world_pos = [5.0, 6.0, 7.0];
+        assert_eq!(reg.local_offset(WORLD_FRAME, world_pos), Some(world_pos));
+    }
+
+    #[test]
+    fn local_offset_of_an_unknown_frame_is_none() {
+        let reg = FrameRegistry::new();
+        assert_eq!(reg.local_offset(42, [0.0, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn local_offset_with_zero_yaw_translates_the_world_position_back() {
+        let mut reg = FrameRegistry::new();
+        reg.set_transform(
+            7,
+            FrameTransform {
+                position: [100.0, 200.0, 30.0],
+                yaw: 0.0,
+            },
+        );
+        let offset = reg.local_offset(7, [101.0, 202.0, 30.0]);
+        assert_eq!(offset, Some([1.0, 2.0, 0.0]));
+    }
+
+    #[test]
+    fn local_offset_with_a_quarter_turn_rotates_the_world_position_back() {
+        // Même repère que `a_known_frame_with_a_quarter_turn_rotates_the_offset` — vérifie
+        // l'inverse exact de ce test existant.
+        let mut reg = FrameRegistry::new();
+        reg.set_transform(
+            7,
+            FrameTransform {
+                position: [0.0, 0.0, 0.0],
+                yaw: 90.0_f32.to_radians(),
+            },
+        );
+        let offset = reg.local_offset(7, [0.0, 1.0, 0.0]).unwrap();
+        assert!(
+            (offset[0] - 1.0).abs() < 1e-4,
+            "x attendu ~1, obtenu {}",
+            offset[0]
+        );
+        assert!(
+            (offset[1] - 0.0).abs() < 1e-4,
+            "y attendu ~0, obtenu {}",
+            offset[1]
+        );
+    }
+
+    #[test]
+    fn world_position_then_local_offset_round_trips_for_any_transform() {
+        // Propriété : local_offset est l'inverse exact de world_position pour un repère connu.
+        let mut reg = FrameRegistry::new();
+        reg.set_transform(
+            7,
+            FrameTransform {
+                position: [12.0, -4.0, 8.0],
+                yaw: 37.0_f32.to_radians(),
+            },
+        );
+        let original_offset = [3.0, -1.5, 2.0];
+        let world = reg.world_position(7, original_offset).unwrap();
+        let back = reg.local_offset(7, world).unwrap();
+        assert!((back[0] - original_offset[0]).abs() < 1e-3);
+        assert!((back[1] - original_offset[1]).abs() < 1e-3);
+        assert!((back[2] - original_offset[2]).abs() < 1e-3);
     }
 }
