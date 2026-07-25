@@ -197,6 +197,21 @@ impl World {
     /// distance et de la retourner — jamais un mélange d'offset local et de position monde (ADR 0013).
     /// Un passager dont le repère est inconnu de `frames` est OMIS du résultat (règle de repli
     /// explicite) plutôt que placé à une position fausse.
+    ///
+    /// Implémentation (revue finale de branche, finding Critical #1, 2026-07-25) : utilise la
+    /// grille de hachage spatiale (comme `snapshot_for`) pour le cas commun, au lieu d'un scan
+    /// linéaire de `self.players` — sinon le chemin de snapshot réseau réintroduit exactement le
+    /// mur O(n) que la grille existe pour éliminer (cf. commit `27230ae`,
+    /// `docs/superpowers/specs/2026-07-18-tenue-en-charge-design.md` §2). La grille est indexée sur
+    /// `pose.x/y` TELS QUE STOCKÉS : pour un joueur en `WORLD_FRAME` (immense majorité), c'est déjà
+    /// la position monde — donc la grille est directement utilisable. Pour un joueur en repère
+    /// mobile (minorité — passagers d'ascenseur), `pose.x/y` est un OFFSET LOCAL (souvent proche de
+    /// 0,0), donc potentiellement dans une cellule de grille sans rapport avec sa position monde
+    /// réelle : une recherche par rayon sur la grille brute ne le trouverait pas de façon fiable.
+    /// Les deux populations sont donc traitées séparément : la grille est walkée pour les candidats
+    /// spatiaux (comme `snapshot_for`), en excluant les joueurs framés ; ceux-ci sont résolus et
+    /// évalués à part, coût O(k) où k = nombre de joueurs actuellement montés (négligeable même à
+    /// grande échelle, cf. `framed_player_ids`).
     pub fn snapshot_for_resolved(
         &self,
         viewer: ClientId,
@@ -212,28 +227,88 @@ impl World {
         ) else {
             return Vec::new();
         };
+
+        let framed_ids: std::collections::HashSet<ClientId> =
+            self.framed_player_ids().into_iter().collect();
+
+        let mut result = Vec::new();
+
+        // Population WORLD_FRAME : walk de la grille, comme `snapshot_for`. `pose.x/y` EST déjà la
+        // position monde pour ces joueurs, donc la grille (indexée dessus) est directement fiable.
+        let cell_radius = (radius / CELL_SIZE).ceil() as i64 + 1;
+        let (vcx, vcy) = cell_of(viewer_world[0], viewer_world[1]);
+        for dx in -cell_radius..=cell_radius {
+            for dy in -cell_radius..=cell_radius {
+                let cell = (vcx + dx, vcy + dy);
+                let Some(bucket) = self.grid.get(&cell) else {
+                    continue;
+                };
+                for &id in bucket {
+                    if id == viewer || framed_ids.contains(&id) {
+                        continue;
+                    }
+                    let Some(&pose) = self.players.get(&id) else {
+                        continue;
+                    };
+                    let dx = pose.x - viewer_world[0];
+                    let dy = pose.y - viewer_world[1];
+                    if (dx * dx + dy * dy).sqrt() <= radius {
+                        // pose.frame == WORLD_FRAME ici par construction (non-framed) : pas de
+                        // résolution nécessaire, mais le reset explicite documente l'invariant et
+                        // reste correct même si un futur appelant relâchait cette garantie.
+                        let mut resolved = pose;
+                        resolved.frame = crate::frame::WORLD_FRAME;
+                        result.push((id, resolved));
+                    }
+                }
+            }
+        }
+
+        // Population framée (repère mobile) : petite, résolue et évaluée individuellement — ne
+        // JAMAIS faire confiance à sa position dans la grille (offset local, cellule non fiable).
+        for id in framed_ids {
+            if id == viewer {
+                continue;
+            }
+            let Some(&pose) = self.players.get(&id) else {
+                continue;
+            };
+            let Some(world_pos) = frames.world_position(pose.frame, [pose.x, pose.y, pose.z])
+            else {
+                continue;
+            };
+            let dx = world_pos[0] - viewer_world[0];
+            let dy = world_pos[1] - viewer_world[1];
+            if (dx * dx + dy * dy).sqrt() <= radius {
+                let mut resolved = pose;
+                resolved.x = world_pos[0];
+                resolved.y = world_pos[1];
+                resolved.z = world_pos[2];
+                // Les coordonnées sont maintenant en espace MONDE : le repère d'origine ne doit
+                // plus être réappliqué. Sans ce reset, un futur appelant qui repasserait ce `Pose`
+                // à `world_position` doublerait la transformation (revue finale 2026-07-23).
+                resolved.frame = crate::frame::WORLD_FRAME;
+                result.push((id, resolved));
+            }
+        }
+
+        result
+    }
+
+    /// Ids des joueurs actuellement dans un repère mobile (`pose.frame != WORLD_FRAME`) — petite
+    /// population (passagers d'ascenseur aujourd'hui), scannée séparément par
+    /// `snapshot_for_resolved` car leur position stockée (offset local) n'est pas fiable dans la
+    /// grille spatiale indexée sur des coordonnées monde. `O(n)` sur `self.players`, mais n=nombre
+    /// total de joueurs connectés n'est PAS le facteur limitant ici : c'est appelé une fois par
+    /// `snapshot_for_resolved` (une fois par viewer par tick), pas par paire — le coût réel dominant
+    /// reste le walk de grille au-dessus. Un futur raffinement pourrait maintenir cet ensemble de
+    /// façon incrémentale (comme `grid`) si ce scan devenait mesurable ; pas fait ici car k (nombre
+    /// de joueurs montés) reste très petit à toute échelle réaliste (ADR 0013).
+    fn framed_player_ids(&self) -> Vec<ClientId> {
         self.players
             .iter()
-            .filter(|&(&id, _)| id != viewer)
-            .filter_map(|(&id, &pose)| {
-                let world_pos = frames.world_position(pose.frame, [pose.x, pose.y, pose.z])?;
-                let dx = world_pos[0] - viewer_world[0];
-                let dy = world_pos[1] - viewer_world[1];
-                if (dx * dx + dy * dy).sqrt() <= radius {
-                    let mut resolved = pose;
-                    resolved.x = world_pos[0];
-                    resolved.y = world_pos[1];
-                    resolved.z = world_pos[2];
-                    // Les coordonnées sont maintenant en espace MONDE : le repère d'origine ne
-                    // doit plus être réappliqué. Sans ce reset, un futur appelant qui repasserait
-                    // ce `Pose` à `world_position` doublerait la transformation (revue finale
-                    // 2026-07-23).
-                    resolved.frame = crate::frame::WORLD_FRAME;
-                    Some((id, resolved))
-                } else {
-                    None
-                }
-            })
+            .filter(|(_, pose)| pose.frame != crate::frame::WORLD_FRAME)
+            .map(|(&id, _)| id)
             .collect()
     }
 
@@ -572,6 +647,146 @@ mod tests {
             snap.is_empty(),
             "un passager dans un repère inconnu ne doit jamais apparaître avec une position fausse"
         );
+    }
+
+    #[test]
+    fn snapshot_for_resolved_matches_snapshot_for_when_no_frames_are_active() {
+        // Non-régression (revue finale de branche, finding Critical #1) : sans repère mobile actif
+        // (tous les joueurs en WORLD_FRAME), snapshot_for_resolved doit voir EXACTEMENT le même
+        // ensemble de joueurs que snapshot_for — preuve que le chemin résolu utilise bien la grille
+        // pour le cas commun, pas un scan linéaire séparé qui pourrait diverger silencieusement.
+        let mut w = World::new();
+        let frames = crate::frame::FrameRegistry::new();
+        for id in 1..=20 {
+            w.add_player(id);
+            w.set_pose(
+                id,
+                Pose {
+                    x: (id as f32) * 3.0,
+                    y: (id as f32) * 2.0,
+                    ..Default::default()
+                },
+            );
+        }
+        let viewer = 1;
+        let radius = 50.0;
+
+        let mut baseline = w.snapshot_for(viewer, radius);
+        let mut resolved = w.snapshot_for_resolved(viewer, radius, &frames);
+        baseline.sort_by_key(|(id, _)| *id);
+        resolved.sort_by_key(|(id, _)| *id);
+
+        assert_eq!(
+            baseline.len(),
+            resolved.len(),
+            "sans repère mobile actif, snapshot_for_resolved doit voir exactement les mêmes joueurs que snapshot_for"
+        );
+        for ((id_a, pose_a), (id_b, pose_b)) in baseline.iter().zip(resolved.iter()) {
+            assert_eq!(id_a, id_b);
+            assert!((pose_a.x - pose_b.x).abs() < 1e-4);
+            assert!((pose_a.y - pose_b.y).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn snapshot_for_resolved_uses_the_grid_for_a_world_frame_population_at_production_scale() {
+        // Preuve de non-régression PERF ciblée (finding Critical #1) : à population dense et rayon
+        // réaliste (visibility_radius ~ 100.0, cf. server.docker.toml), le résultat ENSEMBLISTE doit
+        // rester identique à un scan linéaire de référence codé ICI (pas en dépendant de World),
+        // même à une échelle où un scan O(n) par appel serait mesurable (n=800). Ce test ne mesure
+        // pas le temps (trop bruyant en CI, cf. piège documenté dans le brief) : il pin le
+        // COMPORTEMENT à une échelle qui aurait révélé un scan linéaire caché.
+        let mut w = World::new();
+        let frames = crate::frame::FrameRegistry::new();
+        let n = 800;
+        let positions: Vec<(u64, f32, f32)> = (0..n)
+            .map(|i| {
+                let x = (i * 37 % 2000) as f32;
+                let y = (i * 53 % 2000) as f32;
+                (i as u64, x, y)
+            })
+            .collect();
+        for (id, x, y) in &positions {
+            w.add_player(*id);
+            w.set_pose(
+                *id,
+                Pose {
+                    x: *x,
+                    y: *y,
+                    ..Default::default()
+                },
+            );
+        }
+        let radius = 100.0;
+        let viewer = 0;
+        let (vx, vy) = (positions[0].1, positions[0].2);
+        let expected: std::collections::BTreeSet<u64> = positions
+            .iter()
+            .filter(|(id, _, _)| *id != viewer)
+            .filter(|(_, x, y)| {
+                let dx = x - vx;
+                let dy = y - vy;
+                (dx * dx + dy * dy).sqrt() <= radius
+            })
+            .map(|(id, _, _)| *id)
+            .collect();
+        let actual: std::collections::BTreeSet<u64> = w
+            .snapshot_for_resolved(viewer, radius, &frames)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "snapshot_for_resolved doit produire le même ensemble qu'un scan linéaire de référence"
+        );
+    }
+
+    #[test]
+    fn snapshot_for_resolved_still_finds_a_framed_passenger_outside_the_viewers_grid_cell() {
+        // Le passager d'ascenseur stocke un OFFSET LOCAL (souvent proche de 0,0) dans `players`,
+        // donc dans une cellule de grille potentiellement très éloignée de sa position monde réelle
+        // (celle de la cabine). Si l'implémentation walkait la grille en excluant sans discernement
+        // les joueurs "framed" de la recherche par proximité brute, ce test resterait vert — mais si
+        // une régression les faisait retomber dans le chemin "grille brute" (donc évalués sur leur
+        // offset local au lieu de leur position résolue), ce test les perdrait car l'offset local
+        // (proche de 0,0) est à une cellule de grille totalement différente du viewer.
+        let mut w = World::new();
+        w.add_player(1); // viewer, dans le monde loin de l'origine
+        w.set_pose(
+            1,
+            Pose {
+                x: 500.0,
+                y: 500.0,
+                ..Default::default()
+            },
+        );
+        w.add_player(2); // passager, offset local proche de (0,0) — cellule de grille très différente
+        w.set_pose(
+            2,
+            Pose {
+                x: 0.5,
+                y: 0.0,
+                z: 0.0,
+                frame: 7,
+                ..Default::default()
+            },
+        );
+        let mut frames = crate::frame::FrameRegistry::new();
+        frames.set_transform(
+            7,
+            crate::frame::FrameTransform {
+                position: [500.0, 500.0, 40.0], // la cabine est au monde tout près du viewer
+                yaw: 0.0,
+            },
+        );
+        let snap = w.snapshot_for_resolved(1, 50.0, &frames);
+        assert_eq!(
+            snap.len(),
+            1,
+            "le passager résolu près du viewer doit être trouvé malgré une position brute (offset \
+             local) dans une cellule de grille éloignée"
+        );
+        assert_eq!(snap[0].0, 2);
     }
 
     #[test]

@@ -75,7 +75,21 @@ pub struct Server {
     /// Registre Classe A des destructibles (spec 2026-07-23 §2 + plan 2026-07-25 §2.1) — même
     /// patron `Option` que `elevator_registry`/`vehicle_registry` : `None` = aucun destructible
     /// configuré sur ce shard, coût nul.
+    ///
+    /// ⚠️ N'est aujourd'hui activable QUE depuis les tests (`with_destructibles`, appelé
+    /// uniquement par la suite de tests de ce module) — aucun constructeur de PRODUCTION
+    /// (`shard.rs`) ne le câble encore. Le câblage manifest+shard est différé au gel `.fbs` à venir
+    /// (cohérent avec le scope du plan original, revue finale de branche 2026-07-25, finding
+    /// Important #3) : un futur lecteur ne doit pas penser que ce sous-système est branché en prod.
     destructible_registry: Option<crate::destructible::DestructibleRegistry>,
+    /// Delta sortant (persistent_id, destroyed) des destructibles passés à `destroyed = true` ce
+    /// tick — même patron que `pending_combat_events` : accumulé par `apply_client_message` sur un
+    /// `DamageOutcome::Destroyed`, drainé par `take_pending_destructible_events` (appelée depuis
+    /// `shard_main`, câblage manifest+shard différé au gel `.fbs`, cf. commentaire sur
+    /// `destructible_registry` ci-dessus). Prévu dès le plan original (Task 6, Interfaces) mais pas
+    /// livré à l'époque — le retour de `apply_damage` était ignoré à l'appel (revue finale de
+    /// branche 2026-07-25, finding Important #3).
+    pending_destructible_events: Vec<(u64, bool)>,
     /// Rapports de position prédictifs (pont Shard→Gateway générique, `shard_boundary_bridge.rs`)
     /// accumulés par `tick_vehicles` ce tick — (entity_id, x, y, z, speed). Drainé par
     /// `take_pending_entity_reports`, appelé depuis `shard_main` (`Server`/`server_loop.rs` n'a pas
@@ -191,6 +205,7 @@ impl Server {
             nav_graph: None,
             vehicle_registry: None,
             destructible_registry: None,
+            pending_destructible_events: Vec::new(),
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -221,6 +236,7 @@ impl Server {
             nav_graph: None,
             vehicle_registry: None,
             destructible_registry: None,
+            pending_destructible_events: Vec::new(),
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -264,6 +280,7 @@ impl Server {
             nav_graph: None,
             vehicle_registry: None,
             destructible_registry: None,
+            pending_destructible_events: Vec::new(),
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -338,6 +355,7 @@ impl Server {
             nav_graph: None,
             vehicle_registry: None,
             destructible_registry: None,
+            pending_destructible_events: Vec::new(),
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -375,6 +393,7 @@ impl Server {
                 next_vehicle_id: crate::world::VEHICLE_ID_RANGE_START,
             }),
             destructible_registry: None,
+            pending_destructible_events: Vec::new(),
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -1006,6 +1025,14 @@ impl Server {
         std::mem::take(&mut self.pending_combat_events)
     }
 
+    /// Delta sortant des destructibles détruits ce tick (cf. doc de `pending_destructible_events`).
+    /// Câblage manifest+shard réel différé au gel `.fbs` — cet accesseur existe déjà pour ne pas
+    /// perdre l'événement une fois ce câblage fait, et pour que les tests puissent le vérifier dès
+    /// maintenant.
+    pub fn take_pending_destructible_events(&mut self) -> Vec<(u64, bool)> {
+        std::mem::take(&mut self.pending_destructible_events)
+    }
+
     /// Un tick : applique les events entrants, avance le monde, envoie un snapshot à chaque client.
     pub fn tick<T: Transport>(&mut self, transport: &mut T) {
         let tick_start = std::time::Instant::now();
@@ -1353,7 +1380,15 @@ impl Server {
                         // le kind seul désambiguïse, même motif que kind=3 vs kind=6 (commentaire
                         // plus haut sur MountElevator).
                         if let Some(registry) = &mut self.destructible_registry {
-                            registry.apply_damage(ei.target(), ei.param());
+                            // Finding Important #3 (revue finale de branche, 2026-07-25) : le
+                            // retour de apply_damage était ignoré — seule la transition RÉELLE vers
+                            // détruit (pas NoChange/AlreadyDestroyed/Unknown, cf. doc DamageOutcome)
+                            // a quelque chose de neuf à répliquer.
+                            if registry.apply_damage(ei.target(), ei.param())
+                                == crate::destructible::DamageOutcome::Destroyed
+                            {
+                                self.pending_destructible_events.push((ei.target(), true));
+                            }
                         }
                     }
                 }
@@ -1406,9 +1441,25 @@ impl Server {
 
     fn encode_snapshot_for(&self, viewer: ClientId, b: &mut FlatBufferBuilder) -> Vec<u8> {
         let viewer_pose = self.world.pose_of(viewer).unwrap_or_default();
+        // Finding Important #2 (revue finale de branche, 2026-07-25) : `viewer_pose` peut être un
+        // OFFSET LOCAL si le viewer est lui-même monté (repère non-WORLD_FRAME) — les candidats
+        // comparés contre lui viennent de `snapshot_for_resolved` et sont donc déjà en position
+        // MONDE. Comparer une position monde à un offset local produit une distance aberrante
+        // (mélange interdit par ADR 0013), qui fausse le plafond de voisins et la dégradation par
+        // distance en palier Degraded. Résout la position du viewer AVANT de construire
+        // `distance_to_viewer` — repli sur la pose brute si le repère est inconnu (cas de repli,
+        // même philosophie que `snapshot_for_resolved` : mieux vaut une valeur non résolue connue
+        // que de paniquer ou fabriquer une position).
+        let viewer_world = self
+            .frame_registry
+            .world_position(
+                viewer_pose.frame,
+                [viewer_pose.x, viewer_pose.y, viewer_pose.z],
+            )
+            .unwrap_or([viewer_pose.x, viewer_pose.y, viewer_pose.z]);
         let distance_to_viewer = |x: f32, y: f32| -> f32 {
-            let dx = x - viewer_pose.x;
-            let dy = y - viewer_pose.y;
+            let dx = x - viewer_world[0];
+            let dy = y - viewer_world[1];
             (dx * dx + dy * dy).sqrt()
         };
 
@@ -4175,6 +4226,123 @@ mod tests {
     }
 
     #[test]
+    fn a_mounted_viewer_sees_a_nearby_world_frame_player_at_the_correct_distance() {
+        // Revue finale de branche, finding Important #2 : le VIEWER lui-même peut être monté (repère
+        // non-WORLD_FRAME). `encode_snapshot_for` doit résoudre la pose du viewer à travers son
+        // repère AVANT de calculer `distance_to_viewer` — sinon un observateur monté compare les
+        // autres joueurs (résolus en position monde par `snapshot_for_resolved`) contre sa PROPRE
+        // position non résolue (offset local), ce qui produit une distance aberrante. Ici : client 2
+        // monte dans la cabine (offset local proche de 0,0, cabine au monde ~(100,200,30)) ; client 1
+        // reste au sol en WORLD_FRAME tout près de la cabine (100,200,30) — distance réelle ~0. Si le
+        // bug est présent, la distance calculée entre le client 1 (position monde ~100,200) et
+        // l'offset local NON résolu du client 2 (~0,0) serait ~223.
+        //
+        // `distance_to_viewer` n'influence l'INCLUSION dans le snapshot qu'en palier `Degraded`
+        // (`should_include_this_tick`, `degradation.rs`) — en `Normal` (défaut), l'inclusion ne
+        // dépend que du rayon appliqué DANS `snapshot_for_resolved` (déjà correct, résout tous les
+        // candidats). Ce test force donc `Degraded` avec un `tick_index` IMPAIR : dans ce palier,
+        // une entité à distance <= aoi_radius/2 est TOUJOURS incluse, une entité au-delà ne l'est
+        // qu'un tick sur deux — avec le bug, la distance aberrante (~223) dépasse largement
+        // aoi_radius/2 (5.0), donc le client 1 serait exclu sur un tick_index impair.
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 999999
+            [[elevator.floors]]
+            index = 0
+            position_x = 100.0
+            position_y = 200.0
+            position_z = 30.0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        // Rayon serré : seul un calcul de distance correct (viewer résolu en monde) laisse le
+        // client 1 dans le rayon de visibilité du client 2 monté.
+        let mut server = Server::new_with_elevators(10.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        // Client 1 : reste au sol en WORLD_FRAME, tout près de la cabine.
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: crate::gateway_routing::encode_position_update([100.0, 200.0, 30.0]),
+        });
+        server.tick(&mut t);
+
+        // Client 2 : monte dans la cabine — devient le VIEWER testé.
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        t.take_sent(2);
+        t.inject(TransportEvent::Message {
+            from: 2,
+            data: crate::gateway_routing::encode_position_update([100.0, 200.0, 30.0]),
+        });
+        server.tick(&mut t);
+        t.inject(TransportEvent::Message {
+            from: 2,
+            data: encode_entity_interaction(100, 6, 0),
+        });
+        server.tick(&mut t);
+        assert_eq!(
+            server.world.pose_of(2).unwrap().frame,
+            100,
+            "précondition : client 2 est bien monté (repère non-WORLD_FRAME)"
+        );
+
+        // Force le palier Degraded pour que `distance_to_viewer` influence réellement l'inclusion
+        // (cf. commentaire ci-dessus). `Server::tick()` RECALCULE `degradation_tier` à chaque appel
+        // depuis `tick_duration_window` (`tier_for_p99`) — `force_degradation_tier_for_test` seul
+        // ne tiendrait donc qu'un tick avant d'être écrasé. On maintient le palier Degraded en
+        // injectant une fenêtre de durées toutes au-dessus du seuil d'entrée (même patron que
+        // `degradation_tier_responds_to_an_injected_slow_tick_window`), puis on tick jusqu'à
+        // observer un `tick_index` impair au moment de l'envoi.
+        loop {
+            server.inject_tick_durations_for_test(vec![45_000; 200]);
+            t.take_sent(2);
+            server.tick(&mut t);
+            assert_eq!(
+                server.degradation_tier_for_test(),
+                crate::degradation::DegradationTier::Degraded,
+                "précondition : le palier doit rester Degraded pendant tout le test"
+            );
+            if !server.world.tick().is_multiple_of(2) {
+                break;
+            }
+        }
+        let sent = t.take_sent(2);
+
+        let mut found = false;
+        for b in &sent {
+            let Ok(env) = flatbuffers::root::<ServerEnvelope>(b) else {
+                continue;
+            };
+            let Some(snap) = env.msg_as_snapshot() else {
+                continue;
+            };
+            let Some(players) = snap.players() else {
+                continue;
+            };
+            for p in players {
+                if p.id() == 1 {
+                    found = true;
+                }
+            }
+        }
+        assert!(
+            found,
+            "le client 1 (au sol, tout près de la cabine) doit apparaître dans le snapshot du \
+             client 2 monté même en palier Degraded — la distance doit être calculée à travers la \
+             position MONDE résolue du viewer, pas son offset local brut dans la cabine"
+        );
+    }
+
+    #[test]
     fn mounting_an_unknown_elevator_id_is_silently_ignored() {
         // Aucun elevator_registry configuré (Server::new) — un elevator_id ne correspondant à
         // AUCUN ascenseur connu ne doit jamais monter le joueur dans un repère fictif.
@@ -4579,6 +4747,87 @@ mod tests {
         assert!(
             registry.records[&1001].destroyed,
             "10 points de dégâts sur 10 de durability doivent détruire le destructible"
+        );
+    }
+
+    #[test]
+    fn a_kind_8_report_that_destroys_the_target_enqueues_a_pending_destructible_event() {
+        // Revue finale de branche, finding Important #3 : le plan original (Task 6, Interfaces)
+        // prévoyait un delta sortant `pending_destructible_events` drainé en fin de tick — jamais
+        // livré (le retour de `apply_damage` était ignoré à l'appel). Même patron que
+        // `pending_combat_events`/`take_pending_combat_events` : drain, vide après lecture.
+        use crate::destructible_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[destructible]]
+            persistent_id = "1001"
+            name = "lampadaire"
+            kind = "device"
+            durability = 10
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new(50.0).with_destructibles(catalog);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(1001, 8, 10),
+        });
+        server.tick(&mut t);
+
+        let events = server.take_pending_destructible_events();
+        assert_eq!(
+            events,
+            vec![(1001, true)],
+            "un coup qui détruit le destructible doit pousser (persistent_id, true) dans la queue"
+        );
+        assert!(
+            server.take_pending_destructible_events().is_empty(),
+            "un second drain doit renvoyer une liste vide (comportement de drain, comme \
+             take_pending_combat_events)"
+        );
+    }
+
+    #[test]
+    fn a_kind_8_report_that_only_reduces_durability_enqueues_nothing() {
+        // Complément du test ci-dessus : un coup qui ne fait QUE réduire la durability sans
+        // détruire (DamageOutcome::NoChange) n'a rien de neuf à répliquer, donc ne doit rien
+        // pousser dans la queue.
+        use crate::destructible_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[destructible]]
+            persistent_id = "1001"
+            name = "lampadaire"
+            kind = "device"
+            durability = 10
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new(50.0).with_destructibles(catalog);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(1001, 8, 3), // 3 < 10 de durability : NoChange
+        });
+        server.tick(&mut t);
+
+        let registry = server.destructible_registry_for_test().unwrap();
+        assert!(
+            !registry.records[&1001].destroyed,
+            "précondition : 3 points de dégâts sur 10 de durability ne détruisent pas le destructible"
+        );
+        assert!(
+            server.take_pending_destructible_events().is_empty(),
+            "un coup qui ne détruit pas le destructible ne doit rien pousser dans la queue"
         );
     }
 }
