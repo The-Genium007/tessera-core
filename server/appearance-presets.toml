@@ -1,0 +1,83 @@
+# Catalogue des PRESETS d'apparence joueur — modèle preset (décision Lucas 2026-07-25).
+#
+# Contexte : le rendu d'un corps-joueur au visage EXACT exige une activation native non résolue
+# (chantier différé, cf. docs/superpowers/specs/2026-07-25-synchro-apparence-compositionnelle-design.md
+# §6.2). En attendant, le multi utilise des PRESETS : chaque joueur choisit un avatar dans cette liste.
+#
+# Chaque preset = `base_record` (une entité NPC qui SE REND — prouvé en jeu) + `appearance` (variante
+# ÉPINGLÉE). ⚠️ L'apparence d'un crowd record est ALÉATOIRE à chaque spawn (mesuré 2026-07-25) — d'où
+# l'épinglage explicite, sinon deux joueurs du même preset auraient des looks différents.
+#
+# Flux : le serveur offre ces choix, tient le choix de chaque joueur, et l'émet en `AppearanceSync`
+# (le fil porte `base_record`=hash TweakDBID + `appearance`=hash CName). Le client spawn `base_record`
+# puis applique `appearance` (au spawn OU `ScheduleAppearanceChange`, tous deux prouvés en jeu).
+#
+# Tous VÉRIFIÉS EN JEU le 2026-07-25 (spawn + rendu confirmé, apparence relue via GetCurrentAppearanceName).
+# Curation initiale (11) : variété genre/style/ethnie. À étendre (chaque record a un POOL d'apparences
+# — rich_wa_rich_01..NN, etc. — donc des dizaines de presets possibles depuis peu de records).
+
+[[preset]]
+id = 1
+name = "Femme chic — casual"
+base_record = "Character.CitizenRichFemaleCasual"
+appearance = "citizen__rich_wa_rich_23_casual"
+
+[[preset]]
+id = 2
+name = "Homme chic — casual"
+base_record = "Character.CitizenRichMaleCasual"
+appearance = "citizen__rich_ma_rich_15"
+
+[[preset]]
+id = 3
+name = "Femme corpo"
+base_record = "Character.CitizenRichFemale"
+appearance = "citizen__rich_wa_rich_17"
+
+[[preset]]
+id = 4
+name = "Homme corpo"
+base_record = "Character.CitizenRichMale"
+appearance = "citizen__rich_ma_rich_10"
+
+[[preset]]
+id = 5
+name = "Homme corpo — variante"
+base_record = "Character.CitizenRichMaleDE"
+appearance = "citizen__rich_ma_rich_07"
+
+[[preset]]
+id = 6
+name = "Femme corpo — asiatique"
+base_record = "Character.AsianFemale"
+appearance = "citizen__corporat_wa_corporat_wa_12"
+
+[[preset]]
+id = 7
+name = "Homme streetwear — asiatique"
+base_record = "Character.AsianMale"
+appearance = "king_of_the_stoop_ma_king_of_the_stoop_ma_04"
+
+[[preset]]
+id = 8
+name = "Femme nomade"
+base_record = "Character.CitizenAldecaldosFemale"
+appearance = "citizen__aldecaldos_wa_nomad_06"
+
+[[preset]]
+id = 9
+name = "Homme nomade"
+base_record = "Character.CitizenAldecaldosMale"
+appearance = "citizen__aldecaldos_ma_nomad_05"  # nomad (adulte) — PAS teenager (aléatoire écarté)
+
+[[preset]]
+id = 10
+name = "Femme biker"
+base_record = "Character.CitizenBikerFemale"
+appearance = "citizen__biker_wa_biker_01"
+
+[[preset]]
+id = 11
+name = "Homme biker"
+base_record = "Character.CitizenBikerMale"
+appearance = "citizen__biker_ma_biker_01"

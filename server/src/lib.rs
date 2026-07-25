@@ -7,6 +7,7 @@
 pub mod admin_commands;
 pub mod admin_store;
 pub mod anticheat;
+pub mod appearance_relay;
 pub mod attestation_display;
 pub mod ban_store;
 pub mod character_migration;
