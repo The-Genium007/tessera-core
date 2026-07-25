@@ -1,0 +1,12 @@
+format_version = 1
+
+[[destructible]]
+persistent_id = "1001"
+name = "lampadaire-exemple"
+kind = "device"
+
+[[destructible]]
+persistent_id = "1002"
+name = "baril-exemple"
+kind = "explosive"
+durability = 1

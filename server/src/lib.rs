@@ -13,6 +13,7 @@ pub mod character_migration;
 pub mod character_store;
 pub mod crowd_producer;
 pub mod degradation;
+pub mod destructible_catalog;
 pub mod elevator;
 pub mod elevator_catalog;
 pub mod escalade_police;
