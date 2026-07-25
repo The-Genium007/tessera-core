@@ -72,6 +72,10 @@ pub struct Server {
     /// `Server::new_with_vehicles`, registre VIDE au départ (spawn explicite via `spawn_vehicle`,
     /// cf. doc de ce constructeur).
     vehicle_registry: Option<VehicleRegistry>,
+    /// Registre Classe A des destructibles (spec 2026-07-23 §2 + plan 2026-07-25 §2.1) — même
+    /// patron `Option` que `elevator_registry`/`vehicle_registry` : `None` = aucun destructible
+    /// configuré sur ce shard, coût nul.
+    destructible_registry: Option<crate::destructible::DestructibleRegistry>,
     /// Rapports de position prédictifs (pont Shard→Gateway générique, `shard_boundary_bridge.rs`)
     /// accumulés par `tick_vehicles` ce tick — (entity_id, x, y, z, speed). Drainé par
     /// `take_pending_entity_reports`, appelé depuis `shard_main` (`Server`/`server_loop.rs` n'a pas
@@ -186,6 +190,7 @@ impl Server {
             pending_interaction_results: Vec::new(),
             nav_graph: None,
             vehicle_registry: None,
+            destructible_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -215,6 +220,7 @@ impl Server {
             pending_interaction_results: Vec::new(),
             nav_graph: None,
             vehicle_registry: None,
+            destructible_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -257,6 +263,7 @@ impl Server {
             pending_interaction_results: Vec::new(),
             nav_graph: None,
             vehicle_registry: None,
+            destructible_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -330,6 +337,7 @@ impl Server {
             pending_interaction_results: Vec::new(),
             nav_graph: None,
             vehicle_registry: None,
+            destructible_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -366,6 +374,7 @@ impl Server {
                 nav_states: std::collections::HashMap::new(),
                 next_vehicle_id: crate::world::VEHICLE_ID_RANGE_START,
             }),
+            destructible_registry: None,
             pending_entity_reports: Vec::new(),
             heat_tracker: None,
             pending_combat_events: Vec::new(),
@@ -428,6 +437,18 @@ impl Server {
             states: catalog.into_states(),
             tick_ms,
         });
+        self
+    }
+
+    /// Active le registre de destructibles sur un `Server` déjà construit — orthogonal aux
+    /// ascenseurs/PNJ/véhicules, même raisonnement que `with_elevators` (commentaire ci-dessus).
+    pub fn with_destructibles(
+        mut self,
+        catalog: crate::destructible_catalog::DestructibleCatalog,
+    ) -> Self {
+        self.destructible_registry = Some(crate::destructible::DestructibleRegistry::from_catalog(
+            catalog,
+        ));
         self
     }
 
@@ -549,6 +570,13 @@ impl Server {
     #[cfg(test)]
     pub(crate) fn frame_registry_for_test_mut(&mut self) -> &mut crate::frame::FrameRegistry {
         &mut self.frame_registry
+    }
+
+    #[cfg(test)]
+    pub(crate) fn destructible_registry_for_test(
+        &self,
+    ) -> Option<&crate::destructible::DestructibleRegistry> {
+        self.destructible_registry.as_ref()
     }
 
     /// État courant de TOUTES les cabines — à envoyer à un client qui vient d'arriver (connexion,
@@ -1314,6 +1342,18 @@ impl Server {
                             }
                             pose.frame = crate::frame::WORLD_FRAME;
                             self.world.set_pose(from, pose);
+                        }
+                    } else if ei.kind() == 8 {
+                        // Nouveau (destructibles Classe A, plan 2026-07-25 Task 6) :
+                        // kind=8=DamageDestructible. Kind dédié plutôt que de réutiliser kind=5
+                        // (Attaque PNJ) : `persistent_id` (destructible) et les ids PNJ/joueur ne
+                        // partagent aucune plage réservée commune (contrairement à
+                        // NPC_ID_RANGE_START/VEHICLE_ID_RANGE_START, world.rs) — un id de
+                        // destructible pourrait collisionner avec un id PNJ par pur hasard, donc
+                        // le kind seul désambiguïse, même motif que kind=3 vs kind=6 (commentaire
+                        // plus haut sur MountElevator).
+                        if let Some(registry) = &mut self.destructible_registry {
+                            registry.apply_damage(ei.target(), ei.param());
                         }
                     }
                 }
@@ -4486,6 +4526,59 @@ mod tests {
         assert_eq!(
             visible_count, 70,
             "en mode Normal (par défaut), aucun plafond ne doit s'appliquer"
+        );
+    }
+
+    #[test]
+    fn with_destructibles_registers_devices_from_the_catalog() {
+        use crate::destructible_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[destructible]]
+            persistent_id = "1001"
+            name = "lampadaire"
+            kind = "device"
+            durability = 10
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let server = Server::new(50.0).with_destructibles(catalog);
+        let registry = server.destructible_registry_for_test().unwrap();
+        assert_eq!(registry.records[&1001].durability, 10);
+        assert!(!registry.records[&1001].destroyed);
+    }
+
+    #[test]
+    fn a_kind_8_report_targeting_a_known_destructible_applies_damage() {
+        use crate::destructible_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[destructible]]
+            persistent_id = "1001"
+            name = "lampadaire"
+            kind = "device"
+            durability = 10
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new(50.0).with_destructibles(catalog);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            // kind=8=DamageDestructible (pas kind=5=Attaque PNJ, cf. décision Step 3 du brief :
+            // persistent_id destructible et ids PNJ/joueur ne partagent aucune plage réservée, le
+            // kind seul désambiguïse).
+            data: encode_entity_interaction(1001, 8, 10),
+        });
+        server.tick(&mut t);
+
+        let registry = server.destructible_registry_for_test().unwrap();
+        assert!(
+            registry.records[&1001].destroyed,
+            "10 points de dégâts sur 10 de durability doivent détruire le destructible"
         );
     }
 }
