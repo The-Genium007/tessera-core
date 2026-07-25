@@ -325,12 +325,14 @@ impl World {
     /// Round 2 du fix perf (2026-07-25, mesures réelles — voir `.superpowers/sdd/fix-round2-brief.md`) :
     /// coût `O(k)` où k = taille de l'index secondaire `framed` (nombre de joueurs RÉELLEMENT en
     /// repère mobile), pas `O(n)` sur `self.players`. Le round 1 avait cru le coût O(n) négligeable
-    /// au motif d'un seul appel par viewer par tick — FAUX sur les deux points : appelée 2× par
-    /// viewer par tick (une fois directement dans `snapshot_for_resolved` pour construire
-    /// `framed_ids`, une fois implicitement via son propre parcours), et à n=2000 le scan O(n) par
-    /// appel dominait 66% du coût total du snapshot (422ms/641.6ms mesurés), pire que le coût de la
-    /// grille elle-même. La dominance du coût est bien la grille (walk de grille dans
-    /// `snapshot_for_resolved`) maintenant que ce scan est O(k).
+    /// au motif d'un seul appel par viewer par tick — FAUX sur les deux points : cette fonction est
+    /// appelée une fois PAR appel à `snapshot_for_resolved` (ligne ci-dessous), et
+    /// `encode_snapshot_for` (`server_loop.rs`) appelle `snapshot_for_resolved` DEUX FOIS par
+    /// viewer par tick (une fois pour construire `candidates`, une fois pour construire `states`
+    /// après plafonnement) — d'où le 2× réel. À n=2000, le scan O(n) par appel dominait 66% du coût
+    /// total du snapshot (422ms/641.6ms mesurés), pire que le coût de la grille elle-même. La
+    /// dominance du coût est bien la grille (walk de grille dans `snapshot_for_resolved`)
+    /// maintenant que ce scan est O(k).
     fn framed_player_ids(&self) -> Vec<ClientId> {
         self.framed.iter().copied().collect()
     }
