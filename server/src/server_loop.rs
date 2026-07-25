@@ -4615,11 +4615,12 @@ mod tests {
         // `tick()` recalcule `degradation_tier` à CHAQUE appel à partir du temps RÉEL écoulé (cf.
         // `Server::tick`, fenêtre glissante p99) — `force_degradation_tier_for_test` seul ne
         // survit donc pas aux ticks suivants si ceux-ci sont mesurés rapides (Task 3, 2026-07-25 :
-        // `snapshot_for_resolved` scanne linéairement `self.players` au lieu du quadrillage de
-        // `snapshot_for`, qui à `radius=1000.0`/`CELL_SIZE=32.0` balaie ~4489 cellules par appel —
-        // les ticks sont passés de ~190ms à ~22ms, sous le seuil de sortie de 30ms, et le palier
-        // forcé retombait à `Normal` dès le premier tick). Fenêtre pré-remplie de durées lentes
-        // pour ancrer le palier `Degraded` indépendamment du temps réel mesuré, même patron que
+        // `snapshot_for_resolved` utilise désormais le quadrillage spatial (comme `snapshot_for`)
+        // plus l'index secondaire `framed` pour la population en repère mobile — plus de scan
+        // linéaire de `self.players`, cf. `.superpowers/sdd/fix-round2-brief.md`. Les ticks sont
+        // ainsi devenus rapides, sous le seuil de sortie de 30ms, et le palier forcé retombait à
+        // `Normal` dès le premier tick). Fenêtre pré-remplie de durées lentes pour ancrer le
+        // palier `Degraded` indépendamment du temps réel mesuré, même patron que
         // `degradation_tier_responds_to_an_injected_slow_tick_window` (`inject_tick_durations_for_test`).
         server.inject_tick_durations_for_test(vec![45_000; 200]);
 

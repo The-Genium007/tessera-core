@@ -4,7 +4,7 @@
 //! grille (qui peut toujours être reconstruite depuis `players` si besoin).
 
 use crate::transport::ClientId;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pose {
@@ -79,6 +79,16 @@ pub struct World {
     /// (Step 5 : un test dédié vérifie explicitement cette invariante en comparant à un scan
     /// linéaire de secours).
     grid: HashMap<CellCoord, Vec<ClientId>>,
+    /// Index secondaire : ensemble des ids de joueurs actuellement en repère mobile (`pose.frame
+    /// != WORLD_FRAME`, ex. passager d'ascenseur). Même patron et même discipline que `grid` :
+    /// maintenu en synchronisation à `add_player`/`remove_player`/`set_pose` (les 3 seuls points
+    /// qui changent l'appartenance d'un joueur à `framed`). Ne JAMAIS lire ceci comme source de
+    /// vérité — un bug de synchronisation ici ne doit affecter que la PERFORMANCE, jamais la
+    /// correction (`framed_player_ids` reste le seul point de lecture, et ses tests vérifient
+    /// l'invariante contre `set_pose`). Round 2 du fix perf (2026-07-25) : remplace un scan O(n)
+    /// de `players` par une lecture O(k) de cet ensemble (k = nombre de joueurs réellement en
+    /// repère mobile, typiquement quelques unités) — voir `.superpowers/sdd/fix-round2-brief.md`.
+    framed: HashSet<ClientId>,
     tick: u64,
 }
 
@@ -94,6 +104,8 @@ impl World {
         self.players.insert(id, Pose::default());
         let cell = cell_of(0.0, 0.0);
         self.grid.entry(cell).or_default().push(id);
+        // Pose::default() a frame == WORLD_FRAME : un nouveau joueur ne démarre jamais en repère
+        // mobile, donc PAS ajouté à `framed` ici (cohérent avec le comportement actuel).
     }
 
     pub fn remove_player(&mut self, id: ClientId) {
@@ -105,6 +117,7 @@ impl World {
                     self.grid.remove(&cell);
                 }
             }
+            self.framed.remove(&id);
         }
     }
 
@@ -112,6 +125,7 @@ impl World {
         if let Some(p) = self.players.get_mut(&id) {
             let old_cell = cell_of(p.x, p.y);
             let new_cell = cell_of(pose.x, pose.y);
+            let new_frame = pose.frame;
             *p = pose;
             if old_cell != new_cell {
                 if let Some(bucket) = self.grid.get_mut(&old_cell) {
@@ -121,6 +135,14 @@ impl World {
                     }
                 }
                 self.grid.entry(new_cell).or_default().push(id);
+            }
+            // Reflète l'état COURANT de la nouvelle pose dans `framed` — idempotent dans les deux
+            // cas (insert si déjà présent = no-op, remove si absent = no-op), donc pas besoin de
+            // comparer à l'ancienne pose pour détecter un "changement".
+            if new_frame != crate::frame::WORLD_FRAME {
+                self.framed.insert(id);
+            } else {
+                self.framed.remove(&id);
             }
         }
     }
@@ -298,18 +320,19 @@ impl World {
     /// Ids des joueurs actuellement dans un repère mobile (`pose.frame != WORLD_FRAME`) — petite
     /// population (passagers d'ascenseur aujourd'hui), scannée séparément par
     /// `snapshot_for_resolved` car leur position stockée (offset local) n'est pas fiable dans la
-    /// grille spatiale indexée sur des coordonnées monde. `O(n)` sur `self.players`, mais n=nombre
-    /// total de joueurs connectés n'est PAS le facteur limitant ici : c'est appelé une fois par
-    /// `snapshot_for_resolved` (une fois par viewer par tick), pas par paire — le coût réel dominant
-    /// reste le walk de grille au-dessus. Un futur raffinement pourrait maintenir cet ensemble de
-    /// façon incrémentale (comme `grid`) si ce scan devenait mesurable ; pas fait ici car k (nombre
-    /// de joueurs montés) reste très petit à toute échelle réaliste (ADR 0013).
+    /// grille spatiale indexée sur des coordonnées monde.
+    ///
+    /// Round 2 du fix perf (2026-07-25, mesures réelles — voir `.superpowers/sdd/fix-round2-brief.md`) :
+    /// coût `O(k)` où k = taille de l'index secondaire `framed` (nombre de joueurs RÉELLEMENT en
+    /// repère mobile), pas `O(n)` sur `self.players`. Le round 1 avait cru le coût O(n) négligeable
+    /// au motif d'un seul appel par viewer par tick — FAUX sur les deux points : appelée 2× par
+    /// viewer par tick (une fois directement dans `snapshot_for_resolved` pour construire
+    /// `framed_ids`, une fois implicitement via son propre parcours), et à n=2000 le scan O(n) par
+    /// appel dominait 66% du coût total du snapshot (422ms/641.6ms mesurés), pire que le coût de la
+    /// grille elle-même. La dominance du coût est bien la grille (walk de grille dans
+    /// `snapshot_for_resolved`) maintenant que ce scan est O(k).
     fn framed_player_ids(&self) -> Vec<ClientId> {
-        self.players
-            .iter()
-            .filter(|(_, pose)| pose.frame != crate::frame::WORLD_FRAME)
-            .map(|(&id, _)| id)
-            .collect()
+        self.framed.iter().copied().collect()
     }
 
     pub fn player_ids(&self) -> Vec<ClientId> {
@@ -787,6 +810,129 @@ mod tests {
              local) dans une cellule de grille éloignée"
         );
         assert_eq!(snap[0].0, 2);
+    }
+
+    #[test]
+    fn framed_player_ids_reflects_the_current_frame_membership_via_set_pose() {
+        // Test direct sur l'index secondaire `framed` (round 2, brief fix-round2-brief.md) : un
+        // joueur qui monte en cabine (frame != WORLD_FRAME) puis en redescend (frame ==
+        // WORLD_FRAME) doit apparaître puis disparaître de `framed_player_ids()`, sans dépendre
+        // d'un scan — c'est la lecture de `self.framed`, tenu à jour à `set_pose` comme `grid`.
+        let mut w = World::new();
+        w.add_player(1);
+        w.add_player(2);
+
+        assert!(
+            w.framed_player_ids().is_empty(),
+            "aucun joueur n'est en repère mobile juste après add_player (WORLD_FRAME par défaut)"
+        );
+
+        w.set_pose(
+            2,
+            Pose {
+                frame: 7,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            w.framed_player_ids(),
+            vec![2],
+            "le joueur 2 doit apparaître dans framed_player_ids après un set_pose en repère mobile"
+        );
+
+        // Un second joueur monte à son tour.
+        w.set_pose(
+            1,
+            Pose {
+                frame: 3,
+                ..Default::default()
+            },
+        );
+        let mut framed = w.framed_player_ids();
+        framed.sort();
+        assert_eq!(framed, vec![1, 2]);
+
+        // Le joueur 2 redescend (repasse en WORLD_FRAME).
+        w.set_pose(
+            2,
+            Pose {
+                frame: crate::frame::WORLD_FRAME,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            w.framed_player_ids(),
+            vec![1],
+            "le joueur 2 doit disparaître de framed_player_ids une fois revenu en WORLD_FRAME"
+        );
+    }
+
+    #[test]
+    fn framed_player_ids_forgets_a_removed_player() {
+        // `remove_player` doit purger `framed` au même titre que `grid` — sinon un id retiré du
+        // monde continuerait d'apparaître dans framed_player_ids (fuite d'index secondaire).
+        let mut w = World::new();
+        w.add_player(1);
+        w.set_pose(
+            1,
+            Pose {
+                frame: 5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(w.framed_player_ids(), vec![1]);
+        w.remove_player(1);
+        assert!(
+            w.framed_player_ids().is_empty(),
+            "un joueur retiré ne doit plus apparaître dans framed_player_ids"
+        );
+    }
+
+    #[test]
+    fn framed_player_ids_is_not_a_scan_over_the_world_frame_population() {
+        // Preuve structurelle (pas un chrono, cf. brief §Tests point 2) : avec 500 joueurs en
+        // WORLD_FRAME et seulement 3 en repère mobile, framed_player_ids() ne doit renvoyer QUE
+        // les 3 ids réellement framés — la garantie de coût O(k) vient de la structure
+        // (HashSet `framed` tenu à jour à set_pose/add_player/remove_player), pas d'un filtrage
+        // à la volée sur les 500 : si l'implémentation redevenait un scan sur `self.players`, ce
+        // test resterait vert (c'est un test de correction) mais la mesure ci-dessous (seuil
+        // large, non serré en CI) donne un signal de non-régression perf en complément.
+        let mut w = World::new();
+        for id in 0..500u64 {
+            w.add_player(id);
+        }
+        // 3 joueurs montent en repère mobile.
+        for id in [10u64, 200, 499] {
+            w.set_pose(
+                id,
+                Pose {
+                    frame: 42,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut framed = w.framed_player_ids();
+        framed.sort();
+        assert_eq!(
+            framed,
+            vec![10, 200, 499],
+            "seuls les joueurs réellement en repère mobile doivent apparaître, quelle que soit \
+             la taille de la population WORLD_FRAME"
+        );
+
+        // Signal de non-régression perf grossier, seuil très large (cf. brief : ne pas dépendre
+        // d'un chrono serré en CI) — sert d'alarme si un futur changement réintroduisait un scan
+        // O(n) ici.
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            let _ = w.framed_player_ids();
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 50,
+            "1000 appels à framed_player_ids() sur 500 joueurs (dont 3 framés) doivent rester \
+             largement sous la milliseconde chacun en moyenne (O(k), k=3) ; mesuré {elapsed:?}"
+        );
     }
 
     #[test]
