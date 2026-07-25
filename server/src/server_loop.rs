@@ -1408,7 +1408,7 @@ impl Server {
         };
         let mut candidates: Vec<(ClientId, f32, u8)> = self
             .world
-            .snapshot_for(viewer, self.aoi_radius)
+            .snapshot_for_resolved(viewer, self.aoi_radius, &self.frame_registry)
             .into_iter()
             .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id))
             .map(|(id, pose)| (id, distance_to_viewer(pose.x, pose.y), 0u8))
@@ -1451,7 +1451,7 @@ impl Server {
 
         let states: Vec<_> = self
             .world
-            .snapshot_for(viewer, self.aoi_radius)
+            .snapshot_for_resolved(viewer, self.aoi_radius, &self.frame_registry)
             .into_iter()
             .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id) && retained.contains(id))
             .map(|(id, pose)| {
@@ -1471,11 +1471,13 @@ impl Server {
                         flags: pose.flags,
                         sustained: pose.sustained,
                         space_id: 0, // monde ouvert — l'instancing est un chantier palier 3
-                        // ADR 0013 : frame transporté tel que stocké dans la Pose (aujourd'hui
-                        // toujours WORLD_FRAME sur ce chemin : `snapshot_for` n'inclut pas encore
-                        // les passagers en repère mobile — branchement `snapshot_for_resolved` =
-                        // C4.1, chantier 2.7 du round-trip). slot : sièges véhicule, pas encore
-                        // suivis serveur (dépend du protocole véhicule niveau 2).
+                        // ADR 0013 : `snapshot_for_resolved` a déjà résolu cette pose en espace
+                        // MONDE (Task 3, 2026-07-25) — un observateur ne reçoit donc plus jamais
+                        // un frame non-nul pour un tiers, quel que soit le repère réel dans lequel
+                        // ce tiers se trouve. `pose.frame` vaut ici toujours WORLD_FRAME par
+                        // construction (snapshot_for_resolved le garantit, world.rs:227-231).
+                        // slot : sièges véhicule, pas encore suivis serveur (dépend du protocole
+                        // véhicule niveau 2).
                         frame: pose.frame,
                         slot: 0,
                     },
@@ -4016,6 +4018,123 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_shows_a_mounted_passenger_at_their_resolved_world_position() {
+        // Déviation délibérée par rapport au brief `task-3-brief.md` : le brief poussait la
+        // transformée « cabine à z=70 » via `frame_registry_for_test_mut().set_transform` juste
+        // avant un `server.tick()` SANS message client à traiter ce tick-là. Or `Server::tick`
+        // appelle TOUJOURS `sync_elevator_frames` (server_loop.rs, juste après `tick_elevators`),
+        // qui réécrit `frame_registry` depuis `ElevatorState::current_frame_transform` — ici
+        // `None` (l'étage 0 du brief n'a AUCUNE `position_x/y/z` dans son TOML) — donc
+        // `remove_transform` efface la valeur manuelle AVANT que la boucle d'envoi des snapshots
+        // (plus bas dans le même `tick()`) ne s'exécute. Le test tel qu'écrit échoue donc
+        // TOUJOURS à trouver le client 2 dans le snapshot, quel que soit le branchement de
+        // `snapshot_for_resolved` (vérifié en isolant ce point avant d'implémenter le fix : cf.
+        // rapport de tâche). Fix : deux étages avec de VRAIES positions dans le catalogue
+        // (`position_x/y/z`), et la « cabine monte » est un vrai trajet d'ascenseur
+        // (`handle_elevator_call` vers l'étage 1, `travel_time_ms = 0` → arrivée dès le tick
+        // suivant), pour que `sync_elevator_frames` alimente lui-même la bonne transformée au
+        // lieu de la détruire. L'intention et les assertions du brief sont préservées à
+        // l'identique (x/y inchangés, z passe de 30 à 70, frame résolu en WORLD_FRAME).
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+            position_x = 100.0
+            position_y = 200.0
+            position_z = 30.0
+            [[elevator.floors]]
+            index = 1
+            position_x = 100.0
+            position_y = 200.0
+            position_z = 70.0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(1000.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        // Client 1 : observateur au sol, reste en WORLD_FRAME près de l'origine de la cabine.
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: crate::gateway_routing::encode_position_update([100.0, 200.0, 30.0]),
+        });
+        server.tick(&mut t);
+
+        // Client 2 : monte dans la cabine, sa position monde de départ est convertie en offset
+        // local par Task 2.
+        t.inject(TransportEvent::Connected(2));
+        server.tick(&mut t);
+        t.take_sent(2);
+        t.inject(TransportEvent::Message {
+            from: 2,
+            data: crate::gateway_routing::encode_position_update([101.0, 202.0, 30.0]),
+        });
+        server.tick(&mut t);
+        t.inject(TransportEvent::Message {
+            from: 2,
+            data: encode_entity_interaction(100, 6, 0),
+        });
+        server.tick(&mut t);
+
+        // La cabine monte réellement vers l'étage 1 (z=70) — `travel_time_ms = 0` : le trajet
+        // démarre à ce tick (`start_trip_if_idle`) et arrive au suivant (`advance` détecte
+        // `now_tick >= arrival_tick` au tick d'après, cf. `elevator.rs`).
+        server.handle_elevator_call(1, 100, 1);
+        t.take_sent(1);
+        server.tick(&mut t);
+        // Arrivée détectée seulement au tick SUIVANT (`travel_time_ms = 0` → `arrival_tick ==
+        // depart_tick`, cf. `elevator.rs::advance`) — ce premier tick ne fait que démarrer le
+        // trajet, la cabine est encore à l'étage 0 (z=30) le temps de ce tick. On vide le
+        // snapshot intermédiaire pour ne garder que celui du tick d'arrivée.
+        t.take_sent(1);
+        server.tick(&mut t);
+        let sent = t.take_sent(1);
+
+        let mut found = false;
+        for b in &sent {
+            let Ok(env) = flatbuffers::root::<ServerEnvelope>(b) else {
+                continue;
+            };
+            let Some(snap) = env.msg_as_snapshot() else {
+                continue;
+            };
+            let Some(players) = snap.players() else {
+                continue;
+            };
+            for p in players {
+                if p.id() == 2 {
+                    found = true;
+                    // Résolu en espace MONDE : x/y inchangés (yaw=0, offset=[1,2,0]) et z=70
+                    // (hauteur ACTUELLE de la cabine, pas celle du mount) — preuve que
+                    // snapshot_for_resolved (pas snapshot_for brut) est bien utilisée.
+                    let pos = p.position().unwrap();
+                    assert!((crate::quant::dq_pos(pos.x()) - 101.0).abs() < 0.1);
+                    assert!((crate::quant::dq_pos(pos.y()) - 202.0).abs() < 0.1);
+                    assert!((crate::quant::dq_pos(pos.z()) - 70.0).abs() < 0.1);
+                    assert_eq!(
+                        p.frame(),
+                        crate::frame::WORLD_FRAME,
+                        "un observateur reçoit toujours une position déjà résolue en espace monde"
+                    );
+                }
+            }
+        }
+        assert!(
+            found,
+            "le client 2 (passager) doit apparaître dans le snapshot du client 1"
+        );
+    }
+
+    #[test]
     fn mounting_an_unknown_elevator_id_is_silently_ignored() {
         // Aucun elevator_registry configuré (Server::new) — un elevator_id ne correspondant à
         // AUCUN ascenseur connu ne doit jamais monter le joueur dans un repère fictif.
@@ -4285,6 +4404,16 @@ mod tests {
         let director = PopulationDirector::new(HashMap::from([("default".to_string(), 40)]));
         let mut server = Server::new_with_npcs(1000.0, catalog, director);
         server.force_degradation_tier_for_test(crate::degradation::DegradationTier::Degraded);
+        // `tick()` recalcule `degradation_tier` à CHAQUE appel à partir du temps RÉEL écoulé (cf.
+        // `Server::tick`, fenêtre glissante p99) — `force_degradation_tier_for_test` seul ne
+        // survit donc pas aux ticks suivants si ceux-ci sont mesurés rapides (Task 3, 2026-07-25 :
+        // `snapshot_for_resolved` scanne linéairement `self.players` au lieu du quadrillage de
+        // `snapshot_for`, qui à `radius=1000.0`/`CELL_SIZE=32.0` balaie ~4489 cellules par appel —
+        // les ticks sont passés de ~190ms à ~22ms, sous le seuil de sortie de 30ms, et le palier
+        // forcé retombait à `Normal` dès le premier tick). Fenêtre pré-remplie de durées lentes
+        // pour ancrer le palier `Degraded` indépendamment du temps réel mesuré, même patron que
+        // `degradation_tier_responds_to_an_injected_slow_tick_window` (`inject_tick_durations_for_test`).
+        server.inject_tick_durations_for_test(vec![45_000; 200]);
 
         let mut t = InMemoryTransport::new();
         // Joueur observateur + 39 autres joueurs (40 joueurs au total) + jusqu'à 40 PNJ (spawnés
