@@ -546,6 +546,11 @@ impl Server {
         &self.frame_registry
     }
 
+    #[cfg(test)]
+    pub(crate) fn frame_registry_for_test_mut(&mut self) -> &mut crate::frame::FrameRegistry {
+        &mut self.frame_registry
+    }
+
     /// État courant de TOUTES les cabines — à envoyer à un client qui vient d'arriver (connexion,
     /// ou entrée à portée). Sans ça, un joueur qui rejoint en pleine course ne saurait pas qu'une
     /// cabine bouge avant sa prochaine transition (cas D1/D2 de la spec).
@@ -1264,6 +1269,24 @@ impl Server {
                             .is_some_and(|r| r.states.iter().any(|s| s.elevator_id == ei.target()));
                         if known {
                             if let Some(mut pose) = self.world.pose_of(from) {
+                                // Conversion monde→local AU MOMENT du mount (design C4.2, spec
+                                // 2026-07-25 §1.3) : le serveur connaît sa dernière position monde
+                                // ET la transformée courante du repère, donc il calcule l'offset de
+                                // départ lui-même plutôt que de laisser une position monde
+                                // mal-étiquetée traîner jusqu'au prochain PositionUpdate du client.
+                                // Repli explicite si le repère n'a pas encore de transformée connue
+                                // (elevator_registry le connaît mais frame_registry pas encore) :
+                                // on pose quand même le frame (comportement historique) sans
+                                // toucher aux coordonnées plutôt que de fabriquer une position
+                                // fausse — même philosophie que `world_position`/`local_offset`.
+                                if let Some(local) = self
+                                    .frame_registry
+                                    .local_offset(ei.target(), [pose.x, pose.y, pose.z])
+                                {
+                                    pose.x = local[0];
+                                    pose.y = local[1];
+                                    pose.z = local[2];
+                                }
                                 pose.frame = ei.target();
                                 self.world.set_pose(from, pose);
                             }
@@ -1275,6 +1298,20 @@ impl Server {
                         // pas réellement monté (no-op silencieux, même esprit que
                         // `VehicleRecord::unmount` sur un non-passager).
                         if let Some(mut pose) = self.world.pose_of(from) {
+                            // Conversion local→monde symétrique au mount (spec 2026-07-25 §1.3) :
+                            // utilise la transformée COURANTE du repère (la cabine a pu bouger
+                            // pendant le trajet) — sans ça, un offset cabine se retrouverait
+                            // interprété comme position monde à l'inverse du bug du mount.
+                            if pose.frame != crate::frame::WORLD_FRAME {
+                                if let Some(world) = self
+                                    .frame_registry
+                                    .world_position(pose.frame, [pose.x, pose.y, pose.z])
+                                {
+                                    pose.x = world[0];
+                                    pose.y = world[1];
+                                    pose.z = world[2];
+                                }
+                            }
                             pose.frame = crate::frame::WORLD_FRAME;
                             self.world.set_pose(from, pose);
                         }
@@ -3829,6 +3866,153 @@ mod tests {
 
         let pose = server.world.pose_of(1).unwrap();
         assert_eq!(pose.frame, crate::frame::WORLD_FRAME);
+    }
+
+    #[test]
+    fn mounting_a_known_elevator_converts_the_current_world_position_into_a_local_offset() {
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        // Le joueur envoie sa position monde AVANT de monter — c'est cette valeur qui doit être
+        // reconvertie en offset local par le serveur au moment du mount.
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: crate::gateway_routing::encode_position_update([101.0, 202.0, 30.0]),
+        });
+        server.tick(&mut t);
+
+        // Pose la transformée du repère "cabine" AVANT le mount (ordre normal : sync_elevator_frames
+        // tourne chaque tick avant le traitement des messages du tick suivant).
+        server.frame_registry_for_test_mut().set_transform(
+            100,
+            crate::frame::FrameTransform {
+                position: [100.0, 200.0, 30.0],
+                yaw: 0.0,
+            },
+        );
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 6, 0),
+        });
+        server.tick(&mut t);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(pose.frame, 100);
+        assert!(
+            (pose.x - 1.0).abs() < 1e-3,
+            "x attendu ~1.0 (offset local), obtenu {}",
+            pose.x
+        );
+        assert!(
+            (pose.y - 2.0).abs() < 1e-3,
+            "y attendu ~2.0 (offset local), obtenu {}",
+            pose.y
+        );
+        assert!(
+            (pose.z - 0.0).abs() < 1e-3,
+            "z attendu ~0.0 (offset local), obtenu {}",
+            pose.z
+        );
+    }
+
+    #[test]
+    fn unmounting_converts_the_current_local_offset_back_into_a_world_position() {
+        use crate::elevator_catalog::parse_and_validate;
+        let toml = r#"
+            format_version = 1
+            [[elevator]]
+            id = "100"
+            name = "Test"
+            start_floor = 0
+            start_delay_ms = 0
+            travel_time_ms = 0
+            [[elevator.floors]]
+            index = 0
+        "#;
+        let catalog = parse_and_validate(toml).unwrap();
+        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+
+        let mut t = InMemoryTransport::new();
+        t.inject(TransportEvent::Connected(1));
+        server.tick(&mut t);
+        t.take_sent(1);
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: crate::gateway_routing::encode_position_update([101.0, 202.0, 30.0]),
+        });
+        server.tick(&mut t);
+
+        server.frame_registry_for_test_mut().set_transform(
+            100,
+            crate::frame::FrameTransform {
+                position: [100.0, 200.0, 30.0],
+                yaw: 0.0,
+            },
+        );
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 6, 0),
+        });
+        server.tick(&mut t);
+        assert_eq!(
+            server.world.pose_of(1).unwrap().frame,
+            100,
+            "précondition: monté"
+        );
+
+        // La cabine a bougé pendant le trajet — la conversion à l'unmount doit utiliser la
+        // transformée COURANTE, pas celle du mount.
+        server.frame_registry_for_test_mut().set_transform(
+            100,
+            crate::frame::FrameTransform {
+                position: [100.0, 200.0, 70.0],
+                yaw: 0.0,
+            },
+        );
+
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 7, 0),
+        });
+        server.tick(&mut t);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(pose.frame, crate::frame::WORLD_FRAME);
+        assert!(
+            (pose.x - 101.0).abs() < 1e-3,
+            "x attendu ~101.0 (position monde), obtenu {}",
+            pose.x
+        );
+        assert!(
+            (pose.y - 202.0).abs() < 1e-3,
+            "y attendu ~202.0 (position monde), obtenu {}",
+            pose.y
+        );
+        assert!(
+            (pose.z - 70.0).abs() < 1e-3,
+            "z attendu ~70.0 (nouvelle hauteur de cabine), obtenu {}",
+            pose.z
+        );
     }
 
     #[test]
