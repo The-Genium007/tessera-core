@@ -120,8 +120,16 @@ public func Tessera_ApplyWorldDevices(game: GameInstance, vending: ref<Desossage
 // chantier C1. Cette exemption existe pour qu'un playtest lancé d'ici là ne soit pas cassé, et
 // elle disparaîtra avec la reconstruction. Elle est volontairement étroite : une seule classe,
 // aucun changement de comportement pour tout le reste des interactables monde.
-// PIN IN-GAME : compilé (scc, 2026-07-27), effet NON confirmé en jeu — à vérifier sur un
-// bouton d'appel extérieur, désossage actif avec `worldInteractables` coupé.
+// ✅ VÉRIFIÉ EN JEU le 2026-07-27 (Megabuilding H10, Little China — la cabine de référence
+// d'ADR 0012). Protocole suivi, avec son contre-test : désossage déployé et actif, cabine
+// envoyée à l'étage 1 par `lift_call` (qui pilote le PS en direct, donc sans passer par
+// GetActions), puis appui sur le bouton d'appel EXTÉRIEUR depuis le rez-de-chaussée →
+// **la cabine redescend**. Le contre-test au même instant : un distributeur reste **mort**,
+// ce qui prouve que le désossage tournait bel et bien et que le wrap coupait toujours — sans
+// lui, un bouton qui marche aurait aussi bien pu signifier « j'ai neutralisé le désossage
+// entier ». Confirmé au passage : la classe visée en jeu est bien `ElevatorFloorTerminalControllerPS`
+// (relevée par la sonde sur la cible visée), et le module compile dans le vrai jeu
+// (`Compilation complete`, r6/logs/redscript_rCURRENT.log).
 @wrapMethod(ScriptableDeviceComponentPS)
 protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
   if IsDefined(this as ElevatorFloorTerminalControllerPS) {
