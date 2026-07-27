@@ -1,8 +1,12 @@
-# Catalogue des PRESETS d'apparence joueur — modèle preset (décision Lucas 2026-07-25).
+# Catalogue des PRESETS d'apparence joueur — modèle preset (décision Lucas 2026-07-25),
+# CLASSÉ EN 3 CATÉGORIES RP (décision Lucas 2026-07-27).
 #
 # Contexte : le rendu d'un corps-joueur au visage EXACT exige une activation native non résolue
-# (chantier différé, cf. docs/superpowers/specs/2026-07-25-synchro-apparence-compositionnelle-design.md
-# §6.2). En attendant, le multi utilise des PRESETS : chaque joueur choisit un avatar dans cette liste.
+# (cf. docs/superpowers/specs/2026-07-25-synchro-apparence-compositionnelle-design.md §6.2).
+# Chantier B1/B2 **MIS EN PAUSE le 2026-07-27** après une journée de RE qui a éliminé six pistes et
+# abouti à un verrou data-driven (la scène pantin du miroir, cf. research/FINDINGS.md F-PLY-19→27).
+# Le modèle preset devient donc la livraison, pas un pis-aller : chaque joueur choisit un avatar
+# dans cette liste. C'est le repli R1 du registre de risques, assumé.
 #
 # Chaque preset = `base_record` (une entité NPC qui SE REND — prouvé en jeu) + `appearance` (variante
 # ÉPINGLÉE). ⚠️ L'apparence d'un crowd record est ALÉATOIRE à chaque spawn (mesuré 2026-07-25) — d'où
@@ -12,72 +16,117 @@
 # (le fil porte `base_record`=hash TweakDBID + `appearance`=hash CName). Le client spawn `base_record`
 # puis applique `appearance` (au spawn OU `ScheduleAppearanceChange`, tous deux prouvés en jeu).
 #
-# Tous VÉRIFIÉS EN JEU le 2026-07-25 (spawn + rendu confirmé, apparence relue via GetCurrentAppearanceName).
-# Curation initiale (11) : variété genre/style/ethnie. À étendre (chaque record a un POOL d'apparences
-# — rich_wa_rich_01..NN, etc. — donc des dizaines de presets possibles depuis peu de records).
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# LES 3 CATÉGORIES (taxonomie RP Tessera, décision du 2026-07-27)
+#
+#   corpo          — costards, argent, Night City d'en haut.
+#   gosse_des_rues — la ville au ras du bitume : streetwear, débrouille, gangs urbains.
+#   fange          — hors-la-ville : nomades, Aldecaldos, bikers, Badlands.
+#
+# ⚠️ « fange » désigne les HORS-LA-VILLE, pas le bas-fond urbain (tranché explicitement le
+# 2026-07-27 : les deux lectures étaient plausibles et elles classent les nomades à l'opposé).
+#
+# CIBLE : ~10 presets par catégorie (30 au total).
+# ÉTAT : 11 vérifiés — corpo 6/10, fange 4/10, **gosse_des_rues 1/10** (le gros trou).
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# INVARIANT DU FICHIER : tout preset listé ici a été VÉRIFIÉ EN JEU (spawn + rendu confirmé,
+# apparence relue via `GetCurrentAppearanceName`). `verified = false` est toléré pour un candidat
+# en attente de session — mais un preset non vérifié ne doit JAMAIS être proposé à un joueur : le
+# rendu d'un crowd record n'est pas garanti (cf. F-PLY-01, un corps qui ne rend rien du tout).
+#
+# MÉTHODE POUR ÉTENDRE (leçon du preset 7) : le style ne vient PAS du nom du record mais du POOL
+# D'APPARENCES. `Character.AsianMale` donne un look streetwear via `king_of_the_stoop_ma_*`. Il
+# faut donc énumérer les pools (action harness `appearance_pool`, ou extraction des `.app` par
+# WolvenKit), y choisir les variantes, puis vérifier chacune en jeu.
+# La famille `Character.Citizen*` est limitée (Aldecaldos, Biker, Rich — vérifié sur le dump de
+# 5155 records) : elle ne couvrira jamais `gosse_des_rues`. Il faut passer par les records de
+# foule génériques et leurs pools.
 
 [[preset]]
 id = 1
 name = "Femme chic — casual"
+category = "corpo"
+verified = true
 base_record = "Character.CitizenRichFemaleCasual"
 appearance = "citizen__rich_wa_rich_23_casual"
 
 [[preset]]
 id = 2
 name = "Homme chic — casual"
+category = "corpo"
+verified = true
 base_record = "Character.CitizenRichMaleCasual"
 appearance = "citizen__rich_ma_rich_15"
 
 [[preset]]
 id = 3
 name = "Femme corpo"
+category = "corpo"
+verified = true
 base_record = "Character.CitizenRichFemale"
 appearance = "citizen__rich_wa_rich_17"
 
 [[preset]]
 id = 4
 name = "Homme corpo"
+category = "corpo"
+verified = true
 base_record = "Character.CitizenRichMale"
 appearance = "citizen__rich_ma_rich_10"
 
 [[preset]]
 id = 5
 name = "Homme corpo — variante"
+category = "corpo"
+verified = true
 base_record = "Character.CitizenRichMaleDE"
 appearance = "citizen__rich_ma_rich_07"
 
 [[preset]]
 id = 6
 name = "Femme corpo — asiatique"
+category = "corpo"
+verified = true
 base_record = "Character.AsianFemale"
 appearance = "citizen__corporat_wa_corporat_wa_12"
 
 [[preset]]
 id = 7
 name = "Homme streetwear — asiatique"
+category = "gosse_des_rues"
+verified = true
 base_record = "Character.AsianMale"
 appearance = "king_of_the_stoop_ma_king_of_the_stoop_ma_04"
 
 [[preset]]
 id = 8
 name = "Femme nomade"
+category = "fange"
+verified = true
 base_record = "Character.CitizenAldecaldosFemale"
 appearance = "citizen__aldecaldos_wa_nomad_06"
 
 [[preset]]
 id = 9
 name = "Homme nomade"
+category = "fange"
+verified = true
 base_record = "Character.CitizenAldecaldosMale"
 appearance = "citizen__aldecaldos_ma_nomad_05"  # nomad (adulte) — PAS teenager (aléatoire écarté)
 
 [[preset]]
 id = 10
 name = "Femme biker"
+category = "fange"
+verified = true
 base_record = "Character.CitizenBikerFemale"
 appearance = "citizen__biker_wa_biker_01"
 
 [[preset]]
 id = 11
 name = "Homme biker"
+category = "fange"
+verified = true
 base_record = "Character.CitizenBikerMale"
 appearance = "citizen__biker_ma_biker_01"
