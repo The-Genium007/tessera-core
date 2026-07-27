@@ -98,8 +98,35 @@ public func Tessera_ApplyWorldDevices(game: GameInstance, vending: ref<Desossage
 // VendingMachineControllerPS/SecurityTurretControllerPS (dispatch virtuel : leur propre override
 // prend le dessus, ce wrap de base ne s'exécute que pour les classes qui n'en ont pas).
 // PIN IN-GAME : jamais testé — à confirmer (menu de hack absent sur un point d'accès ambiant).
+// EXEMPTION ASCENSEURS (2026-07-27) — corrige le bloquant playtest « les boutons d'appel
+// EXTÉRIEURS des ascenseurs ne répondent plus » (BACKLOG-INGAME §B2).
+//
+// Mécanisme exact, vérifié contre le script décompilé officiel (pas déduit) :
+//   ElevatorFloorTerminalControllerPS extends TerminalControllerPS extends MasterControllerPS
+//     -> ...GetActions termine par `return super.GetActions(outActions, context)`
+//        (elevatorFloorTerminalController.script:225-241)
+//   TerminalControllerPS.GetActions COMMENCE par
+//        `if( !( super.GetActions( outActions, context ) ) ) { return false; }`
+//        (terminalController.script) — il CONSOMME la valeur de retour.
+// Donc notre `return false` ci-dessous ne se contente pas de sauter les actions de base : il
+// court-circuite toute la chaîne terminal (ActionDeviceStatus, ToggleON, SetActionIllegality).
+// Le panneau INTÉRIEUR y échappe parce que `LiftControllerPS.GetActions` est un override
+// complet qui n'appelle jamais `super` — d'où le symptôme trompeur « ça marche de l'intérieur ».
+// (Note : les appelants de haut niveau, eux, IGNORENT le booléen — `GetActions(actions, ctx);`
+// en instruction. C'est bien l'étage TerminalControllerPS qui porte la panne, pas l'UI.)
+//
+// STATUT : contournement assumé, PAS la correction de fond. La décision du 2026-07-21 (« ne pas
+// rustiner, reconstruire le désossage sur la doctrine d'interception ») reste valide — c'est le
+// chantier C1. Cette exemption existe pour qu'un playtest lancé d'ici là ne soit pas cassé, et
+// elle disparaîtra avec la reconstruction. Elle est volontairement étroite : une seule classe,
+// aucun changement de comportement pour tout le reste des interactables monde.
+// PIN IN-GAME : compilé (scc, 2026-07-27), effet NON confirmé en jeu — à vérifier sur un
+// bouton d'appel extérieur, désossage actif avec `worldInteractables` coupé.
 @wrapMethod(ScriptableDeviceComponentPS)
 protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
+  if IsDefined(this as ElevatorFloorTerminalControllerPS) {
+    return wrappedMethod(actions, context);
+  }
   if !DesossageSystem.GetLiveConfig(GetGameInstance()).worldInteractables.active {
     return false;
   }
