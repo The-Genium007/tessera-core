@@ -1,5 +1,5 @@
 # Catalogue des PRESETS d'apparence joueur — modèle preset (décision Lucas 2026-07-25),
-# CLASSÉ EN 3 CATÉGORIES RP (décision Lucas 2026-07-27).
+# CLASSÉ EN 3 CATÉGORIES RP (décision Lucas 2026-07-27) : corpo / gosse_des_rues / nomad.
 #
 # Contexte : le rendu d'un corps-joueur au visage EXACT exige une activation native non résolue
 # (cf. docs/superpowers/specs/2026-07-25-synchro-apparence-compositionnelle-design.md §6.2).
@@ -21,13 +21,14 @@
 #
 #   corpo          — costards, argent, Night City d'en haut.
 #   gosse_des_rues — la ville au ras du bitume : streetwear, débrouille, gangs urbains.
-#   fange          — hors-la-ville : nomades, Aldecaldos, bikers, Badlands.
+#   nomad          — hors-la-ville : nomades, Aldecaldos, bikers, Badlands.
 #
-# ⚠️ « fange » désigne les HORS-LA-VILLE, pas le bas-fond urbain (tranché explicitement le
-# 2026-07-27 : les deux lectures étaient plausibles et elles classent les nomades à l'opposé).
+# ⚠️ La 3ᵉ catégorie s'appelle `nomad` (nommage corrigé le 2026-07-27 — « fange » avait été
+# employé un moment, puis écarté : le terme désignait pour moi le bas-fond urbain, ce qui
+# classait les nomades à l'opposé. `nomad` ne prête pas à confusion).
 #
 # CIBLE : ~10 presets par catégorie (30 au total).
-# ÉTAT : 11 vérifiés — corpo 6/10, fange 4/10, **gosse_des_rues 1/10** (le gros trou).
+# ÉTAT : 11 vérifiés — corpo 6/10, nomad 4/10, **gosse_des_rues 1/10** (le gros trou).
 #
 # ─────────────────────────────────────────────────────────────────────────────────────────────
 # INVARIANT DU FICHIER : tout preset listé ici a été VÉRIFIÉ EN JEU (spawn + rendu confirmé,
@@ -36,12 +37,30 @@
 # rendu d'un crowd record n'est pas garanti (cf. F-PLY-01, un corps qui ne rend rien du tout).
 #
 # MÉTHODE POUR ÉTENDRE (leçon du preset 7) : le style ne vient PAS du nom du record mais du POOL
-# D'APPARENCES. `Character.AsianMale` donne un look streetwear via `king_of_the_stoop_ma_*`. Il
-# faut donc énumérer les pools (action harness `appearance_pool`, ou extraction des `.app` par
-# WolvenKit), y choisir les variantes, puis vérifier chacune en jeu.
+# D'APPARENCES. `Character.AsianMale` donne un look streetwear via `king_of_the_stoop_ma_*`.
+#
+# ✅ POOLS EXTRAITS le 2026-07-27 → `appearance-pools.json` (à côté de ce fichier) :
+#    **2736 apparences** sur 47 archétypes, extraites des `.app` du jeu (WolvenKit) et classées :
+#      corpo          659   (arasaka_corpo, corporat, rich)
+#      gosse_des_rues 1866   (lowlife, junkie, homeless, mallrat, youngster, freak, nightlife,
+#                             tenant, creole, workout, chubby, obese, nonbinary, default…)
+#      nomad           211   (aldecaldos, biker)
+#    Le trou `gosse_des_rues` est donc largement comblé côté matière première.
+#
+# RÈGLE DE NOMMAGE (vérifiée sur 3 presets existants) : le CName complet à mettre dans
+# `appearance` = `<nom du fichier .app>_<nom de l'apparence>`.
+#    `citizen__rich_wa` + `rich_17`          → `citizen__rich_wa_rich_17`        (preset 3)
+#    `citizen__corporat_wa` + `corporat_wa_12` → `citizen__corporat_wa_corporat_wa_12` (preset 6)
+#    `king_of_the_stoop_ma` + `king_of_the_stoop_ma_04` → celui du preset 7
+#
+# ⚠️ CONTRAINTE NON ENCORE LEVÉE : une apparence appartient au `.app` d'une entité donnée. On ne
+# peut donc pas apparier n'importe quel `base_record` avec n'importe quelle apparence — il reste à
+# établir la correspondance **record → fichier `.app`**. Le preset 7 le montre : `Character.AsianMale`
+# est servi par `king_of_the_stoop_ma`, pas par un `citizen__asian_*`. À trancher avant de peupler
+# le catalogue, sinon on écrira des paires qui ne rendront rien.
+#
 # La famille `Character.Citizen*` est limitée (Aldecaldos, Biker, Rich — vérifié sur le dump de
-# 5155 records) : elle ne couvrira jamais `gosse_des_rues`. Il faut passer par les records de
-# foule génériques et leurs pools.
+# 5155 records) : elle ne couvrira jamais `gosse_des_rues` à elle seule.
 
 [[preset]]
 id = 1
@@ -102,7 +121,7 @@ appearance = "king_of_the_stoop_ma_king_of_the_stoop_ma_04"
 [[preset]]
 id = 8
 name = "Femme nomade"
-category = "fange"
+category = "nomad"
 verified = true
 base_record = "Character.CitizenAldecaldosFemale"
 appearance = "citizen__aldecaldos_wa_nomad_06"
@@ -110,7 +129,7 @@ appearance = "citizen__aldecaldos_wa_nomad_06"
 [[preset]]
 id = 9
 name = "Homme nomade"
-category = "fange"
+category = "nomad"
 verified = true
 base_record = "Character.CitizenAldecaldosMale"
 appearance = "citizen__aldecaldos_ma_nomad_05"  # nomad (adulte) — PAS teenager (aléatoire écarté)
@@ -118,7 +137,7 @@ appearance = "citizen__aldecaldos_ma_nomad_05"  # nomad (adulte) — PAS teenage
 [[preset]]
 id = 10
 name = "Femme biker"
-category = "fange"
+category = "nomad"
 verified = true
 base_record = "Character.CitizenBikerFemale"
 appearance = "citizen__biker_wa_biker_01"
@@ -126,7 +145,7 @@ appearance = "citizen__biker_wa_biker_01"
 [[preset]]
 id = 11
 name = "Homme biker"
-category = "fange"
+category = "nomad"
 verified = true
 base_record = "Character.CitizenBikerMale"
 appearance = "citizen__biker_ma_biker_01"
