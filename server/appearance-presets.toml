@@ -39,7 +39,7 @@
 # MÉTHODE POUR ÉTENDRE (leçon du preset 7) : le style ne vient PAS du nom du record mais du POOL
 # D'APPARENCES. `Character.AsianMale` donne un look streetwear via `king_of_the_stoop_ma_*`.
 #
-# ✅ POOLS EXTRAITS le 2026-07-27 → `appearance-pools.json` (à côté de ce fichier) :
+# ✅ POOLS EXTRAITS le 2026-07-27 → `puppet-catalog.json` (à côté de ce fichier) :
 #    **2736 apparences** sur 47 archétypes, extraites des `.app` du jeu (WolvenKit) et classées :
 #      corpo          659   (arasaka_corpo, corporat, rich)
 #      gosse_des_rues 1866   (lowlife, junkie, homeless, mallrat, youngster, freak, nightlife,
@@ -47,11 +47,15 @@
 #      nomad           211   (aldecaldos, biker)
 #    Le trou `gosse_des_rues` est donc largement comblé côté matière première.
 #
-# RÈGLE DE NOMMAGE (vérifiée sur 3 presets existants) : le CName complet à mettre dans
-# `appearance` = `<nom du fichier .app>_<nom de l'apparence>`.
-#    `citizen__rich_wa` + `rich_17`          → `citizen__rich_wa_rich_17`        (preset 3)
-#    `citizen__corporat_wa` + `corporat_wa_12` → `citizen__corporat_wa_corporat_wa_12` (preset 6)
-#    `king_of_the_stoop_ma` + `king_of_the_stoop_ma_04` → celui du preset 7
+# RÈGLE DE NOMMAGE : le CName complet = `<stem du .app>_<nom de l'apparence>`.
+#    `citizen__rich_wa` + `rich_17`            → `citizen__rich_wa_rich_17`            (preset 3) ✓
+#    `citizen__corporat_wa` + `corporat_wa_12` → `citizen__corporat_wa_corporat_wa_12` (preset 6) ✓
+#    corroborée par les dossiers proxy du jeu (`citizen__lowlife_ma_king_of_the_stoop_ma_01`).
+# ⚠️ **UN CONTRE-EXEMPLE NON EXPLIQUÉ** : le preset 7, pourtant vérifié en jeu, porte
+#    `king_of_the_stoop_ma_king_of_the_stoop_ma_04` là où la règle donnerait
+#    `citizen__lowlife_ma_king_of_the_stoop_ma_04`. Tant que ce n'est pas élucidé, **ne pas
+#    composer de nom à la main sans le vérifier en jeu** — un nom faux donne un avatar qui ne rend
+#    rien (F-PLY-01), et l'invariant du fichier serait faux dès la première ligne ajoutée.
 #
 # ⚠️ CONTRAINTE NON ENCORE LEVÉE : une apparence appartient au `.app` d'une entité donnée. On ne
 # peut donc pas apparier n'importe quel `base_record` avec n'importe quelle apparence — il reste à
