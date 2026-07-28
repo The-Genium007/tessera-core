@@ -50,7 +50,7 @@ franchir**, où l'on voit ce qui passe et où l'on peut rejouer l'ordre serveur.
 | --- | --- | --- |
 | Devices monde (1) | que le joueur ne *déclenche* pas l'effet local — pas qu'il ne voie rien | ✅ **ÉTABLI : `QueuePSDeviceEvent`** — voir ci-dessous |
 | Distributeurs (2,3) | idem, plus l'inventaire côté serveur | même entonnoir que (1) : ce sont des devices |
-| Tourelles (4) | que la tourelle n'agisse pas de son propre chef | 🟡 `SecurityTurretControllerPS.OnSetDeviceAttitude` — **scripté**, à sonder |
+| Tourelles (4) | que la tourelle n'agisse pas de son propre chef | ✅ `SensorDevice.SetAsIntrestingTarget` — **scripté**, sonde écrite et compilée |
 | Police (5) | que l'escalade soit décidée par le serveur | ✅ **ÉTABLI : `PreventionSystem.ChangeHeatStage`** — **scripté** |
 | Hostilité (6) | déjà bon | `TryChangingAttitudeToHostile` **est** un entonnoir — à garder |
 
@@ -161,15 +161,42 @@ Trois raisons d'en faire l'entonnoir plutôt que l'actuel retour anticipé sur `
 `private function`, mais `@wrapMethod` sait wrapper du privé (le désossage le fait déjà sur
 `ShouldDisableMappin`, `private final func`).
 
-### Tourelles (4) — `SecurityTurretControllerPS.OnSetDeviceAttitude(evt)`
+### Tourelles (4) — `SensorDevice.SetAsIntrestingTarget(target)`
 
-⚠️ **À sonder, pas encore prouvé.** Le hook actuel (`GetActions` → `false`) porte sur le **menu
-d'interaction du joueur**, pas sur le fait que la tourelle agisse — ce n'est donc même pas la bonne
-chose qui est coupée. Le point de décision est l'attitude du device
-(`protected export override function OnSetDeviceAttitude`, scripté).
+**`OnSetDeviceAttitude` est écarté.** C'était le candidat inscrit ici ; la lecture du script
+décompilé le réfute. Ce n'est pas un entonnoir mais **une entrée parmi d'autres** — celle des
+*surcharges* (quickhack, programme de piratage, forçage de quête). Sur
+`SecurityTurretControllerPS` il ne fait rien d'autre que notifier
+(`securityTurretController.script:643` → `super` → `Notify`).
 
-À vérifier en sonde : les tourelles ambiantes sont-elles hostiles **par défaut** (auquel cas
-l'attitude n'est jamais « posée » et l'entonnoir serait ailleurs, du côté de l'état initial) ?
+L'hostilité d'une tourelle **ambiante** ne passe jamais par là : elle vient du système d'attitude
+(`IsAttitudeFromContextHostile`, `sensorDeviceController.script:828`, qui interroge
+l'`AttitudeAgent`). Hooker `OnSetDeviceAttitude` n'aurait donc coupé que les surcharges du joueur,
+en laissant la tourelle tirer exactement comme avant — **même classe d'erreur que le hook
+`GetActions` actuel**, qui coupe le *menu d'interaction* et pas le *comportement*. Deux fois le
+même piège sur la même famille : le point qui *ressemble* à une décision n'est pas celui qui décide.
+
+Le vrai point de décision est `SensorDevice.SetAsIntrestingTarget(target) -> Bool`
+(`sensorDevice.script:857`) : « cet objet est-il une cible pour moi ? ». Deux branches, qui
+couvrent les deux régimes :
+
+- relié à un système de sécurité **et** attitude non modifiée → `SecuritySystem.ShouldReactToTarget` ;
+- sinon → `GetAttitudeTowards(this, target) == AIA_Hostile`.
+
+C'est bien un entonnoir : **deux appelants seulement**, tous deux dans `SensorDevice` — détection
+d'un nouvel objet (`:1435`) et ré-évaluation des cibles courantes (`ReevaluateTargets`, `:2484`).
+Rien ne devient une cible sans passer là.
+
+**Portée du hook** : posé sur `SensorDevice` (la base), pas sur `SecurityTurret`. L'override de la
+tourelle (`securityTurret.script:296`) est un **passe-plat pur** (`return super.…`), donc tout
+retombe dans la base de toute façon — et on capte en prime les **caméras**, même famille, même
+décision, une seule sonde.
+
+Sonde : `tools/re-probe/overlay/r6/scripts/Tessera/reprobe/SensorTargetProbe.reds`, log-only
+(verdict rendu tel quel, aucun retour anticipé), compilée `scc` sans erreur. Elle ne journalise que
+les appels **visant le joueur local** : `ReevaluateTargets` boucle sur toutes les cibles et peut
+être relancée souvent — une sonde qui fait chuter le framerate ne mesure plus rien, et c'est de
+toute façon la seule décision qu'on voudra arbitrer côté serveur.
 
 ## Bilan du cadrage C1
 
@@ -177,7 +204,7 @@ l'attitude n'est jamais « posée » et l'entonnoir serait ailleurs, du côté d
 | --- | --- | --- | --- |
 | Devices (1,2,3) | `QueuePSDeviceEvent` | **C++ RED4ext** | ✅ hook phase 1 écrit et compilé |
 | Police (5) | `PreventionSystem.ChangeHeatStage` | redscript | ✅ identifié, à sonder |
-| Tourelles (4) | `OnSetDeviceAttitude` | redscript | 🟡 candidat, à sonder |
+| Tourelles (4) | `SensorDevice.SetAsIntrestingTarget` | redscript | ✅ identifié, sonde écrite et compilée |
 | Hostilité (6) | `TryChangingAttitudeToHostile` | redscript | ✅ déjà bon, à garder |
 | (7)(8)(9) | — | — | ✅ conformes à la doctrine |
 
