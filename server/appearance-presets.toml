@@ -39,32 +39,34 @@
 # MÉTHODE POUR ÉTENDRE (leçon du preset 7) : le style ne vient PAS du nom du record mais du POOL
 # D'APPARENCES. `Character.AsianMale` donne un look streetwear via `king_of_the_stoop_ma_*`.
 #
-# ✅ POOLS EXTRAITS le 2026-07-27 → `puppet-catalog.json` (à côté de ce fichier) :
-#    **2736 apparences** sur 47 archétypes, extraites des `.app` du jeu (WolvenKit) et classées :
-#      corpo          659   (arasaka_corpo, corporat, rich)
-#      gosse_des_rues 1866   (lowlife, junkie, homeless, mallrat, youngster, freak, nightlife,
-#                             tenant, creole, workout, chubby, obese, nonbinary, default…)
-#      nomad           211   (aldecaldos, biker)
-#    Le trou `gosse_des_rues` est donc largement comblé côté matière première.
+# ✅ CATALOGUE COMPLET → `puppet-catalog.json` (à côté de ce fichier), reconstruit le 2026-07-27 :
+#    **112 archétypes, 572 records couverts, 2090 apparences RUNTIME**.
+#      corpo           439
+#      gosse_des_rues 1481
+#      nomad           139
+#    Le trou `gosse_des_rues` est comblé très au-delà de la cible.
 #
-# RÈGLE DE NOMMAGE : le CName complet = `<stem du .app>_<nom de l'apparence>`.
-#    `citizen__rich_wa` + `rich_17`            → `citizen__rich_wa_rich_17`            (preset 3) ✓
-#    `citizen__corporat_wa` + `corporat_wa_12` → `citizen__corporat_wa_corporat_wa_12` (preset 6) ✓
-#    corroborée par les dossiers proxy du jeu (`citizen__lowlife_ma_king_of_the_stoop_ma_01`).
-# ⚠️ **UN CONTRE-EXEMPLE NON EXPLIQUÉ** : le preset 7, pourtant vérifié en jeu, porte
-#    `king_of_the_stoop_ma_king_of_the_stoop_ma_04` là où la règle donnerait
-#    `citizen__lowlife_ma_king_of_the_stoop_ma_04`. Tant que ce n'est pas élucidé, **ne pas
-#    composer de nom à la main sans le vérifier en jeu** — un nom faux donne un avatar qui ne rend
-#    rien (F-PLY-01), et l'invariant du fichier serait faux dès la première ligne ajoutée.
+# ⚠️ DEUX ERREURS PAYÉES EN CHEMIN, à ne pas refaire :
+#  1. Un premier catalogue avait été bâti sur les `.app` (2736 entrées) : **aux deux tiers
+#     inutilisable**, car un `.ent` n'expose qu'un SOUS-ENSEMBLE de son `.app`
+#     (`citizen__lowlife_ma` : 14 sur 96).
+#  2. Un second avait été bâti sur les `.ent` du **jeu de base seul** : résolution des records de
+#     référence à **0/11**. Phantom Liberty (**ep1**) REMPLACE les entités de foule, et c'est vers
+#     elles que pointent les records. Avec ep1 fusionné : **11/11**.
 #
-# ⚠️ CONTRAINTE NON ENCORE LEVÉE : une apparence appartient au `.app` d'une entité donnée. On ne
-# peut donc pas apparier n'importe quel `base_record` avec n'importe quelle apparence — il reste à
-# établir la correspondance **record → fichier `.app`**. Le preset 7 le montre : `Character.AsianMale`
-# est servi par `king_of_the_stoop_ma`, pas par un `citizen__asian_*`. À trancher avant de peupler
-# le catalogue, sinon on écrira des paires qui ne rendront rien.
+# RÈGLE DE NOMMAGE — Q3 RÉSOLUE le 2026-07-27 (ouverte depuis le 2026-07-23) : le nom d'apparence
+# utilisable **n'est PAS dérivable** du `.app`. Il est **déclaré dans le `.ent`**, dont chaque
+# entrée porte deux noms distincts : `name` (ce que le runtime expose et ce qu'on passe au spawn)
+# et `appearanceName` (l'entrée ciblée dans le `.app`). **C'est une table de correspondance, pas
+# une formule** — d'où l'échec de toutes les règles de composition tentées, et l'explication du
+# preset 7 (`Character.AsianMale` → `citizen__ep1_lowlife_ma`, d'où `king_of_the_stoop_ma_*`).
 #
-# La famille `Character.Citizen*` est limitée (Aldecaldos, Biker, Rich — vérifié sur le dump de
-# 5155 records) : elle ne couvrira jamais `gosse_des_rues` à elle seule.
+# ✅ CORRESPONDANCE `Character.<Record>` → `.ent` RÉSOLUE : sonde harness `record_ent` (lit
+# `entityTemplatePath` via `v.hash`) + table FNV1a64 du chemin avec antislashes
+# (`entity-path-hashes.json`). Les 11 couples vérifiés en jeu sont retrouvés **11/11**.
+#
+# ⚙️ CÔTÉ SERVEUR : `src/puppet_catalog.rs` sert le catalogue par catégorie et **valide** tout
+# couple reçu d'un client (10 tests). Un client ne peut pas recomposer une paire arbitraire.
 
 [[preset]]
 id = 1
