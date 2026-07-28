@@ -121,3 +121,20 @@ seulement ensuite réinjecter l'autorité serveur.
 
 > Une sonde redscript avait été écrite pour ce point puis **supprimée** : elle ne compile pas, et
 > un `.reds` fautif fait tomber tout `r6/scripts`. Le constat qu'elle a produit est ci-dessus.
+
+## ✅ Volet devices — phase 1 IMPLÉMENTÉE (2026-07-27)
+
+Hook natif écrit et **compilé** dans `tools/re-probe` : `TesseraRE_FunnelWatch(on)` arme
+l'observation de `QueuePSDeviceEvent`. **Log-only, désarmé par défaut, ne bloque jamais.**
+
+**Sans aucune adresse en dur** : le hash AddressLib (`3797228879`, RVA `0x561768`) vient de la
+table livrée par le jeu — voir `tools/reverse-engineering/RVA-VERS-HASH-ADDRESSLIB.md`, méthode
+découverte le même jour et qui rend hookable n'importe quelle fonction repérée dans Ghidra.
+
+Chiffres qui ont tranché entre redscript et C++ : **109** appels passent par `ExecutePSAction`
+(scriptée, wrappable) mais **41** appellent le natif en direct — ~73 % de couverture. La doctrine
+interdit une voie non gardée, donc redscript était disqualifié quoi qu'il arrive.
+
+**Reste à faire** (in-game, une session) : armer, mesurer le **débit** et les **classes d'action**
+qui passent, vérifier que toutes les interactions de device y apparaissent. Ce n'est qu'après
+qu'on décide de la forme du blocage — c'est le raccourci inverse qui a produit le désossage actuel.
