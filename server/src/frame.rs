@@ -69,6 +69,35 @@ impl FrameRegistry {
             transform.position[2] + local_offset[2],
         ])
     }
+
+    /// Inverse exact de `world_position` : convertit une position MONDE en offset local dans le
+    /// repère `frame`. `Some(world)` tel quel si `frame == WORLD_FRAME`, `None` si le repère est
+    /// inconnu — même règle de repli, pour la même raison (mieux vaut un appelant qui sait qu'il ne
+    /// peut pas convertir qu'un offset silencieusement faux).
+    ///
+    /// C'est la moitié manquante du modèle de repère. Sans elle, **monter** dans une cabine posait
+    /// `Pose.frame` en laissant `x/y/z` en coordonnées monde : l'offset local valait alors la
+    /// position monde du joueur, soit des centaines d'unités hors de la cabine. Et **descendre**
+    /// souffrait du défaut symétrique (un offset local relu comme une position monde, donc un
+    /// joueur téléporté près de l'origine). Les deux bascules doivent convertir, pas seulement
+    /// changer d'étiquette.
+    pub fn local_offset(&self, frame: FrameId, world_position: [f32; 3]) -> Option<[f32; 3]> {
+        if frame == WORLD_FRAME {
+            return Some(world_position);
+        }
+        let transform = self.transform_of(frame)?;
+        let dx = world_position[0] - transform.position[0];
+        let dy = world_position[1] - transform.position[1];
+        // Rotation inverse : -yaw. `sin(-a) = -sin(a)`, `cos(-a) = cos(a)` — on réutilise donc le
+        // même couple sin/cos que l'aller, avec le signe du sinus inversé, plutôt que de rappeler
+        // `sin_cos` sur `-yaw` (bit-à-bit identique, et l'intention se lit).
+        let (sin, cos) = transform.yaw.sin_cos();
+        Some([
+            dx * cos + dy * sin,
+            -dx * sin + dy * cos,
+            world_position[2] - transform.position[2],
+        ])
+    }
 }
 
 #[cfg(test)]
@@ -198,5 +227,81 @@ mod tests {
     fn transform_of_an_unknown_frame_is_none() {
         let reg = FrameRegistry::new();
         assert_eq!(reg.transform_of(999), None);
+    }
+
+    #[test]
+    fn local_offset_of_the_world_frame_is_the_world_position_itself() {
+        let reg = FrameRegistry::new();
+        assert_eq!(
+            reg.local_offset(WORLD_FRAME, [12.0, -3.0, 4.5]),
+            Some([12.0, -3.0, 4.5])
+        );
+    }
+
+    #[test]
+    fn local_offset_of_an_unknown_frame_is_none() {
+        let reg = FrameRegistry::new();
+        assert_eq!(reg.local_offset(42, [1.0, 2.0, 3.0]), None);
+    }
+
+    #[test]
+    fn local_offset_subtracts_the_frame_position_when_there_is_no_rotation() {
+        let mut reg = FrameRegistry::new();
+        reg.set_transform(
+            7,
+            FrameTransform {
+                position: [100.0, 200.0, 30.0],
+                yaw: 0.0,
+            },
+        );
+        let offset = reg.local_offset(7, [101.0, 198.0, 31.5]).unwrap();
+        assert_eq!(offset, [1.0, -2.0, 1.5]);
+    }
+
+    /// La propriete qui compte vraiment : les deux sens sont exactement inverses. Un joueur qui
+    /// monte puis descend sans bouger doit retrouver sa position monde d'origine — sinon chaque
+    /// montee/descente le deplacerait un peu, et l'anti-triche verrait une teleportation.
+    #[test]
+    fn local_offset_and_world_position_are_exact_inverses_even_with_rotation() {
+        let mut reg = FrameRegistry::new();
+        reg.set_transform(
+            9,
+            FrameTransform {
+                position: [-988.7, 2834.1, 30.05],
+                yaw: 0.9,
+            },
+        );
+        let world = [-985.2, 2836.4, 31.7];
+        let offset = reg.local_offset(9, world).unwrap();
+        let back = reg.world_position(9, offset).unwrap();
+        for i in 0..3 {
+            assert!(
+                (back[i] - world[i]).abs() < 1e-3,
+                "axe {i} : aller-retour {} -> {} (offset {})",
+                world[i],
+                back[i],
+                offset[i]
+            );
+        }
+    }
+
+    /// Et l'aller-retour dans l'autre ordre : un offset local pose dans la cabine doit survivre a
+    /// une resolution monde puis a une reconversion.
+    #[test]
+    fn world_position_then_local_offset_returns_the_original_offset() {
+        let mut reg = FrameRegistry::new();
+        reg.set_transform(
+            9,
+            FrameTransform {
+                position: [10.0, -20.0, 3.0],
+                yaw: -2.1,
+            },
+        );
+        let offset = [0.4, -1.2, 0.0];
+        let world = reg.world_position(9, offset).unwrap();
+        let back = reg.local_offset(9, world).unwrap();
+        for i in 0..3 {
+            assert!((back[i] - offset[i]).abs() < 1e-4, "axe {i}");
+        }
     }
 }

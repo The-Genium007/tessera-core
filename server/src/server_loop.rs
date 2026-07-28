@@ -1264,8 +1264,28 @@ impl Server {
                             .is_some_and(|r| r.states.iter().any(|s| s.elevator_id == ei.target()));
                         if known {
                             if let Some(mut pose) = self.world.pose_of(from) {
-                                pose.frame = ei.target();
-                                self.world.set_pose(from, pose);
+                                // CONVERSION, pas simple étiquetage (C4-2). `pose.x/y/z` est une
+                                // position MONDE tant que le joueur n'est pas monté ; la reposer
+                                // telle quelle sous `frame = elevator_id` en ferait un offset local
+                                // de plusieurs centaines d'unités — le passager serait rendu très
+                                // loin de la cabine.
+                                //
+                                // `None` = le repère n'a pas de transformée connue (étage sans
+                                // position au catalogue, cf. `current_frame_transform`). On REFUSE
+                                // alors le montage au lieu d'inventer un offset : même règle que la
+                                // garde `known` juste au-dessus, et même raison — un passager non
+                                // attaché est un défaut visible, un passager attaché au mauvais
+                                // endroit est un bug silencieux.
+                                if let Some(offset) = self
+                                    .frame_registry
+                                    .local_offset(ei.target(), [pose.x, pose.y, pose.z])
+                                {
+                                    pose.x = offset[0];
+                                    pose.y = offset[1];
+                                    pose.z = offset[2];
+                                    pose.frame = ei.target();
+                                    self.world.set_pose(from, pose);
+                                }
                             }
                         }
                     } else if ei.kind() == 7 {
@@ -1275,6 +1295,23 @@ impl Server {
                         // pas réellement monté (no-op silencieux, même esprit que
                         // `VehicleRecord::unmount` sur un non-passager).
                         if let Some(mut pose) = self.world.pose_of(from) {
+                            // Défaut SYMÉTRIQUE de celui du montage, et tout aussi réel : `x/y/z`
+                            // est un offset local tant qu'on est dans la cabine. Basculer l'étiquette
+                            // sans convertir ferait lire un offset (quelques dixièmes d'unité) comme
+                            // une position monde — le joueur serait téléporté au ras de l'origine.
+                            if let Some(world) = self
+                                .frame_registry
+                                .world_position(pose.frame, [pose.x, pose.y, pose.z])
+                            {
+                                pose.x = world[0];
+                                pose.y = world[1];
+                                pose.z = world[2];
+                            }
+                            // Le passage au repère monde est INCONDITIONNEL, même si la résolution
+                            // a échoué (cabine disparue du registre). Dégradation assumée : la
+                            // position rendue est alors l'offset brut, mais elle l'était déjà pour
+                            // tout le monde tant que le repère était irrésolvable — alors que
+                            // laisser un joueur attaché à un repère mort, lui, n'a aucune issue.
                             pose.frame = crate::frame::WORLD_FRAME;
                             self.world.set_pose(from, pose);
                         }
@@ -1328,10 +1365,23 @@ impl Server {
     }
 
     fn encode_snapshot_for(&self, viewer: ClientId, b: &mut FlatBufferBuilder) -> Vec<u8> {
+        // Le point de référence des distances est la position MONDE du spectateur (ADR 0013).
+        // Quand il est porté (cabine d'ascenseur), `pose.x/y/z` est un offset local : le prendre
+        // brut comparerait un offset de quelques dixièmes d'unité à des positions monde, et tout le
+        // voisinage lui semblerait à des centaines d'unités. Repli sur la pose brute si le repère
+        // est irrésolvable — c'est déjà le cas dégradé, et un spectateur sans distances du tout
+        // serait pire qu'un spectateur aux distances approximatives.
         let viewer_pose = self.world.pose_of(viewer).unwrap_or_default();
+        let viewer_world = self
+            .frame_registry
+            .world_position(
+                viewer_pose.frame,
+                [viewer_pose.x, viewer_pose.y, viewer_pose.z],
+            )
+            .unwrap_or([viewer_pose.x, viewer_pose.y, viewer_pose.z]);
         let distance_to_viewer = |x: f32, y: f32| -> f32 {
-            let dx = x - viewer_pose.x;
-            let dy = y - viewer_pose.y;
+            let dx = x - viewer_world[0];
+            let dy = y - viewer_world[1];
             (dx * dx + dy * dy).sqrt()
         };
 
@@ -1369,9 +1419,21 @@ impl Server {
                     .as_ref()
                     .is_some_and(|r| r.records.contains_key(&id))
         };
+        // `snapshot_for_resolved` et non `snapshot_for` (C4-1) : les poses rendues sont resolues en
+        // espace MONDE et leur `frame` remis a WORLD_FRAME, donc les distances calculees ici et les
+        // positions encodees plus bas parlent toutes du meme espace. Sans ce branchement, un passager
+        // d'ascenseur serait encode avec son offset LOCAL tel quel — soit, depuis la conversion au
+        // montage (C4-2), quelques dixiemes d'unite : tous les passagers apparaitraient au ras de
+        // l'origine. Les deux moities du modele de repere ne valent que branchees ENSEMBLE.
+        //
+        // Cout : ce balayage est en O(joueurs) la ou `snapshot_for` exploitait la grille. La classe
+        // de complexite de cette fonction ne change pas pour autant — elle parcourt DEJA l'integralite
+        // des registres PNJ et vehicules sans filtre spatial (les deux `extend` ci-dessous), et les
+        // joueurs y sont de loin les moins nombreux. Rendre le chemin resolu sensible a la grille est
+        // un raffinement separe, a faire le jour ou les PNJ passeront eux aussi par un filtre spatial.
         let mut candidates: Vec<(ClientId, f32, u8)> = self
             .world
-            .snapshot_for(viewer, self.aoi_radius)
+            .snapshot_for_resolved(viewer, self.aoi_radius, &self.frame_registry)
             .into_iter()
             .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id))
             .map(|(id, pose)| (id, distance_to_viewer(pose.x, pose.y), 0u8))
@@ -1414,7 +1476,7 @@ impl Server {
 
         let states: Vec<_> = self
             .world
-            .snapshot_for(viewer, self.aoi_radius)
+            .snapshot_for_resolved(viewer, self.aoi_radius, &self.frame_registry)
             .into_iter()
             .filter(|(id, _)| !is_crowd_npc_or_vehicle(*id) && retained.contains(id))
             .map(|(id, pose)| {
@@ -3752,13 +3814,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mounting_a_known_elevator_sets_the_player_pose_frame() {
-        // Task 5 : kind=6=MountElevator pose Pose.frame = elevator_id, mais UNIQUEMENT si
-        // l'elevator_id est connu du registre (même garde que handle_elevator_call — le serveur ne
-        // fabrique jamais de repère sur la foi d'un message client).
-        use crate::elevator_catalog::parse_and_validate;
-        let toml = r#"
+    /// Catalogue d'essai a un etage, avec ou sans position connue. La presence d'une position
+    /// decide de tout ici : sans elle, `current_frame_transform` rend `None`, donc le registre de
+    /// reperes n'a aucune transformee, donc le montage n'a aucun moyen de calculer un offset.
+    fn one_floor_catalog(with_position: bool) -> crate::elevator_catalog::ElevatorCatalog {
+        let floor = if with_position {
+            "index = 0
+            position_x = 10.0
+            position_y = 20.0
+            position_z = 30.0"
+        } else {
+            "index = 0"
+        };
+        let toml = format!(
+            r#"
             format_version = 1
             [[elevator]]
             id = "100"
@@ -3767,15 +3836,32 @@ mod tests {
             start_delay_ms = 0
             travel_time_ms = 0
             [[elevator.floors]]
-            index = 0
-        "#;
-        let catalog = parse_and_validate(toml).unwrap();
-        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+            {floor}
+        "#
+        );
+        crate::elevator_catalog::parse_and_validate(&toml).unwrap()
+    }
 
+    fn connected_server_with_elevator(with_position: bool) -> (Server, InMemoryTransport) {
+        let mut server = Server::new_with_elevators(50.0, one_floor_catalog(with_position), 50);
         let mut t = InMemoryTransport::new();
         t.inject(TransportEvent::Connected(1));
         server.tick(&mut t);
         t.take_sent(1);
+        (server, t)
+    }
+
+    #[test]
+    fn mounting_a_known_elevator_converts_the_world_position_into_a_local_offset() {
+        // kind=6=MountElevator pose Pose.frame = elevator_id, mais UNIQUEMENT si l'elevator_id est
+        // connu du registre (meme garde que handle_elevator_call — le serveur ne fabrique jamais de
+        // repere sur la foi d'un message client).
+        //
+        // C4-2 : le montage CONVERTIT. Poser l'etiquette en laissant x/y/z en coordonnees monde
+        // ferait un offset local de plusieurs centaines d'unites — passager rendu tres loin de la
+        // cabine.
+        let (mut server, mut t) = connected_server_with_elevator(true);
+        let before = server.world.pose_of(1).unwrap();
 
         t.inject(TransportEvent::Message {
             from: 1,
@@ -3785,30 +3871,49 @@ mod tests {
 
         let pose = server.world.pose_of(1).unwrap();
         assert_eq!(pose.frame, 100);
+        // yaw du repere = 0 (cabine purement verticale, cf. plan Task 1) : l'offset est la simple
+        // difference avec la position de l'etage.
+        assert!((pose.x - (before.x - 10.0)).abs() < 1e-4, "x = {}", pose.x);
+        assert!((pose.y - (before.y - 20.0)).abs() < 1e-4, "y = {}", pose.y);
+        assert!((pose.z - (before.z - 30.0)).abs() < 1e-4, "z = {}", pose.z);
     }
 
     #[test]
-    fn unmounting_resets_the_player_pose_frame_to_world() {
-        // kind=7=UnmountElevator repose Pose.frame = WORLD_FRAME inconditionnellement.
-        use crate::elevator_catalog::parse_and_validate;
-        let toml = r#"
-            format_version = 1
-            [[elevator]]
-            id = "100"
-            name = "Test"
-            start_floor = 0
-            start_delay_ms = 0
-            travel_time_ms = 0
-            [[elevator.floors]]
-            index = 0
-        "#;
-        let catalog = parse_and_validate(toml).unwrap();
-        let mut server = Server::new_with_elevators(50.0, catalog, 50);
+    fn mounting_is_refused_when_the_frame_has_no_known_transform() {
+        // L'ascenseur EST au registre, mais son etage n'a pas de position — `current_frame_transform`
+        // rend `None`, donc aucune transformee. On refuse le montage au lieu d'inventer un offset.
+        //
+        // Ce n'est pas un exces de prudence : le plan prevoit que la transformee disparaisse EN
+        // COURS DE TRAJET (etage cible sans position, `current_frame_transform_is_none_during_a_trip`).
+        // Un montage accepte dans cette fenetre stockerait une position monde qui deviendrait un
+        // offset FAUX des le retour de la transformee. Un passager non attache est un defaut
+        // visible ; un passager attache au mauvais endroit est un bug silencieux.
+        let (mut server, mut t) = connected_server_with_elevator(false);
+        let before = server.world.pose_of(1).unwrap();
 
-        let mut t = InMemoryTransport::new();
-        t.inject(TransportEvent::Connected(1));
+        t.inject(TransportEvent::Message {
+            from: 1,
+            data: encode_entity_interaction(100, 6, 0),
+        });
         server.tick(&mut t);
-        t.take_sent(1);
+
+        let pose = server.world.pose_of(1).unwrap();
+        assert_eq!(pose.frame, crate::frame::WORLD_FRAME, "montage refuse");
+        assert_eq!(
+            (pose.x, pose.y, pose.z),
+            (before.x, before.y, before.z),
+            "et la position monde reste intacte — un refus ne deplace personne"
+        );
+    }
+
+    #[test]
+    fn mounting_then_unmounting_returns_the_player_to_his_original_world_position() {
+        // kind=7=UnmountElevator repose Pose.frame = WORLD_FRAME inconditionnellement, et
+        // reconvertit l'offset en position monde. Sans cette conversion, l'offset (quelques
+        // dixiemes d'unite) serait relu comme une position monde : joueur teleporte au ras de
+        // l'origine. C'est le defaut SYMETRIQUE de celui du montage.
+        let (mut server, mut t) = connected_server_with_elevator(true);
+        let before = server.world.pose_of(1).unwrap();
 
         t.inject(TransportEvent::Message {
             from: 1,
@@ -3818,7 +3923,7 @@ mod tests {
         assert_eq!(
             server.world.pose_of(1).unwrap().frame,
             100,
-            "précondition: monté"
+            "precondition: monte"
         );
 
         t.inject(TransportEvent::Message {
@@ -3829,6 +3934,9 @@ mod tests {
 
         let pose = server.world.pose_of(1).unwrap();
         assert_eq!(pose.frame, crate::frame::WORLD_FRAME);
+        assert!((pose.x - before.x).abs() < 1e-3, "x = {}", pose.x);
+        assert!((pose.y - before.y).abs() < 1e-3, "y = {}", pose.y);
+        assert!((pose.z - before.z).abs() < 1e-3, "z = {}", pose.z);
     }
 
     #[test]
