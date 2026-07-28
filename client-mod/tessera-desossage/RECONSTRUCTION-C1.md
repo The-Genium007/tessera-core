@@ -50,8 +50,8 @@ franchir**, où l'on voit ce qui passe et où l'on peut rejouer l'ordre serveur.
 | --- | --- | --- |
 | Devices monde (1) | que le joueur ne *déclenche* pas l'effet local — pas qu'il ne voie rien | ✅ **ÉTABLI : `QueuePSDeviceEvent`** — voir ci-dessous |
 | Distributeurs (2,3) | idem, plus l'inventaire côté serveur | même entonnoir que (1) : ce sont des devices |
-| Tourelles (4) | que la tourelle n'agisse pas de son propre chef | probablement l'ordre de tir / l'attitude, pas le menu d'actions |
-| Police (5) | que l'escalade soit décidée par le serveur | le **déclenchement d'un niveau de recherche**, pas l'existence du système |
+| Tourelles (4) | que la tourelle n'agisse pas de son propre chef | 🟡 `SecurityTurretControllerPS.OnSetDeviceAttitude` — **scripté**, à sonder |
+| Police (5) | que l'escalade soit décidée par le serveur | ✅ **ÉTABLI : `PreventionSystem.ChangeHeatStage`** — **scripté** |
 | Hostilité (6) | déjà bon | `TryChangingAttitudeToHostile` **est** un entonnoir — à garder |
 
 ⚠️ **Aucune de ces cibles n'est mesurée.** Ce sont des candidats déduits du code décompilé, pas des
@@ -138,3 +138,48 @@ interdit une voie non gardée, donc redscript était disqualifié quoi qu'il arr
 **Reste à faire** (in-game, une session) : armer, mesurer le **débit** et les **classes d'action**
 qui passent, vérifier que toutes les interactions de device y apparaissent. Ce n'est qu'après
 qu'on décide de la forme du blocage — c'est le raccourci inverse qui a produit le désossage actuel.
+
+## Familles 4 et 5 — entonnoirs identifiés le 2026-07-27, et ils sont SCRIPTÉS
+
+Bonne nouvelle après le volet devices (qui, lui, impose du C++) : ces deux-là restent en redscript.
+
+### Police (5) — `PreventionSystem.ChangeHeatStage(newHeatStage, heatChangeReason)`
+
+**Seul site d'affectation de `m_heatStage`** dans tout le système (vérifié : une seule occurrence
+de `m_heatStage = `). Toute montée ou descente de niveau de recherche y passe. Le niveau lui-même
+n'est qu'un **fait de quête** (`wanted_level`), écrit par `SetWantedLevelFact` en aval.
+
+Trois raisons d'en faire l'entonnoir plutôt que l'actuel retour anticipé sur `OnAttach` :
+
+- **le système continue d'exister** — donc tout ce qui en dépend (radio police, barre de recherche,
+  télémétrie, sirènes) ne casse plus en silence ;
+- la fonction porte **`heatChangeReason`**, une chaîne : on sait *pourquoi* ça monte, donc on peut
+  journaliser ce qu'on refuse — impossible aujourd'hui ;
+- c'est le point exact où réinjecter l'autorité serveur (le serveur décide de l'escalade, le client
+  la joue), au lieu de désactiver la police pour tout le monde.
+
+`private function`, mais `@wrapMethod` sait wrapper du privé (le désossage le fait déjà sur
+`ShouldDisableMappin`, `private final func`).
+
+### Tourelles (4) — `SecurityTurretControllerPS.OnSetDeviceAttitude(evt)`
+
+⚠️ **À sonder, pas encore prouvé.** Le hook actuel (`GetActions` → `false`) porte sur le **menu
+d'interaction du joueur**, pas sur le fait que la tourelle agisse — ce n'est donc même pas la bonne
+chose qui est coupée. Le point de décision est l'attitude du device
+(`protected export override function OnSetDeviceAttitude`, scripté).
+
+À vérifier en sonde : les tourelles ambiantes sont-elles hostiles **par défaut** (auquel cas
+l'attitude n'est jamais « posée » et l'entonnoir serait ailleurs, du côté de l'état initial) ?
+
+## Bilan du cadrage C1
+
+| Famille | Entonnoir | Techno | État |
+| --- | --- | --- | --- |
+| Devices (1,2,3) | `QueuePSDeviceEvent` | **C++ RED4ext** | ✅ hook phase 1 écrit et compilé |
+| Police (5) | `PreventionSystem.ChangeHeatStage` | redscript | ✅ identifié, à sonder |
+| Tourelles (4) | `OnSetDeviceAttitude` | redscript | 🟡 candidat, à sonder |
+| Hostilité (6) | `TryChangingAttitudeToHostile` | redscript | ✅ déjà bon, à garder |
+| (7)(8)(9) | — | — | ✅ conformes à la doctrine |
+
+**Les 5 cas à reprendre ont tous leur entonnoir identifié.** Un seul exige du C++. Le chantier est
+passé de « tout est à refaire » à une liste finie avec sa technologie déterminée pour chaque ligne.
