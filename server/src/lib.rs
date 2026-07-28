@@ -19,6 +19,7 @@ pub mod elevator_catalog;
 pub mod escalade_police;
 pub mod frame;
 pub mod framing;
+pub mod game_hash;
 pub mod gateway;
 pub mod gateway_routing;
 pub mod handoff;
