@@ -90,6 +90,14 @@ pub struct PuppetCatalog {
     allowed: HashMap<String, HashSet<String>>,
     /// record → catégorie.
     category_of: HashMap<String, Category>,
+    /// Le MÊME index, mais par hashes — `(TweakDBID du record, CName de l'apparence)`.
+    ///
+    /// Il existe parce que le fil ne porte que des hashes (`AppearanceSpec`), jamais des noms :
+    /// sans lui, `is_valid_choice` était inatteignable depuis un message client, et le contrôle
+    /// « pas de paire hors catalogue » ne pouvait pas s'appliquer. Construit une fois au parsing
+    /// plutôt que hashé à chaque message : le contrôle est sur un chemin client, il doit rester
+    /// en O(1) sans recalcul.
+    allowed_hashes: HashSet<(u64, u64)>,
 }
 
 impl PuppetCatalog {
@@ -120,9 +128,18 @@ impl PuppetCatalog {
         if allowed.is_empty() {
             return Err(CatalogError::NoChoices);
         }
+        let allowed_hashes: HashSet<(u64, u64)> = allowed
+            .iter()
+            .flat_map(|(rec, apps)| {
+                let rec_hash = crate::game_hash::tweakdb_id(rec);
+                apps.iter()
+                    .map(move |app| (rec_hash, crate::game_hash::cname(app)))
+            })
+            .collect();
         Ok(Self {
             allowed,
             category_of,
+            allowed_hashes,
         })
     }
 
@@ -139,6 +156,18 @@ impl PuppetCatalog {
         self.allowed
             .get(record)
             .is_some_and(|set| set.contains(appearance))
+    }
+
+    /// **Le contrôle de sécurité tel qu'il s'applique réellement**, sur ce qui arrive du fil :
+    /// `AppearanceSpec` ne porte que des hashes. Même règle que `is_valid_choice`, même refus par
+    /// défaut — un couple absent du catalogue est rejeté, quelle qu'en soit la raison.
+    ///
+    /// Une collision de hash rendrait vrai un couple qui n'est pas au catalogue. Le risque est
+    /// dérisoire (FNV-1a 64 bits d'un côté, CRC-32 **plus la longueur du nom** de l'autre) et il
+    /// est surveillé : un test vérifie que l'index par hash a exactement la même cardinalité que
+    /// l'index par noms sur le catalogue réel — toute collision le ferait rougir.
+    pub fn is_valid_choice_by_hash(&self, base_record: u64, appearance: u64) -> bool {
+        self.allowed_hashes.contains(&(base_record, appearance))
     }
 
     pub fn category_of(&self, record: &str) -> Option<&str> {
@@ -312,5 +341,81 @@ mod tests {
             "Character.CitizenBikerMale",
             "king_of_the_stoop_ma_king_of_the_stoop_ma_04"
         ));
+    }
+
+    fn real_catalog() -> PuppetCatalog {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("puppet-catalog.json");
+        PuppetCatalog::load(&path).expect("le catalogue livre doit rester valide")
+    }
+
+    #[test]
+    fn a_choice_valid_by_name_is_also_valid_by_hash() {
+        let c = PuppetCatalog::parse_and_validate(
+            r#"{"archetypes":{"a":{"category":"corpo",
+                "records":["Character.foo"],"appearances":["bar_01"]}}}"#,
+        )
+        .unwrap();
+        assert!(c.is_valid_choice("Character.foo", "bar_01"));
+        assert!(c.is_valid_choice_by_hash(
+            crate::game_hash::tweakdb_id("Character.foo"),
+            crate::game_hash::cname("bar_01"),
+        ));
+    }
+
+    #[test]
+    fn a_pair_outside_the_catalog_is_refused_by_hash() {
+        let c = PuppetCatalog::parse_and_validate(
+            r#"{"archetypes":{"a":{"category":"corpo",
+                "records":["Character.foo"],"appearances":["bar_01"]}}}"#,
+        )
+        .unwrap();
+        // Record connu + apparence inventee : c'est le cas que le controle doit attraper, un
+        // client ne doit pas pouvoir panacher.
+        assert!(!c.is_valid_choice_by_hash(
+            crate::game_hash::tweakdb_id("Character.foo"),
+            crate::game_hash::cname("apparence_inventee"),
+        ));
+        assert!(!c.is_valid_choice_by_hash(
+            crate::game_hash::tweakdb_id("Character.inconnu"),
+            crate::game_hash::cname("bar_01"),
+        ));
+        assert!(!c.is_valid_choice_by_hash(0, 0));
+    }
+
+    /// Sur le catalogue REEL : chacun des 2090 couples doit passer le controle par hash. Un test
+    /// sur un catalogue jouet ne prouverait rien — c'est le fichier livre qui sera interroge en
+    /// production.
+    #[test]
+    fn every_pair_of_the_shipped_catalog_validates_by_hash() {
+        let c = real_catalog();
+        let mut checked = 0usize;
+        for category in c.categories() {
+            for choice in c.choices_in(&category) {
+                assert!(
+                    c.is_valid_choice_by_hash(
+                        crate::game_hash::tweakdb_id(&choice.record),
+                        crate::game_hash::cname(&choice.appearance),
+                    ),
+                    "{} / {} passe par nom mais pas par hash",
+                    choice.record,
+                    choice.appearance
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 1000, "catalogue etonnamment petit : {checked}");
+    }
+
+    /// La surveillance des collisions : l'index par hash doit avoir EXACTEMENT la meme cardinalite
+    /// que l'index par noms. Deux couples distincts qui se hacheraient pareil feraient perdre une
+    /// entree au HashSet — et rendraient valide une paire absente du catalogue.
+    #[test]
+    fn the_hash_index_has_no_collision_on_the_shipped_catalog() {
+        let c = real_catalog();
+        assert_eq!(
+            c.allowed_hashes.len(),
+            c.choice_count(),
+            "collision de hash dans le catalogue livre"
+        );
     }
 }

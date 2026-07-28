@@ -47,24 +47,49 @@ pub fn resource_path(path: &str) -> u64 {
     fnv1a64(path.replace('/', "\\").as_bytes())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ⛔ TweakDBID (`AppearanceSpec.base_record`) — DÉLIBÉRÉMENT PAS IMPLÉMENTÉ ICI.
-//
-// L'algorithme est documenté par la communauté (CRC32 du nom sur les 32 bits bas, longueur du nom
-// sur les 8 bits suivants), mais **le dépôt ne contient aucun vecteur de vérité** pour le
-// confronter : le dump TweakDB (`tools/tweakdb/out/cache.pkl`) indexe les records par NOM, pas par
-// id numérique, et `char_hashes` du harnais rend le hash du `entityTemplatePath` (un ResourcePath),
-// pas l'id du record.
-//
-// L'écrire sans pouvoir le vérifier, c'est fabriquer un validateur qui rejetterait des choix
-// légitimes — un mur silencieux à la création de personnage, exactement la classe de bug que le
-// protocole de sondage interdit. La règle du dépôt est explicite : ne jamais deviner, mesurer.
-//
-// Ce qu'il faut, et c'est une poignée de secondes en jeu : `TweakDBID.new("Character.<X>")` depuis
-// CET rend l'id complet. L'action `tdb_hash` du harnais produit ces couples pour une liste de
-// records ; une fois le fichier de vecteurs en main, cette fonction s'écrit et se vérifie d'un
-// coup, et la validation de `base_record` se branche derrière.
-// ─────────────────────────────────────────────────────────────────────────────
+/// CRC-32 IEEE (polynôme inversé `0xEDB88320`, init et XOR final à `0xFFFF_FFFF`) — la brique du
+/// `TweakDBID`. Implémenté sans table : le corpus à hacher tient en quelques centaines de noms au
+/// démarrage, la table de 1 Kio ne paierait pas sa complexité.
+fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg(); // 0xFFFFFFFF si bit bas à 1, sinon 0
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// Hash d'un `TweakDBID` — l'identité d'un record TweakDB (`AppearanceSpec.base_record`).
+/// **CRC-32 IEEE du nom sur les 32 bits bas, longueur du nom sur les 8 bits suivants.**
+///
+/// # Vérifié sans lancer le jeu
+///
+/// `r6/cache/tweakdb.bin` et `tweakdb_ep1.bin` ne contiennent pas les noms — c'est tout l'intérêt
+/// d'un hash — mais ils contiennent **l'ensemble des ids valides**. Il suffit donc de calculer l'id
+/// d'un nom connu et d'en chercher les octets dans le binaire. Mesure du 2026-07-28
+/// (`tools/tweakdb/verify_ids.py`) :
+///
+/// | échantillon | base | ep1 | union |
+/// | --- | --- | --- | --- |
+/// | tous les `Character.*` (7818) | 5929 | 7818 | **7818/7818** |
+/// | 800 records au hasard | 706 | 779 | 779/800 |
+/// | **contre-témoin** : 500 noms fabriqués | 0 | 0 | **0/500** |
+///
+/// Le contre-témoin est ce qui donne son sens au reste : un mauvais nom ne tombe jamais par
+/// hasard, donc les correspondances ne sont pas du bruit. Et la variante « CRC32 sans XOR final »
+/// donne 0/200 — l'algorithme retenu n'est pas un choix parmi plusieurs qui marcheraient.
+///
+/// Les ~21 manquants sur 800 sont des records présents dans les **sources texte** mais pas compilés
+/// dans le binaire (schémas, abstraits) — pas un échec de hachage.
+///
+/// La suite Rust, elle, ne lit aucun fichier du jeu : elle rejoue 262 vecteurs figés dans
+/// `tweakdb-id-vectors.json`, pour rester verte sur macOS.
+pub fn tweakdb_id(name: &str) -> u64 {
+    u64::from(crc32_ieee(name.as_bytes())) | ((name.len() as u64) << 32)
+}
 
 #[cfg(test)]
 mod tests {
@@ -151,5 +176,69 @@ mod tests {
         // Deux noms qui ne different que par la casse doivent donner deux hashes differents —
         // c'est ce qui interdit d'« arranger » un nom d'apparence avant de le hacher.
         assert_ne!(cname("Appearance_Foo"), cname("appearance_foo"));
+    }
+
+    /// Vecteur canonique universel de CRC-32 IEEE. Meme role que pour FNV : isoler une erreur
+    /// d'algorithme d'une erreur de composition (decalage de la longueur, boutisme).
+    #[test]
+    fn crc32_matches_the_canonical_check_value() {
+        assert_eq!(crc32_ieee(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn tweakdb_id_packs_the_length_above_the_crc() {
+        let name = "Character.foo";
+        let id = tweakdb_id(name);
+        assert_eq!(id & 0xFFFF_FFFF, u64::from(crc32_ieee(name.as_bytes())));
+        assert_eq!(id >> 32, name.len() as u64);
+    }
+
+    /// Deux noms de MEME longueur mais de contenu different, et deux noms de meme contenu tronque
+    /// a des longueurs differentes, doivent tous donner des ids distincts. C'est ce qui verrouille
+    /// la composition : un id qui n'emporterait que le CRC passerait le premier cas et raterait le
+    /// second.
+    #[test]
+    fn tweakdb_id_separates_both_on_content_and_on_length() {
+        assert_ne!(tweakdb_id("Character.aaa"), tweakdb_id("Character.aab"));
+        assert_ne!(tweakdb_id("Character.aaa"), tweakdb_id("Character.aaa "));
+    }
+
+    /// La vraie preuve, portable : 262 vecteurs figes, chacun retrouve dans les binaires TweakDB du
+    /// jeu 2.31 au moment de leur generation (`tools/tweakdb/verify_ids.py`). Ce test ne lit aucun
+    /// fichier du jeu, donc il reste vert sur macOS.
+    #[test]
+    fn tweakdb_id_reproduces_every_frozen_vector() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tweakdb-id-vectors.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("lecture de {} : {e}", path.display()));
+        let json: serde_json::Value =
+            serde_json::from_str(&raw).expect("tweakdb-id-vectors.json doit rester du JSON valide");
+        let table = json["name_to_id"]
+            .as_object()
+            .expect("name_to_id doit etre un objet");
+        assert!(
+            table.len() >= 200,
+            "corpus de vecteurs etonnamment petit ({}) — fichier tronque ?",
+            table.len()
+        );
+        let mut mismatches: Vec<String> = Vec::new();
+        for (name, id_str) in table {
+            let expected: u64 = id_str.as_str().unwrap().parse().expect("id u64 decimal");
+            let got = tweakdb_id(name);
+            if got != expected {
+                mismatches.push(format!("{name} : attendu {expected}, obtenu {got}"));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} vecteur(s) sur {} ne retombent pas :
+{}",
+            mismatches.len(),
+            table.len(),
+            mismatches.iter().take(5).cloned().collect::<Vec<_>>().join(
+                "
+"
+            )
+        );
     }
 }

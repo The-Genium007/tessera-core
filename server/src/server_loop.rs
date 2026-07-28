@@ -111,6 +111,15 @@ pub struct Server {
     /// aucun étage n'a de position renseignée) a un registre vide — c'est un état normal, pas
     /// `Option` : `FrameRegistry::new()` ne coûte rien et il n'y a qu'un seul état "aucun repère".
     frame_registry: crate::frame::FrameRegistry,
+    /// Épingle le palier de dégradation : tant qu'il vaut `true`, le recalcul par tick est
+    /// court-circuité. **Test uniquement**, et il répare un piège réel : sans lui,
+    /// `force_degradation_tier_for_test` posait une valeur que le tick suivant écrasait
+    /// aussitôt. Les tests du plafond ne tenaient donc que par accident — parce que
+    /// l'implémentation d'alors était assez LENTE pour que le palier mesuré retombe sur
+    /// `Degraded` tout seul. Accélérer le code les faisait rougir sans qu'aucune règle métier
+    /// n'ait bougé (constaté le 2026-07-28 en branchant `snapshot_for_resolved`).
+    #[cfg(test)]
+    degradation_tier_pinned: bool,
 }
 
 /// Regroupe l'état PNJ vivant d'un Shard : le catalogue (immuable après boot), le director
@@ -192,6 +201,8 @@ impl Server {
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
             frame_registry: crate::frame::FrameRegistry::new(),
+            #[cfg(test)]
+            degradation_tier_pinned: false,
         }
     }
 
@@ -221,6 +232,8 @@ impl Server {
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
             frame_registry: crate::frame::FrameRegistry::new(),
+            #[cfg(test)]
+            degradation_tier_pinned: false,
         }
     }
 
@@ -263,6 +276,8 @@ impl Server {
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
             frame_registry: crate::frame::FrameRegistry::new(),
+            #[cfg(test)]
+            degradation_tier_pinned: false,
         }
     }
 
@@ -336,6 +351,8 @@ impl Server {
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
             frame_registry: crate::frame::FrameRegistry::new(),
+            #[cfg(test)]
+            degradation_tier_pinned: false,
         }
     }
 
@@ -372,6 +389,8 @@ impl Server {
             tick_duration_window: std::collections::VecDeque::new(),
             degradation_tier: crate::degradation::DegradationTier::Normal,
             frame_registry: crate::frame::FrameRegistry::new(),
+            #[cfg(test)]
+            degradation_tier_pinned: false,
         }
     }
 
@@ -462,6 +481,7 @@ impl Server {
         tier: crate::degradation::DegradationTier,
     ) {
         self.degradation_tier = tier;
+        self.degradation_tier_pinned = true;
     }
 
     /// Injecte directement le contenu de la fenêtre glissante de durées de tick — permet de
@@ -1127,7 +1147,13 @@ impl Server {
         self.tick_duration_window.push_back(elapsed_micros);
         if let Some(p99) = p99_of(&self.tick_duration_window) {
             let policy = crate::degradation::DegradationPolicy::default();
-            self.degradation_tier = policy.tier_for_p99(p99, self.degradation_tier);
+            #[cfg(test)]
+            let pinned = self.degradation_tier_pinned;
+            #[cfg(not(test))]
+            let pinned = false;
+            if !pinned {
+                self.degradation_tier = policy.tier_for_p99(p99, self.degradation_tier);
+            }
         }
         if let Some(metrics) = &self.metrics {
             metrics.record_tick_duration_micros(elapsed_micros);
