@@ -183,3 +183,81 @@ l'attitude n'est jamais « posée » et l'entonnoir serait ailleurs, du côté d
 
 **Les 5 cas à reprendre ont tous leur entonnoir identifié.** Un seul exige du C++. Le chantier est
 passé de « tout est à refaire » à une liste finie avec sa technologie déterminée pour chaque ligne.
+
+## Session de mesure du 2026-07-28 — ce qui a été établi, et ce qui ne l'a pas été
+
+### Mesure brute
+
+Hook C1 armé (`TesseraRE_FunnelWatch(true)`), joueur **immobile** au point de chargement,
+`survey_area` : 61 entités dans 60 m — 41 objets statiques, 14 véhicules, 6 PNJ, **aucun device,
+aucun ascenseur**. Résultat : **0 action en 120 s**, en trois échantillons.
+
+**Ce zéro ne mesure rien.** Sans contrôle positif il ne distingue pas « l'entonnoir est froid » de
+« le hook ne se déclenche jamais ». Il est *cohérent* avec un joueur immobile sans device autour —
+mais la cohérence n'est pas une preuve. À ne pas reporter comme un débit.
+
+### Condition expérimentale (à consigner au même instant que la mesure, sinon échantillons non comparables)
+
+**Le désossage n'était PAS déployé** — `r6/scripts/Tessera/` ne contient que `elevators`, `reprobe`,
+`uikit`. La mesure a donc porté sur du **vanilla nu**, ce qui est la bonne base de référence pour
+C1 : on veut le débit de l'entonnoir tel que le jeu le produit, avant toute coupure.
+
+J'ai d'abord attribué ce zéro au désossage. C'était faux, et vérifiable en une commande (lister le
+dossier de scripts). **Vérifier ce qui est réellement chargé avant d'expliquer un résultat** — une
+explication plausible et non vérifiée coûte plus cher qu'un « je ne sais pas ».
+
+### Le verrou réel, lui, tient — mais pour la PROCHAINE mesure
+
+L'analyse du code reste valide et mordra dès que le désossage sera réinstallé :
+
+| Famille | Ce que coupe le désossage | Conséquence sur la mesure |
+| --- | --- | --- |
+| Devices | `worldInteractables` inactif → `GetActions` rend `false` (sauf ascenseurs) | aucune action n'est créée, donc **rien n'atteint jamais** `QueuePSDeviceEvent` |
+| Police | `police` inactif → retour anticipé sur `PreventionSystem.OnAttach` | le système n'existe pas, donc `ChangeHeatStage` **n'est jamais appelée** |
+
+> **Le désossage détruit précisément ce qu'il faut mesurer pour le remplacer.** C'est la boucle
+> fermée du raccourci d'origine : on a coupé sans mesurer, et la coupure interdit maintenant la
+> mesure. Corollaire à généraliser : **tout entonnoir situé en aval d'une coupure existante est
+> aveugle tant que la coupure tient** — remplacer un hook de désossage commence toujours par
+> l'éteindre.
+
+**Levée du verrou** : action `lever` ajoutée au pont du harnais (pilote `Tessera_SetLever`, qui
+n'existait qu'en frappe manuelle dans la console CET, donc non scriptable). Elle a été vérifiée
+négativement dans cette session — `Tessera_SetLever` est `nil` quand le désossage n'est pas
+déployé, et le pont le dit en clair au lieu d'échouer en silence.
+
+### Le hook est prouvé sur la bonne fonction (vérification statique, 2026-07-28)
+
+Un zéro n'a de sens que si l'instrument est le bon. Chaîne de preuve, fermée des deux bouts :
+
+1. Ghidra — la chaîne `"QueuePSDeviceEvent"` (`0x142bc2f08`) n'a **qu'une** référence, depuis
+   `FUN_140e44ee4`, qui est l'**enregistrement RTTI** de ce nom (motif `_Init_thread_header` +
+   `atexit`, typique d'un enregistrement statique). Elle lie le natif à `FUN_1405616ec`.
+2. `FUN_1405616ec` appelle `FUN_140561768` (`0x14056174c`, `UNCONDITIONAL_CALL`) — la fonction
+   hookée. Le thunk déballe les arguments, le corps fait le travail.
+3. Le corps décompilé confirme la signature : `(param_1, longlong* param_2)` où `param_2` est un
+   `Handle<T>` (**incrément atomique du compteur de références** sur `param_2[1]`), suivi de la
+   lecture de 16 octets à `+0x40` (un `PersistentID`) et d'un pointeur à `+0x50`. C'est exactement
+   `QueuePSDeviceEvent(system, Handle<DeviceAction>&)`.
+4. Table AddressLib livrée par le jeu : hash **3797228879 ↔ RVA 0x561768**, aller-retour vérifié
+   dans les deux sens. (Le thunk RTTI `0x5616ec` a un hash distinct, 353182615 — aucune confusion
+   possible entre les deux.)
+
+Le corps est le bon point d'attache : il capte tout ce qui atteint l'implémentation, là où le thunk
+ne verrait que les appels venus du script.
+
+**Donc le 0 mesuré signifie « l'entonnoir était froid », pas « le hook est faux ».** C'est ce qui
+rend la suite interprétable.
+
+### Protocole de mesure (ordre imposé)
+
+1. si le désossage est déployé : `lever|worldInteractables on 1.0` et `lever|police on 0.0` ;
+2. confirmer dans le log jeu (`[Tessera/Desossage] SetLever`) — un nom de levier inconnu est refusé
+   **en silence** côté redscript, le retour du pont ne prouve rien ;
+3. `funnel_watch|on`, **jouer**, échantillonner le compteur ;
+4. `funnel_watch|off`, dépouiller `tesserareprobe-*.log` et les lignes `[Tessera/C1/Police]`.
+
+⚠️ **L'étape 3 exige un joueur humain.** Les deux entonnoirs ne s'ouvrent que sur du jeu réel
+(interagir avec un device, se faire repérer) — aucune sonde ne les alimente à vide, et le point de
+chargement de la sauvegarde d'essai n'a aucun device à portée. C'est la limite honnête de ce
+chantier : **la phase 1 de C1 n'est pas automatisable**.
