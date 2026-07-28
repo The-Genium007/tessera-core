@@ -48,7 +48,7 @@ franchir**, où l'on voit ce qui passe et où l'on peut rejouer l'ordre serveur.
 
 | Famille | Ce qu'on veut vraiment | Entonnoir candidat (à sonder) |
 | --- | --- | --- |
-| Devices monde (1) | que le joueur ne *déclenche* pas l'effet local — pas qu'il ne voie rien | l'**exécution** de l'action (`ScriptableDeviceAction` / le chemin `ExecuteAction`), pas sa production |
+| Devices monde (1) | que le joueur ne *déclenche* pas l'effet local — pas qu'il ne voie rien | ✅ **ÉTABLI : `QueuePSDeviceEvent`** — voir ci-dessous |
 | Distributeurs (2,3) | idem, plus l'inventaire côté serveur | même entonnoir que (1) : ce sont des devices |
 | Tourelles (4) | que la tourelle n'agisse pas de son propre chef | probablement l'ordre de tir / l'attitude, pas le menu d'actions |
 | Police (5) | que l'escalade soit décidée par le serveur | le **déclenchement d'un niveau de recherche**, pas l'existence du système |
@@ -77,3 +77,47 @@ par famille, comme pour l'ascenseur (`PROTOCOLE-SONDAGE.md`).
 - Les commentaires du module portent une **vraie valeur documentaire** (pièges `@wrapMethod`,
   classes sans override propre, signatures vérifiées contre le script décompilé) — à reprendre,
   pas à jeter.
+
+## ✅ L'entonnoir des devices est établi — et il impose du C++ (2026-07-27)
+
+**Trouvé sur le script décompilé, pas déduit.** `ExecutePSAction` / `ExecutePSActionWithDelay`
+(`scriptableDeviceBasePS.script:6366+`) ne sont que des enveloppes : **41 sites** d'exécution
+d'action de device convergent tous vers
+
+```
+GamePersistencySystem.QueuePSDeviceEvent(action : DeviceAction)
+```
+
+C'est le `SendLiftStartDelayedEvent` des devices : un point unique que toute voie doit franchir,
+au niveau de l'**exécution** de l'effet et non de sa **production**. Il permettrait en prime de
+**journaliser ce qu'on coupe** — le reproche principal fait au désossage actuel.
+
+### ⚠️ Mais il n'est PAS atteignable en redscript
+
+Établi par compilation (`scc`, 3 essais, chacun éliminant une cause) :
+
+1. `@wrapMethod(gamePersistencySystem)` → `[UNRESOLVED_REF]`. Le dump RTTI dit
+   `gamePersistencySystem` ; **le nom redscript est `GamePersistencySystem`**
+   (`importonly final class`, `varDBSystem.script:53`). Piège classique du CLAUDE.md — le script
+   décompilé fait foi pour les noms.
+2. Nom corrigé → `[UNRESOLVED_METHOD]`, « signature does not match ». Retirer `final` n'y change
+   rien.
+3. **Cause réelle** : `QueuePSDeviceEvent` est déclarée `public **import** function` — c'est un
+   **natif**. `@wrapMethod` a besoin d'un corps scripté où se greffer ; un natif n'en a pas.
+   Contrôle croisé : **toutes** les cibles que le désossage wrappe avec succès sont des fonctions
+   **scriptées** (`TryChangingAttitudeToHostile` = `public static function`, `ShouldDisableMappin`
+   = `private function`, tous les `GetActions`…). Aucune n'est `import`.
+
+### Conséquence sur la forme du chantier
+
+Le volet **devices de C1 est un chantier RED4ext, pas redscript.** Le patron existe déjà dans
+`tessera-core/client-mod/tessera-client` : `UniversalRelocFunc` + hash AddressLib +
+`hooking->Attach`, avec la phase 1 log-only (c'est ainsi que `ExecuteNode` et
+`StreamingSector::PostLoad` ont été abordés).
+
+Ordre révisé : commencer par le **hook natif log-only** sur `QueuePSDeviceEvent` (mesurer le débit
+et le contenu des actions **avant** toute décision de blocage — leçon du canal de fractures), puis
+seulement ensuite réinjecter l'autorité serveur.
+
+> Une sonde redscript avait été écrite pour ce point puis **supprimée** : elle ne compile pas, et
+> un `.reds` fautif fait tomber tout `r6/scripts`. Le constat qu'elle a produit est ci-dessus.
