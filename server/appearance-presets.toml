@@ -23,6 +23,28 @@
 # puis applique `appearance` (au spawn OU `ScheduleAppearanceChange`, tous deux prouvés en jeu).
 #
 # ─────────────────────────────────────────────────────────────────────────────────────────────
+# CE FICHIER EST UNE SÉLECTION CURÉE, PAS LE REGISTRE DE VÉRIFICATION (clarifié le 2026-07-29)
+#
+# Deux fichiers, deux rôles — ils ne se contredisent pas, ils ne disent pas la même chose :
+#
+#   · `puppet-catalog.json` → LE REGISTRE. Tout le corpus lu dans les `.ent` (2090
+#     couples), plus `couples_verifies_en_jeu` : ceux qui ont été VUS RENDRE à l'écran (23 au
+#     2026-07-29). C'est lui que le code lit (`puppet_catalog.rs`), et lui qui fait foi sur la
+#     question « est-ce que ça s'affiche ? ».
+#
+#   · CE FICHIER → LA CURATION. Un petit sous-ensemble CHOISI et NOMMÉ pour le sélecteur
+#     (« Femme chic — casual »). Un nom lisible ne se déduit d'aucune donnée du jeu : il s'écrit
+#     à la main, et c'est la seule chose que ce fichier apporte.
+#
+# INVARIANT : tout preset listé ici DOIT figurer dans `couples_verifies_en_jeu` du JSON. Proposer
+# un avatar curé mais jamais vu rendre donnerait un joueur invisible (F-PLY-01). L'inverse est
+# normal et attendu : beaucoup de couples sont vérifiés sans être curés.
+#
+# Le champ `verified = true` ci-dessous est donc REDONDANT avec le JSON — conservé pour la
+# lisibilité, mais en cas de désaccord c'est le JSON qui a raison.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
 # LES 3 CATÉGORIES (taxonomie RP Tessera, décision du 2026-07-27)
 #
 #   corpo          — costards, argent, Night City d'en haut.
