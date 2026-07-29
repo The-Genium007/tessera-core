@@ -12,6 +12,12 @@
 # ÉPINGLÉE). ⚠️ L'apparence d'un crowd record est ALÉATOIRE à chaque spawn (mesuré 2026-07-25) — d'où
 # l'épinglage explicite, sinon deux joueurs du même preset auraient des looks différents.
 #
+# ✅ L'ÉPINGLAGE EST CONFIRMÉ EN JEU (2026-07-29) : deux spawns du même `base_record`
+# (`CitizenAldecaldosMaleFarmer`) avec deux apparences distinctes donnent deux pantins
+# VISIBLEMENT différents. L'hypothèse de fond du sélecteur tient — le couple
+# `(base_record, appearance)` est bien une identité visuelle STABLE, ce qui justifie de le
+# porter tel quel sur le fil (`AppearanceSpec`) et de le persister avec le personnage.
+#
 # Flux : le serveur offre ces choix, tient le choix de chaque joueur, et l'émet en `AppearanceSync`
 # (le fil porte `base_record`=hash TweakDBID + `appearance`=hash CName). Le client spawn `base_record`
 # puis applique `appearance` (au spawn OU `ScheduleAppearanceChange`, tous deux prouvés en jeu).
