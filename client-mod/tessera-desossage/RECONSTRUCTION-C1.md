@@ -439,3 +439,51 @@ c'est mon hook ou ma compréhension du mécanisme qui aurait été faux.
 **Rappel de méthode pour la prochaine session** : la sonde se déclenche quand le capteur DÉTECTE le
 joueur, pas quand le joueur regarde le capteur. Il faut entrer dans le champ d'un device alimenté ;
 où pointe le réticule n'entre nulle part dans la décision.
+
+## Phase 2 — ce que les mesures permettent de concevoir, et ce qui manque encore
+
+### Le verrou conceptuel, nommé
+
+La mesure a montré que **le streaming et les quêtes empruntent le même entonnoir que le joueur**
+(`SetDeviceOFF` au chargement, `QuestForceDisabled` en cours de partie, aucun des deux provoqué).
+Un blocage indiscriminé au point d'entrée casserait donc des quêtes — en silence, et sans qu'aucun
+test ne le voie. C'est la démonstration **expérimentale** que `GetActions -> false` était la
+mauvaise réponse : il ne suffit pas de déplacer la coupure vers un meilleur endroit, il faut la
+rendre **sélective**.
+
+### La bonne nouvelle : l'action porte son initiateur
+
+`ScriptableDeviceAction` déclare `m_executor` (le `GameObject` qui a initié) et `m_requesterID`,
+avec leurs accesseurs `GetExecutor()` / `GetRequesterID()`. Les chemins joueur les posent
+explicitement — `SetExecutor(GetPlayer(...))`, `SetExecutor(context.processInitiatorObject)`,
+`SetExecutor(instigator)`. L'information nécessaire à la discrimination **existe déjà sur l'objet
+qui traverse l'entonnoir** : rien à reconstruire, rien à corréler.
+
+### Pourquoi le hook reste en C++ malgré tout
+
+`ExecutePSAction` (`scriptableDeviceBasePS.script:6366`) semblait un point d'interception plus
+confortable — redscript, exécuteur sous la main. **Écarté : 109 appelants**, plusieurs surcharges,
+et surtout ce n'est PAS le point unique — le harnais Lua atteint déjà `QueuePSDeviceEvent`
+directement, sans passer par lui. Une garde qui laisse une voie de contournement n'est pas une
+garde. Le natif reste le seul vrai goulot.
+
+### Ce qui manque, et comment on l'obtient
+
+**Question ouverte, unique, et qui décide de tout** : les actions du streaming et des quêtes
+ont-elles un exécuteur **nul ou différent du joueur** ?
+
+- si **oui**, la discrimination est triviale et toute la phase 2 se conçoit dessus ;
+- si **non** (toutes portent le joueur), il faut un autre critère — et il vaut mieux le savoir
+  avant d'avoir écrit la moindre ligne de blocage.
+
+La sonde a été modifiée pour répondre : elle journalise désormais la classe de l'exécuteur à côté
+de la classe d'action, lue par le RTTI (`m_executor` est un champ scripté, sans offset stable
+qu'on puisse graver — et la recherche par nom est négligeable à 0,26 action/s). `<null>` et
+`<absent>` sont distingués à dessein : « l'action n'est pas une `ScriptableDeviceAction` » n'est
+pas la même information que « le champ est là mais vide ».
+
+**Une seule session in-game suffira** : rejouer exactement le même parcours (chargement, quelques
+devices, un ascenseur, un achat) et lire la colonne exécuteur. Aucune nouvelle sonde à écrire.
+
+⚠️ Toujours pas de code bloquant, et ce n'est pas de la prudence de principe : tant que cette
+question n'est pas tranchée, on ne sait pas si la garde envisagée est seulement **réalisable**.
