@@ -106,8 +106,20 @@ impl WriteBehindJournal {
             .map(|entry| entry.seq + 1)
             .unwrap_or(0);
 
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
-        let current_len = file.metadata()?.len();
+        // La troncature se fait sur un handle SÉPARÉ, ouvert en écriture, AVANT le handle d'append.
+        //
+        // Elle était faite sur le handle d'append lui-même. Ça marche sous Unix (`ftruncate` sur un
+        // descripteur O_APPEND) et **échoue sous Windows** : un fichier ouvert en mode append n'a
+        // que le droit `FILE_APPEND_DATA`, or `SetEndOfFile` exige `GENERIC_WRITE` — d'où un
+        // `PermissionDenied` (« Accès refusé »). Ce n'était pas un caprice de test : `open` EST le
+        // chemin de reprise après crash, donc sur une machine Windows un serveur ayant subi une
+        // écriture tronquée refusait de redémarrer, avec une erreur qui ne dit pas son nom.
+        //
+        // Ordre imposé : tronquer d'abord, ouvrir en append ensuite. L'inverse laisserait le handle
+        // d'append positionné derrière une fin de fichier qui vient de reculer. (Un handle append
+        // se repositionne à chaque écriture, mais on ne s'appuie pas là-dessus pour un fichier de
+        // reprise après crash.)
+        let current_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         if outcome.clean_len < current_len {
             // Une ligne tronquée par un crash traîne en fin de fichier (voir `scan`) — retirée
             // par un seul appel `set_len`, atomique : contrairement à une réécriture complète
@@ -116,8 +128,13 @@ impl WriteBehindJournal {
             // aboutit, soit il n'a aucun effet, jamais une perte partielle d'entrées déjà
             // durcies. Appelé seulement quand nécessaire : un redémarrage propre (pas de ligne
             // tronquée) ne touche pas le fichier du tout.
-            file.set_len(outcome.clean_len)?;
+            OpenOptions::new()
+                .write(true)
+                .open(path)?
+                .set_len(outcome.clean_len)?;
         }
+
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self { file, next_seq })
     }
 
