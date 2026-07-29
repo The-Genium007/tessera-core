@@ -15,7 +15,8 @@
    "nomad": "hors-la-ville : nomades, Aldecaldos, bikers, Badlands"
   },
   "usage": "Le champ `runtime_name` est ce qui va sur le fil (AppearanceSpec.appearance) et ce que le client applique au spawn. `app_appearance` et `app` sont documentaires.",
-  "record_to_ent": "Resolu le 2026-07-27 : sonde harness `record_ent` (lit Character.<X>.entityTemplatePath via `v.hash`) + table FNV1a64 chemin-antislash. VALIDE 11/11 sur les couples deja verifies en jeu."
+  "record_to_ent": "Resolu le 2026-07-27 : sonde harness `record_ent` (lit Character.<X>.entityTemplatePath via `v.hash`) + table FNV1a64 chemin-antislash. VALIDE 11/11 sur les couples deja verifies en jeu.",
+  "verification_en_jeu": "Un couple n'entre ici qu'apres avoir ete VU RENDRE a l'ecran : spawn via la sonde npc_spawn du harnais, observation humaine, confirmation explicite. Le mode d'echec cherche est le pantin INVISIBLE — un nom d'apparence invalide passe toutes les etapes du moteur sans broncher (F-PLY-01), donc « CreateEntity a rendu un handle » ne prouve rien. Session du 2026-07-29 : 12 couples tires au hasard parmi les 11 959 non verifies, 12 rendus, 0 echec."
  },
  "totaux": {
   "archetypes": 112,
@@ -81,6 +82,78 @@
    "record": "Character.CitizenBikerMale",
    "appearance": "citizen__biker_ma_biker_01",
    "category": "nomad"
+  },
+  {
+   "record": "Character.CorpoManArasaka",
+   "appearance": "citizen__arasaka_corpo_ma_corporate_03_1",
+   "category": "corpo",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.AsianFemaleDE",
+   "appearance": "citizen__corporat_wa_corporat_wa_10",
+   "category": "corpo",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.CorpoManDE",
+   "appearance": "citizen__corporat_ma_corporat_ma_20",
+   "category": "corpo",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.Ash",
+   "appearance": "citizen__corporat_ma_after_work_06",
+   "category": "corpo",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.quickhits_target_002",
+   "appearance": "citizen__creole_ma_caribbean_12",
+   "category": "gosse_des_rues",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.mon_scrappers_elite2_shotgun_igla_ma",
+   "appearance": "scrapper__ma_default_15",
+   "category": "gosse_des_rues",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.SlackerFemale_ow_city_scenes",
+   "appearance": "slacker_wa_slacker_wa_03",
+   "category": "gosse_des_rues",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.sts_ep1_01_generic_patient_elder_ma",
+   "appearance": "citizen__stacks_ma_elder_06",
+   "category": "gosse_des_rues",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.q000_roadhouse_town_vendor",
+   "appearance": "citizen__aldecaldos_ma_farmer_02",
+   "category": "nomad",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.CitizenAldecaldosMaleFarmer",
+   "appearance": "citizen__aldecaldos_ma_teenager_02",
+   "category": "nomad",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.CitizenAldecaldosMaleFarmer",
+   "appearance": "citizen__aldecaldos_ma_nomad_06",
+   "category": "nomad",
+   "verifie_le": "2026-07-29"
+  },
+  {
+   "record": "Character.q306_bridge_august",
+   "appearance": "citizen__aldecaldos_ma_teenager_03",
+   "category": "nomad",
+   "verifie_le": "2026-07-29"
   }
  ],
  "archetypes": {
