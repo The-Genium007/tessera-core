@@ -535,3 +535,19 @@ directions opposées.
   n'ont pas été rejouées cette session : l'hypothèse « elles aussi portent `<null>` » est
   plausible mais **pas mesurée**. À confirmer avant de s'y fier.
 - `DispenceItemFromVendor` ×4 = **deux achats**, cohérent avec la double émission déjà établie.
+
+### Complément du 2026-07-29 — le cas QUÊTE est mesuré
+
+Une quête secondaire lancée et un point de voyage rapide désactivé ont produit, dans la même
+session : `QuestForceEnabled` ×2 et `QuestForceClose` ×1, **toutes trois `executor = <null>`**.
+
+C'était la réserve la plus lourde de l'ADR 0017 — un blocage qui aurait touché les actions de quête
+les aurait cassées en silence. Le critère `executor != null` ne les voit pas. **Levée.**
+
+Le passage a d'ailleurs révélé un effet du correctif posé le même soir : le jeu ayant redémarré,
+l'entonnoir était **désarmé** et les actions suivantes n'ont pas été captées. C'est le comportement
+voulu (le pont ne rejoue plus une commande oubliée), mais le corollaire est désormais explicite :
+**réarmer après chaque redémarrage**, sinon la session mesure zéro sans le dire.
+
+Reste non observé : `SetDeviceOFF` (streaming) avec son exécuteur — même famille, même attente,
+mais toujours pas mesuré.
