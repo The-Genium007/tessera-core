@@ -356,6 +356,7 @@ async fn run_test() {
             hot_state,
             None, // serveur privé : pas de BanStore Postgres
             None, // serveur privé : pas de store personnage (flux d'arrivée inerte)
+            None, // pas de catalogue d'avatars (idem)
         )
         .await
         .expect("gateway ne devrait pas échouer");

@@ -851,6 +851,11 @@ pub async fn gateway_main(
     // sélection de personnage). `Some(..)` uniquement quand `identity_public` (même Postgres que
     // `PostgresStore`), cf. `bin/gateway.rs`.
     mut character_store: Option<crate::character_store::CharacterStore>,
+    // Catalogue des avatars proposables (sélecteur de presets, palier 2). `None` = le serveur ne
+    // l'a pas configuré (`runtime.puppet_catalog_path` absent) : il n'accepte alors QUE la paire
+    // nulle et refuse toute revendication d'avatar, plutôt que d'enregistrer sur parole ce qu'il
+    // ne sait pas vérifier — voir `gateway_routing::decide_appearance`.
+    puppet_catalog: Option<crate::puppet_catalog::PuppetCatalog>,
 ) -> std::io::Result<()> {
     use crate::admin_commands::{execute as execute_admin_command, parse as parse_admin_command};
     use crate::gateway_routing::{
@@ -1811,7 +1816,8 @@ pub async fn gateway_main(
                         &mut connection_phase,
                     );
                     continue;
-                } else if let Some(pseudonym) = extract_create_character(data) {
+                } else if let Some(request) = extract_create_character(data) {
+                    let pseudonym = request.pseudonym.clone();
                     // Création d'un personnage (flux d'arrivée). Le cap est gaté par le nœud de
                     // permission `character.slots.N` déjà RÉSOLU au Join et mis en cache dans
                     // `permissions` — on ne re-résout PAS l'autorité ici (pas de duplication de la
@@ -1822,10 +1828,26 @@ pub async fn gateway_main(
                         let resolved = permissions.get(&cid).cloned().unwrap_or_default();
                         let max_slots = crate::permissions::max_character_slots(&resolved);
                         let current = store.list_by_owner_async(&owner).await.unwrap_or_default();
-                        if current.len() >= max_slots as usize {
+                        // L'avatar est arbitré AVANT de toucher la base : un refus d'apparence ne
+                        // doit ni consommer un slot ni réserver un pseudonyme. Le contrôle est
+                        // pur et testé (`decide_appearance`), il ne fait que rendre son verdict.
+                        let appearance_blob = match crate::gateway_routing::decide_appearance(
+                            &request,
+                            puppet_catalog.as_ref(),
+                        ) {
+                            crate::gateway_routing::AppearanceVerdict::Accept(blob) => Some(blob),
+                            crate::gateway_routing::AppearanceVerdict::Reject(reason) => {
+                                client.send(cid, &encode_character_result(false, reason));
+                                None
+                            }
+                        };
+                        if appearance_blob.is_none() {
+                            // Refus déjà notifié au client — on ne poursuit pas.
+                        } else if current.len() >= max_slots as usize {
                             client.send(cid, &encode_character_result(false, "slot_full"));
                         } else {
-                            match store.create_async(&owner, &pseudonym, b"").await {
+                            let blob = appearance_blob.unwrap_or_default();
+                            match store.create_async(&owner, &pseudonym, &blob).await {
                                 Ok(_) => client.send(cid, &encode_character_result(true, "")),
                                 Err(
                                     crate::character_store::CharacterStoreError::PseudonymTaken,

@@ -260,6 +260,33 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
+    // Catalogue des avatars proposables (sélecteur de presets). Même convention de résolution que
+    // les catalogues du Shard : un chemin relatif au répertoire du manifeste, pas un absolu codé
+    // en dur. Un catalogue DÉCLARÉ mais illisible fait échouer le boot — c'est délibéré : le
+    // silence donnerait un serveur qui refuse tous les avatars sans que personne comprenne
+    // pourquoi. Absent, en revanche, reste un cas légitime (voir `Runtime::puppet_catalog_path`).
+    let puppet_catalog = manifest.runtime.puppet_catalog_path.as_ref().map(|p| {
+        let catalog_path = manifest_dir.join(p);
+        server::puppet_catalog::PuppetCatalog::load(&catalog_path).unwrap_or_else(|e| {
+            eprintln!(
+                "catalogue de pantins invalide ({}): {e}",
+                catalog_path.display()
+            );
+            std::process::exit(1);
+        })
+    });
+    match &puppet_catalog {
+        Some(c) => tracing::info!(
+            records = c.record_count(),
+            choix = c.choice_count(),
+            "catalogue d'avatars chargé"
+        ),
+        None => tracing::warn!(
+            "aucun catalogue d'avatars (runtime.puppet_catalog_path absent) — \
+             toute création de personnage portant un avatar sera REFUSÉE"
+        ),
+    }
+
     server::gateway::gateway_main(
         &listen,
         topology,
@@ -275,6 +302,7 @@ async fn main() -> std::io::Result<()> {
         hot_state,
         ban_store,
         character_store,
+        puppet_catalog,
     )
     .await
 }
