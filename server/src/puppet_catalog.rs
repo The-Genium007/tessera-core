@@ -42,6 +42,16 @@ pub type Category = String;
 #[derive(Debug, Deserialize)]
 struct RawCatalog {
     archetypes: HashMap<String, RawArchetype>,
+    /// Les couples confirmes A L'OEIL EN JEU — un sous-ensemble strict des archetypes (11 sur
+    /// 2090 au 2026-07-28). Absent d'un catalogue jouet, d'ou le `default`.
+    #[serde(default)]
+    couples_verifies_en_jeu: Vec<RawVerifiedChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawVerifiedChoice {
+    record: String,
+    appearance: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +100,16 @@ pub struct PuppetCatalog {
     allowed: HashMap<String, HashSet<String>>,
     /// record → catégorie.
     category_of: HashMap<String, Category>,
+    /// Les couples VÉRIFIÉS EN JEU, par hashes. Sous-ensemble strict de `allowed_hashes`.
+    ///
+    /// Pourquoi les distinguer alors que la validation accepte les deux : les 2090 couples du
+    /// catalogue sont **lus dans les `.ent` du jeu**, donc fiables par construction — ce ne sont
+    /// pas des noms composés à la main, et c'est ce qui autorise à tous les proposer (décision
+    /// Lucas). Mais « présent dans la donnée » n'est pas « vu rendre à l'écran » : seuls ces
+    /// 11-là ont été confirmés de visu. La distinction existait dans le JSON et n'était
+    /// représentable nulle part dans le code — elle l'est maintenant, pour que le sélecteur puisse
+    /// s'en servir (mettre en avant, trier, ou restreindre) sans redécouvrir le fichier.
+    verified_hashes: HashSet<(u64, u64)>,
     /// Le MÊME index, mais par hashes — `(TweakDBID du record, CName de l'apparence)`.
     ///
     /// Il existe parce que le fil ne porte que des hashes (`AppearanceSpec`), jamais des noms :
@@ -136,10 +156,21 @@ impl PuppetCatalog {
                     .map(move |app| (rec_hash, crate::game_hash::cname(app)))
             })
             .collect();
+        let verified_hashes: HashSet<(u64, u64)> = raw
+            .couples_verifies_en_jeu
+            .iter()
+            .map(|c| {
+                (
+                    crate::game_hash::tweakdb_id(&c.record),
+                    crate::game_hash::cname(&c.appearance),
+                )
+            })
+            .collect();
         Ok(Self {
             allowed,
             category_of,
             allowed_hashes,
+            verified_hashes,
         })
     }
 
@@ -168,6 +199,17 @@ impl PuppetCatalog {
     /// l'index par noms sur le catalogue réel — toute collision le ferait rougir.
     pub fn is_valid_choice_by_hash(&self, base_record: u64, appearance: u64) -> bool {
         self.allowed_hashes.contains(&(base_record, appearance))
+    }
+
+    /// Ce couple a-t-il été **vu rendre en jeu** ? Plus fort que `is_valid_choice_by_hash`, qui se
+    /// contente d'exiger la présence au catalogue. Aucun appelant n'est obligé de s'en servir —
+    /// c'est au sélecteur de décider ce qu'il en fait.
+    pub fn is_verified_choice_by_hash(&self, base_record: u64, appearance: u64) -> bool {
+        self.verified_hashes.contains(&(base_record, appearance))
+    }
+
+    pub fn verified_count(&self) -> usize {
+        self.verified_hashes.len()
     }
 
     pub fn category_of(&self, record: &str) -> Option<&str> {
@@ -404,6 +446,46 @@ mod tests {
             }
         }
         assert!(checked > 1000, "catalogue etonnamment petit : {checked}");
+    }
+
+    /// Les 11 couples verifies du catalogue livre doivent TOUS etre reconnus comme verifies, ET
+    /// tous figurer aussi parmi les couples valides — un couple verifie qui ne serait pas au
+    /// catalogue signalerait que les deux listes ont diverge.
+    #[test]
+    fn the_verified_subset_of_the_shipped_catalog_is_included_in_the_valid_pairs() {
+        let c = real_catalog();
+        assert!(
+            c.verified_count() >= 11,
+            "sous-ensemble verifie etonnamment petit : {}",
+            c.verified_count()
+        );
+        assert!(
+            c.verified_count() < c.choice_count(),
+            "le sous-ensemble verifie doit rester STRICT — sinon la distinction ne veut plus rien dire"
+        );
+        for (rec, app) in &c.verified_hashes {
+            assert!(
+                c.is_valid_choice_by_hash(*rec, *app),
+                "un couple verifie doit toujours etre un couple valide"
+            );
+        }
+    }
+
+    /// Un couple present au catalogue mais jamais vu en jeu est VALIDE sans etre VERIFIE. C'est
+    /// toute la nuance : la validation accepte les 2090 (lus dans les .ent, donc fiables par
+    /// construction), le label « verifie » ne couvre que ce qui a ete confirme de visu.
+    #[test]
+    fn a_valid_pair_is_not_necessarily_a_verified_one() {
+        let c = PuppetCatalog::parse_and_validate(
+            r#"{"archetypes":{"a":{"category":"corpo",
+                "records":["Character.foo"],"appearances":["bar_01"]}}}"#,
+        )
+        .unwrap();
+        let rec = crate::game_hash::tweakdb_id("Character.foo");
+        let app = crate::game_hash::cname("bar_01");
+        assert!(c.is_valid_choice_by_hash(rec, app));
+        assert!(!c.is_verified_choice_by_hash(rec, app));
+        assert_eq!(c.verified_count(), 0);
     }
 
     /// La surveillance des collisions : l'index par hash doit avoir EXACTEMENT la meme cardinalite
