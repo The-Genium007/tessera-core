@@ -288,3 +288,133 @@ rend la suite interprétable.
 (interagir avec un device, se faire repérer) — aucune sonde ne les alimente à vide, et le point de
 chargement de la sauvegarde d'essai n'a aucun device à portée. C'est la limite honnête de ce
 chantier : **la phase 1 de C1 n'est pas automatisable**.
+
+## ✅ MESURE DU 2026-07-29 — volet devices
+
+Enfin du jeu réel, sur l'install vanilla (désossage NON déployé, Cyberverse absent — donc aucune
+coupure, l'entonnoir peut s'ouvrir). **41 actions sur 155 s.**
+
+### Débit — et c'est lui qui débloque la phase 2
+
+| mesure | valeur |
+| --- | --- |
+| débit moyen | **0,26 action/s** |
+| plus grosse rafale | 5 (chargement de session) |
+| plus grosse rafale d'origine joueur | 4, étalées sur 267 ms |
+| rafale typique | 2 actions en ~12 ms |
+
+**Le serveur peut arbitrer chaque action device individuellement.** On est plus d'un ordre de
+grandeur sous le plafond au-delà duquel une décision synchrone devient intenable (~4/s, seuil
+mesuré sur le canal de fractures). C'était LA question ouverte de la phase 1 : elle est tranchée,
+et dans le bon sens.
+
+### Les 8 classes vues
+
+| classe | occurrences | origine |
+| --- | --- | --- |
+| `ForceUnlockAndOpenElevator` | 14 | cycle de portes de cabine |
+| `ForceLockElevator` | 14 | idem — **toujours appariée** à la précédente |
+| `SetDeviceOFF` | 5 | chargement de session, aucune action du joueur |
+| `VehicleDoorInteraction` | 2 | portière de véhicule |
+| `QuestForceDisabled` | 2 | système de quêtes, aucune action du joueur |
+| `DispenceItemFromVendor` | 2 | distributeur (⚠️ voir plus bas) |
+| `ToggleOpen` | 1 | joueur |
+| `OpenVendorUI` | 1 | joueur |
+
+### Trois enseignements
+
+1. **Les deux actions d'ascenseur vont par paire**, à ~12 ms d'écart, 14 fois sur 14. Le verrou et
+   l'ouverture sont un seul geste du moteur : les intercepter séparément serait une erreur de
+   granularité.
+2. **`VehicleDoorInteraction` passe par cet entonnoir.** Les portières de véhicule sont des actions
+   de device PS — un seul point d'interception couvre donc devices ET portières, ce qui simplifie
+   C3 le jour où on y viendra.
+3. **Le streaming et les quêtes empruntent le même tuyau que le joueur** (`SetDeviceOFF` au
+   chargement, `QuestForceDisabled` en cours de partie, aucun des deux provoqué). C'est la
+   démonstration expérimentale que `GetActions → false` était la mauvaise réponse : la phase 2 doit
+   discriminer **l'origine** de l'action, pas couper le tuyau. Un blocage indiscriminé casserait
+   des quêtes, en silence.
+
+### Point ouvert
+
+`DispenceItemFromVendor` est apparue **deux fois** — à confirmer : un seul achat qui émet deux
+fois (le serveur devra dédupliquer) ou deux achats. Question posée, réponse à consigner ici.
+
+## ✅ MESURE DU 2026-07-29 — volet police
+
+Une poursuite complète, montée puis redescente. **Deux événements. C'est tout.**
+
+```
+ChangeHeatStage -> niveau=1  raison=EnterCombat
+ChangeHeatStage -> niveau=0  raison=SystemTimeOut
+```
+
+### Ce que ça tranche
+
+**Les deux sens passent bien par le même point.** C'était LA question du volet : la montée
+(`preventionSystem.script:2532`, qui incrémente de +1) et la redescente à zéro (`:4795`) appellent
+toutes deux `ChangeHeatStage`. Un troisième chemin, le forçage par quête (`:3998`), y passe aussi.
+L'entonnoir est donc complet — aucune voie de secours à découvrir après coup.
+
+**Le débit est dérisoire** : 2 événements pour une poursuite entière. Là où les devices demandaient
+une vraie mesure pour savoir si un arbitrage serveur synchrone tenait, ici la question ne se pose
+même pas. Le serveur peut décider de chaque changement de niveau sans y penser.
+
+**L'escalade se fait cran par cran** (`+1` à chaque appel, `:2531`) : passer de 0 à 3 étoiles
+produira 3 événements distincts, pas un saut direct. Le serveur voit donc chaque palier.
+
+### Les raisons — 2 observées sur ~12 possibles
+
+Relevées dans le script décompilé, et classées par ce qui compte pour la phase 2 : **qui décide**.
+
+| `heatChangeReason` | origine | observée |
+| --- | --- | --- |
+| `EnterCombat` | acte du joueur | ✅ |
+| `CrimeWitness` | acte du joueur, vu par un témoin | — |
+| `Kill` / `KillPrevention` | acte du joueur | — |
+| `SystemTimeOut` | automatique, décrue | ✅ |
+| `SecurityAreaReset` | automatique, zone | — |
+| `QuestEvent` / `QuestWantedLevel` / `QuestPreventionTriggerSoftDeescalation` / `Preset` | scénario | — |
+| `ResetOnPlayerChoice` | choix de dialogue | — |
+| `DEBUG` | outillage | — |
+
+La coupure utile saute aux yeux : les raisons **« acte du joueur »** sont celles que le serveur doit
+arbitrer (c'est lui qui sait si le tir a touché, si un PNJ a vu) ; les raisons **automatiques** et
+**scénario** peuvent rester locales tant qu'elles produisent le même résultat chez tous. Cette
+taxonomie ne demandait pas la mesure — mais savoir que `EnterCombat` est bien la porte d'entrée
+réelle du cas courant, si.
+
+### Reste ouvert
+
+Le joueur n'a atteint que le **niveau 1** : l'escalade multi-paliers n'a pas été observée, seulement
+déduite du script (`+1` par appel). À confirmer d'une session où la traque monte à 3-4 étoiles —
+faible enjeu, le code est explicite, mais c'est la différence entre déduit et mesuré.
+
+Note : le canal devices n'a **pas bougé** pendant toute la poursuite (41 avant, 41 après). Une
+course-poursuite ne génère aucun trafic de device.
+
+## ⏸️ Volet capteurs — DIFFÉRÉ le 2026-07-29 (non bloquant)
+
+Pas mesuré : aucune tourelle alimentée à portée pendant la session. Deux résultats quand même,
+tous deux issus du script décompilé, et qui cadrent le volet pour la prochaine fois.
+
+**La sonde couvre trois familles, pas deux.** `SensorDevice` est hérité par `SurveillanceCamera`,
+`SecurityTurret` **et `SniperNest`** — cette troisième n'était pas au cadrage. Les caméras sont de
+loin les plus nombreuses : c'est par elles qu'il faudra remplir ce volet, pas par les tourelles.
+
+**Un drone volant ne passera JAMAIS par cette sonde**, et ce n'est pas un défaut. Un drone est un
+`ScriptedPuppet` portant un `DroneComponent`, pas un device : il décide de cibler par l'IA des PNJ.
+Conséquence de cadrage : la décision « qui me considère comme une cible » est **scindée en deux
+mécanismes** dans le jeu — capteurs fixes d'un côté, pantins de l'autre. La famille C1 « tourelles »
+ne couvre que le premier ; le second relève de l'hostilité PNJ, déjà pourvue de son entonnoir
+(`TryChangingAttitudeToHostile`, classé « déjà bon, à garder »). Les deux moitiés sont couvertes,
+mais par deux points distincts — à ne pas confondre en phase 2.
+
+**Contre-témoin obtenu gratuitement** : viser une tourelle ÉTEINTE n'a rien produit. C'est le
+comportement correct — `TurnOffDevice()` appelle `TurnOffSenseComponent()`, donc un capteur hors
+tension ne détecte rien et `SetAsIntrestingTarget` n'est jamais appelée. Si la sonde avait parlé,
+c'est mon hook ou ma compréhension du mécanisme qui aurait été faux.
+
+**Rappel de méthode pour la prochaine session** : la sonde se déclenche quand le capteur DÉTECTE le
+joueur, pas quand le joueur regarde le capteur. Il faut entrer dans le champ d'un device alimenté ;
+où pointe le réticule n'entre nulle part dans la décision.
