@@ -335,10 +335,31 @@ et dans le bon sens.
    discriminer **l'origine** de l'action, pas couper le tuyau. Un blocage indiscriminé casserait
    des quêtes, en silence.
 
-### Point ouvert
+### ✅ Point tranché — un achat émet DEUX fois
 
-`DispenceItemFromVendor` est apparue **deux fois** — à confirmer : un seul achat qui émet deux
-fois (le serveur devra dédupliquer) ou deux achats. Question posée, réponse à consigner ici.
+La première trace montrait `DispenceItemFromVendor` ×2, mais trois gestes s'y mélangeaient. **Test
+contrôlé refait à une seule variable** (un achat au distributeur, rien d'autre — pas de boutique,
+pas d'ascenseur au retour) :
+
+```
+action #18 : DispenceItemFromVendor   21:32:01.820
+action #19 : DispenceItemFromVendor   21:32:01.934      (écart : 114 ms)
+```
+
+**Deux émissions pour un achat, et rien d'autre.** `OpenVendorUI` reste à 0 — cette classe-là venait
+bien d'un autre geste (ouverture d'une boutique de vente), ce qui confirme au passage que
+l'interface d'un distributeur ne l'émet pas.
+
+Écart mesuré deux fois indépendamment : **109 ms** puis **114 ms**. Cohérent, donc structurel — ce
+n'est pas une double-frappe de l'utilisateur.
+
+**Conséquence pour la phase 2, et elle est concrète :** le jour où l'argent sera autoritatif, un
+serveur qui débiterait sur chaque action de vendeur **facturerait deux fois chaque achat**. La
+déduplication n'est pas une optimisation, c'est une correction obligatoire — fenêtre de l'ordre de
+200 ms sur le couple (device, item), à confirmer sur d'autres types de distributeurs.
+
+C'est exactement le genre de détail qui ne coûte rien à mesurer maintenant et très cher à
+découvrir en playtest, sur un joueur qui se plaint d'avoir payé double.
 
 ## ✅ MESURE DU 2026-07-29 — volet police
 
