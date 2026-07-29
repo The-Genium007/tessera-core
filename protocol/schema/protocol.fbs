@@ -216,7 +216,16 @@ table PlayerEvent { actor:ulong; kind:ubyte; action:ubyte; param:uint; }
 // --- flux d'arrivée : personnages (modèle multi, owner+character_id) ---
 table CharacterSummary { id:ulong; pseudonym:string; }
 table CharacterList     { characters:[CharacterSummary]; }
-table CreateCharacter   { pseudonym:string; }
+// `base_record` (TweakDBID) + `appearance` (CName) : l'avatar choisi au sélecteur de presets
+// (décision 2026-07-25 — le visage exact exige une activation native non résolue, cf. C6). Le
+// visage est figé À LA CRÉATION : pas de miroir ni de ripperdoc au runtime, choix assumé.
+//
+// ⚠️ Ces deux champs ont pour défaut FlatBuffers **0**, comme tout scalaire — un client qui les
+// omet compile et ment sur le fil, exactement le piège de `protocol_version`. Le serveur ne peut
+// pas distinguer « omis » de « demandé à zéro », et il n'a pas à le faire : `(0, 0)` n'est pas au
+// catalogue, donc `PuppetCatalog::is_valid_choice_by_hash` le refuse comme n'importe quelle autre
+// paire inconnue. Le refus est la valeur par défaut, jamais un avatar attribué en silence.
+table CreateCharacter   { pseudonym:string; base_record:ulong; appearance:ulong; }
 table SelectCharacter   { id:ulong; }
 table DeleteCharacter   { id:ulong; }
 // reason: pseudonym_taken/slot_full/not_found/not_owner (chaîne stable, pas un enum — cohérent

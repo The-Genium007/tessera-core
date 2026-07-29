@@ -189,14 +189,56 @@ pub fn extract_interaction_choice(client_payload: &[u8]) -> Option<(u64, u32, u3
 // Même patron que `extract_admin_command`/`encode_command_result` : décodage/encodage pur, sans
 // connaissance du `CharacterStore` ni de la machine à états (celle-ci vit dans `gateway_main`).
 
-/// Décode un `ClientEnvelope` client ; si c'est un `CreateCharacter`, renvoie le pseudonyme demandé.
-pub fn extract_create_character(client_payload: &[u8]) -> Option<String> {
+/// Ce qu'un client demande en créant un personnage : un pseudonyme et l'avatar choisi au sélecteur
+/// de presets, sous la forme `(base_record, appearance)` — deux hashes, jamais des noms (le fil ne
+/// porte que ça, cf. `AppearanceSpec`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCharacterRequest {
+    pub pseudonym: String,
+    pub base_record: u64,
+    pub appearance: u64,
+}
+
+/// Décode un `ClientEnvelope` client ; si c'est un `CreateCharacter`, renvoie ce qui est demandé.
+///
+/// Les deux hashes ont pour défaut FlatBuffers **0** : un client qui les omet est indiscernable
+/// d'un client qui demande explicitement zéro. Ce module ne tranche pas — il décode. C'est
+/// l'appelant qui refuse, et il le fait sans cas particulier : `(0, 0)` n'est pas au catalogue.
+pub fn extract_create_character(client_payload: &[u8]) -> Option<CreateCharacterRequest> {
     let env = flatbuffers::root::<ClientEnvelope>(client_payload).ok()?;
     if env.msg_type() != ClientMsg::CreateCharacter {
         return None;
     }
     let cmd = env.msg_as_create_character()?;
-    cmd.pseudonym().map(|s| s.to_string())
+    Some(CreateCharacterRequest {
+        pseudonym: cmd.pseudonym()?.to_string(),
+        base_record: cmd.base_record(),
+        appearance: cmd.appearance(),
+    })
+}
+
+/// Encode le couple `(base_record, appearance)` pour le stocker dans le blob d'apparence d'un
+/// personnage. Petit-boutiste, 16 octets, sans en-tête : c'est un format INTERNE au serveur (le
+/// blob n'est jamais renvoyé tel quel sur le fil), et le garder trivial évite d'inventer une
+/// sérialisation là où deux entiers suffisent.
+pub fn encode_appearance_blob(base_record: u64, appearance: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&base_record.to_le_bytes());
+    out.extend_from_slice(&appearance.to_le_bytes());
+    out
+}
+
+/// Relit un blob écrit par `encode_appearance_blob`. `None` si la taille ne fait pas exactement
+/// 16 octets — ce qui couvre le cas des personnages créés AVANT ce champ (blob vide) : ils n'ont
+/// pas d'avatar, et il faut le savoir plutôt que de lire des octets au hasard.
+pub fn decode_appearance_blob(blob: &[u8]) -> Option<(u64, u64)> {
+    if blob.len() != 16 {
+        return None;
+    }
+    Some((
+        u64::from_le_bytes(blob[0..8].try_into().ok()?),
+        u64::from_le_bytes(blob[8..16].try_into().ok()?),
+    ))
 }
 
 /// Décode un `ClientEnvelope` client ; si c'est un `SelectCharacter`, renvoie l'id du personnage
@@ -937,11 +979,17 @@ mod tests {
         assert_eq!(extract_interaction_choice(&[9, 9, 9]), None); // garbage
     }
 
-    #[test]
-    fn extract_create_character_reads_the_pseudonym() {
+    fn create_character_payload(pseudonym: &str, base_record: u64, appearance: u64) -> Vec<u8> {
         let mut b = FlatBufferBuilder::new();
-        let p = b.create_string("Nyx");
-        let cmd = CreateCharacter::create(&mut b, &CreateCharacterArgs { pseudonym: Some(p) });
+        let p = b.create_string(pseudonym);
+        let cmd = CreateCharacter::create(
+            &mut b,
+            &CreateCharacterArgs {
+                pseudonym: Some(p),
+                base_record,
+                appearance,
+            },
+        );
         let env = ClientEnvelope::create(
             &mut b,
             &ClientEnvelopeArgs {
@@ -950,12 +998,68 @@ mod tests {
             },
         );
         b.finish(env, None);
+        b.finished_data().to_vec()
+    }
+
+    #[test]
+    fn extract_create_character_reads_the_pseudonym_and_the_chosen_avatar() {
         assert_eq!(
-            extract_create_character(b.finished_data()),
-            Some("Nyx".to_string())
+            extract_create_character(&create_character_payload("Nyx", 111, 222)),
+            Some(CreateCharacterRequest {
+                pseudonym: "Nyx".to_string(),
+                base_record: 111,
+                appearance: 222,
+            })
         );
         assert_eq!(extract_create_character(&client_join()), None); // pas un CreateCharacter
         assert_eq!(extract_create_character(&[9, 9, 9]), None); // garbage
+    }
+
+    /// Un client qui n'ecrit pas les deux champs produit `(0, 0)` — le defaut FlatBuffers. Ce test
+    /// FIGE ce comportement pour qu'on ne le decouvre pas en production : c'est exactement le piege
+    /// de `protocol_version`, un champ significatif laisse a son defaut qui « compile et ment sur
+    /// le fil ». Le decodeur ne le corrige pas ; le refus se fait plus haut, faute de catalogue qui
+    /// contienne (0, 0).
+    #[test]
+    fn a_client_that_omits_the_avatar_fields_decodes_as_zeros() {
+        let mut b = FlatBufferBuilder::new();
+        let p = b.create_string("Ancien");
+        let cmd = CreateCharacter::create(
+            &mut b,
+            &CreateCharacterArgs {
+                pseudonym: Some(p),
+                ..Default::default()
+            },
+        );
+        let env = ClientEnvelope::create(
+            &mut b,
+            &ClientEnvelopeArgs {
+                msg_type: ClientMsg::CreateCharacter,
+                msg: Some(cmd.as_union_value()),
+            },
+        );
+        b.finish(env, None);
+        let got = extract_create_character(b.finished_data()).unwrap();
+        assert_eq!((got.base_record, got.appearance), (0, 0));
+    }
+
+    #[test]
+    fn the_appearance_blob_round_trips_the_two_hashes() {
+        let blob = encode_appearance_blob(0xDEAD_BEEF, 0x1234_5678_9ABC);
+        assert_eq!(blob.len(), 16);
+        assert_eq!(
+            decode_appearance_blob(&blob),
+            Some((0xDEAD_BEEF, 0x1234_5678_9ABC))
+        );
+    }
+
+    /// Les personnages crees AVANT ce champ ont un blob VIDE. Les relire doit rendre « pas
+    /// d'avatar », pas des octets interpretes au hasard.
+    #[test]
+    fn a_legacy_empty_blob_decodes_to_none() {
+        assert_eq!(decode_appearance_blob(b""), None);
+        assert_eq!(decode_appearance_blob(&[0u8; 15]), None);
+        assert_eq!(decode_appearance_blob(&[0u8; 17]), None);
     }
 
     #[test]
