@@ -487,3 +487,51 @@ devices, un ascenseur, un achat) et lire la colonne exécuteur. Aucune nouvelle 
 
 ⚠️ Toujours pas de code bloquant, et ce n'est pas de la prudence de principe : tant que cette
 question n'est pas tranchée, on ne sait pas si la garde envisagée est seulement **réalisable**.
+
+## ✅ 2026-07-29 — LA DISCRIMINATION MARCHE, et elle sépare intention et conséquence
+
+Question posée en fin de journée : les actions non provoquées portent-elles un exécuteur différent
+du joueur ? **Oui, et la coupure est plus propre que prévu.**
+
+| classe d'action | exécuteur | ce que c'est |
+| --- | --- | --- |
+| `GoToFloor` | **`PlayerPuppet`** | le joueur appuie sur un étage |
+| `DispenceItemFromVendor` | **`PlayerPuppet`** | le joueur achète |
+| `ForceLockElevator` (×9) | `<null>` | conséquence : le moteur verrouille |
+| `ForceUnlockAndOpenElevator` (×8) | `<null>` | conséquence : le moteur ouvre |
+| `SetOpened` (×2) | `<null>` | conséquence : une porte s'ouvre |
+
+**Ce n'est pas « joueur contre système », c'est « intention contre conséquence ».** Le joueur
+demande *un étage* ; le moteur en déduit verrouillage, ouverture, portes — et ces dérivées portent
+un exécuteur nul. Une seule action porte l'intention, toutes les autres en découlent.
+
+C'est exactement la coupure dont la phase 2 a besoin, et elle tombe **au bon endroit** : le serveur
+arbitre l'**intention** (« ce joueur a-t-il le droit d'appeler cet étage ? ») et laisse couler les
+**conséquences**, qui sont le travail du moteur — précisément la doctrine « intercepter, garder le
+moteur, réinjecter l'autorité » de l'ADR 0011, retrouvée ici sur le fil plutôt que déduite.
+
+Corollaire : la garde envisagée est **réalisable**. `executor != null` est le critère, et il est
+mesuré, pas supposé.
+
+### Le contrôle positif a fait son travail — deux fois
+
+`DispenceItemFromVendor` était intégré au parcours parce que **je connaissais sa réponse** : un
+achat est forcément d'origine joueur. Sans lui, deux sessions se seraient conclues à tort :
+
+1. `<absent>` partout — `CClass::GetProperty` ne remonte PAS l'héritage, or `m_executor` est
+   déclaré sur la classe parente. Un résultat parfaitement uniforme, donc parfaitement crédible ;
+2. `<absent>` encore — **le RTTI retire le préfixe `m_`** : le champ s'appelle `executor`, pas
+   `m_executor`. Trouvé par le diagnostic auto-listant les propriétés, ajouté après le premier
+   échec précisément parce qu'une sonde muette n'apprend rien.
+
+Piège à retenir, symétrique d'un piège déjà payé : **le dump RTTI ne fait pas foi sur les noms de
+CLASSE** (il ignore les alias d'import) **et le script décompilé ne fait pas foi sur les noms de
+PROPRIÉTÉ** (il garde le `m_` que le RTTI supprime). Les deux sources sont partielles, dans des
+directions opposées.
+
+### Limites de cette mesure
+
+- **5 classes observées** sur les 9 connues. `QuestForceDisabled` et `SetDeviceOFF` (streaming)
+  n'ont pas été rejouées cette session : l'hypothèse « elles aussi portent `<null>` » est
+  plausible mais **pas mesurée**. À confirmer avant de s'y fier.
+- `DispenceItemFromVendor` ×4 = **deux achats**, cohérent avec la double émission déjà établie.
