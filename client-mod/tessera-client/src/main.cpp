@@ -14,6 +14,13 @@
 // Déclaré RUNTIME_INDEPENDENT malgré le hook d'adresse précise ci-dessous — voir la note dans
 // `Query()` sur pourquoi ce n'est pas encore épinglé à 2.31 spécifiquement.
 
+// NOMINMAX/WIN32_LEAN_AND_MEAN AVANT tout include : si RED4ext.hpp inclut Windows.h en
+// transitif (non vérifiable ici, aucun SDK vendored dans ce worktree — S-E1c étape 2) sans ces
+// deux macros, les macros min/max de <Windows.h> cassent silencieusement <algorithm>/<chrono> de
+// la STL incluse plus bas. Coût nul, couvre le cas transitif ET le `#include <Windows.h>`
+// explicite ci-dessous — revue du 2026-07-30.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <RED4ext/RED4ext.hpp>
 // Explicite plutôt que reposé sur l'inclusion transitive de RED4ext.hpp (aucun SDK vendored dans
 // ce worktree pour vérifier — S-E1c étape 2) : GetCurrentThreadId() en dépend.
@@ -150,7 +157,15 @@ std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInput
     // PALIER 2 : les nœuds de PHASE (kPhaseNodeClassName) sont inspectés (log de leur hash de
     // .questphase) et bloqués SI leur hash est dans kBlockedPhaseHashes — vide pour l'instant, donc
     // étape 1 = observation pure. Tout le reste est log-only (g_original appelé en fin de fonction).
-    ++g_totalCalls;
+    //
+    // C5 (revue du 2026-07-30) : `seq` est capturé UNE FOIS, ici, à l'incrémentation — puis relu
+    // partout ci-dessous. Avant : ++g_totalCalls; jetait le résultat, puis CHAQUE lecture ultérieure
+    // refaisait un g_totalCalls.load() séparé. Deux threads incrémentant à 100 et 101 pouvaient
+    // relire tous les deux 101 → deux lignes de log avec le même `seq=`, exactement le symptôme que
+    // research/EXPERIMENTS.md (EXP-QUEST-A) documente comme « ne devrait plus arriver — si ça
+    // arrive, c'est un bug du patch, pas une preuve de concurrence ». Le protocole d'observation et
+    // le code se contredisaient : la session Windows aurait conclu faux.
+    const std::uint64_t seq = ++g_totalCalls;
     if (aInputNode != nullptr && g_sdk != nullptr)
     {
         // aInputNode est un questNodeDefinition* (ISerializable) : sa classe RTTI vient de GetType(),
@@ -181,7 +196,7 @@ std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInput
             g_sdk->logger->InfoF(g_handle,
                 "[Tessera/Gate/Phase] t=%llu seq=%llu phaseHash=0x%016llX%s",
                 static_cast<unsigned long long>(NowMillis()),
-                static_cast<unsigned long long>(g_totalCalls),
+                static_cast<unsigned long long>(seq),
                 static_cast<unsigned long long>(phaseHash),
                 blocked ? " — BLOQUE (sous-quete neutralisee, g_original NON appele)" : "");
             if (blocked) { return 1; }
@@ -204,13 +219,13 @@ std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInput
             g_sdk->logger->InfoF(g_handle,
                 "[Tessera/Gate/Node] t=%llu seq=%llu thread=%lu classe=%s occurrence=%llu spawnNode=%d — log seul, phase 1",
                 static_cast<unsigned long long>(NowMillis()),
-                static_cast<unsigned long long>(g_totalCalls.load()),
+                static_cast<unsigned long long>(seq),
                 static_cast<unsigned long>(GetCurrentThreadId()),
                 key.c_str(),
                 static_cast<unsigned long long>(count), isSpawnNode ? 1 : 0);
         }
 
-        if (g_totalCalls.load() % kSummaryEveryNCalls == 0)
+        if (seq % kSummaryEveryNCalls == 0)
         {
             std::size_t classesDistinctes;
             {
@@ -220,7 +235,7 @@ std::uint8_t Detour(void* aPhase, void* aInputNode, void* aContext, void* aInput
             g_sdk->logger->InfoF(g_handle,
                 "[Tessera/Gate/Summary] t=%llu total=%llu classesDistinctes=%zu",
                 static_cast<unsigned long long>(NowMillis()),
-                static_cast<unsigned long long>(g_totalCalls.load()),
+                static_cast<unsigned long long>(seq),
                 classesDistinctes);
         }
     }
@@ -283,8 +298,14 @@ constexpr std::uintptr_t kNodesArrayOffset = 0x28;
 
 PostLoad_t g_original_postload = nullptr;
 
-std::uint64_t g_sectorsSeen = 0;
-std::uint64_t g_nodesNeutralized = 0;
+// I5 (revue du 2026-07-30) : atomiques, traitement symétrique à g_totalCalls (C5) — le mutex
+// g_classSeenCountMutex n'a de sens QUE si ce détour est concurrent (S-E1c), et sous la même
+// hypothèse ces deux compteurs, écrits sans protection, sont une course. `sectorsSeen` est
+// capturé UNE FOIS à l'incrémentation puis relu partout ci-dessous (même correctif que `seq`
+// côté ExecuteNode) : avant, `logClasses` pouvait être calculé sur une valeur de g_sectorsSeen
+// différente de celle utilisée dans les logs qui suivent au sein du MÊME appel.
+std::atomic<std::uint64_t> g_sectorsSeen{0};
+std::atomic<std::uint64_t> g_nodesNeutralized{0};
 constexpr std::uint64_t kLogClassesForFirstNSectors = 8;
 constexpr std::uint64_t kSectorSummaryEvery = 500;
 
@@ -298,14 +319,14 @@ void Detour(void* aSector, std::uint64_t a2)
         return;
     }
 
-    ++g_sectorsSeen;
+    const std::uint64_t sectorsSeen = ++g_sectorsSeen;
 
     // 2) Atteindre le DynArray<Handle<worldNode>> à (sector + 0x40 + 0x28).
     auto* base = reinterpret_cast<std::uint8_t*>(aSector);
     auto* nodes = reinterpret_cast<RED4ext::DynArray<RED4ext::Handle<RED4ext::ISerializable>>*>(
         base + kNodeBufferOffset + kNodesArrayOffset);
 
-    const bool logClasses = g_sectorsSeen <= kLogClassesForFirstNSectors && g_sdk != nullptr;
+    const bool logClasses = sectorsSeen <= kLogClassesForFirstNSectors && g_sdk != nullptr;
     std::uint32_t neutralizedThisSector = 0;
 
     for (std::uint32_t i = 0; i < nodes->size; ++i)
@@ -338,7 +359,7 @@ void Detour(void* aSector, std::uint64_t a2)
             {
                 g_sdk->logger->InfoF(g_handle,
                     "[Tessera/Pop/Node] secteur=%llu classe=%s — decouverte (log seul)",
-                    static_cast<unsigned long long>(g_sectorsSeen), cname.c_str());
+                    static_cast<unsigned long long>(sectorsSeen), cname.c_str());
             }
         }
 
@@ -361,18 +382,18 @@ void Detour(void* aSector, std::uint64_t a2)
     }
 
     if (g_sdk != nullptr &&
-        (neutralizedThisSector > 0 && g_sectorsSeen <= kLogClassesForFirstNSectors))
+        (neutralizedThisSector > 0 && sectorsSeen <= kLogClassesForFirstNSectors))
     {
         g_sdk->logger->InfoF(g_handle,
             "[Tessera/Pop] secteur=%llu — %u nœud(s) population neutralise(s) (spawnOnStart=false)",
-            static_cast<unsigned long long>(g_sectorsSeen), neutralizedThisSector);
+            static_cast<unsigned long long>(sectorsSeen), neutralizedThisSector);
     }
-    if (g_sdk != nullptr && g_sectorsSeen % kSectorSummaryEvery == 0)
+    if (g_sdk != nullptr && sectorsSeen % kSectorSummaryEvery == 0)
     {
         g_sdk->logger->InfoF(g_handle,
             "[Tessera/Pop/Summary] secteurs=%llu total_neutralises=%llu",
-            static_cast<unsigned long long>(g_sectorsSeen),
-            static_cast<unsigned long long>(g_nodesNeutralized));
+            static_cast<unsigned long long>(sectorsSeen),
+            static_cast<unsigned long long>(g_nodesNeutralized.load()));
     }
 }
 } // namespace TesseraPopulationNative
