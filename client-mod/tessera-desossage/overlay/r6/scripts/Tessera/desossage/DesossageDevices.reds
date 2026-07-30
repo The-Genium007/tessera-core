@@ -98,8 +98,43 @@ public func Tessera_ApplyWorldDevices(game: GameInstance, vending: ref<Desossage
 // VendingMachineControllerPS/SecurityTurretControllerPS (dispatch virtuel : leur propre override
 // prend le dessus, ce wrap de base ne s'exécute que pour les classes qui n'en ont pas).
 // PIN IN-GAME : jamais testé — à confirmer (menu de hack absent sur un point d'accès ambiant).
+// EXEMPTION ASCENSEURS (2026-07-27) — corrige le bloquant playtest « les boutons d'appel
+// EXTÉRIEURS des ascenseurs ne répondent plus » (BACKLOG-INGAME §B2).
+//
+// Mécanisme exact, vérifié contre le script décompilé officiel (pas déduit) :
+//   ElevatorFloorTerminalControllerPS extends TerminalControllerPS extends MasterControllerPS
+//     -> ...GetActions termine par `return super.GetActions(outActions, context)`
+//        (elevatorFloorTerminalController.script:225-241)
+//   TerminalControllerPS.GetActions COMMENCE par
+//        `if( !( super.GetActions( outActions, context ) ) ) { return false; }`
+//        (terminalController.script) — il CONSOMME la valeur de retour.
+// Donc notre `return false` ci-dessous ne se contente pas de sauter les actions de base : il
+// court-circuite toute la chaîne terminal (ActionDeviceStatus, ToggleON, SetActionIllegality).
+// Le panneau INTÉRIEUR y échappe parce que `LiftControllerPS.GetActions` est un override
+// complet qui n'appelle jamais `super` — d'où le symptôme trompeur « ça marche de l'intérieur ».
+// (Note : les appelants de haut niveau, eux, IGNORENT le booléen — `GetActions(actions, ctx);`
+// en instruction. C'est bien l'étage TerminalControllerPS qui porte la panne, pas l'UI.)
+//
+// STATUT : contournement assumé, PAS la correction de fond. La décision du 2026-07-21 (« ne pas
+// rustiner, reconstruire le désossage sur la doctrine d'interception ») reste valide — c'est le
+// chantier C1. Cette exemption existe pour qu'un playtest lancé d'ici là ne soit pas cassé, et
+// elle disparaîtra avec la reconstruction. Elle est volontairement étroite : une seule classe,
+// aucun changement de comportement pour tout le reste des interactables monde.
+// ✅ VÉRIFIÉ EN JEU le 2026-07-27 (Megabuilding H10, Little China — la cabine de référence
+// d'ADR 0012). Protocole suivi, avec son contre-test : désossage déployé et actif, cabine
+// envoyée à l'étage 1 par `lift_call` (qui pilote le PS en direct, donc sans passer par
+// GetActions), puis appui sur le bouton d'appel EXTÉRIEUR depuis le rez-de-chaussée →
+// **la cabine redescend**. Le contre-test au même instant : un distributeur reste **mort**,
+// ce qui prouve que le désossage tournait bel et bien et que le wrap coupait toujours — sans
+// lui, un bouton qui marche aurait aussi bien pu signifier « j'ai neutralisé le désossage
+// entier ». Confirmé au passage : la classe visée en jeu est bien `ElevatorFloorTerminalControllerPS`
+// (relevée par la sonde sur la cible visée), et le module compile dans le vrai jeu
+// (`Compilation complete`, r6/logs/redscript_rCURRENT.log).
 @wrapMethod(ScriptableDeviceComponentPS)
 protected func GetActions(out actions: array<ref<DeviceAction>>, context: GetActionsContext) -> Bool {
+  if IsDefined(this as ElevatorFloorTerminalControllerPS) {
+    return wrappedMethod(actions, context);
+  }
   if !DesossageSystem.GetLiveConfig(GetGameInstance()).worldInteractables.active {
     return false;
   }

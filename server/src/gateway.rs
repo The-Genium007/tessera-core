@@ -788,10 +788,22 @@ pub fn record_anomaly(tracker: &mut AnomalyTracker, now: std::time::Instant) -> 
 /// `resolve_move_plausibility` (retirée au recâblage de la boucle).
 ///
 /// `frame` (ADR 0013) : documente que `last` et `current` doivent être dans le MÊME référentiel
-/// (tous deux en offset local du même repère, ou tous deux en position monde) — la garde réelle
-/// est côté appelant (`gateway_main`, qui bascule `last_pos`/`current` sur l'offset local dès que
-/// le joueur est porté), ce paramètre sert de rappel de type, pas de logique supplémentaire ici :
-/// `classify_move` compare des distances dans le référentiel qu'on lui donne, quel qu'il soit.
+/// (tous deux en offset local du même repère, ou tous deux en position monde). Ce paramètre est un
+/// rappel de type, pas une logique : `classify_move` compare des distances dans le référentiel
+/// qu'on lui donne, quel qu'il soit.
+///
+/// ⚠️ **La garde annoncée n'existe pas encore.** Ce commentaire affirmait que `gateway_main`
+/// « bascule `last_pos`/`current` sur l'offset local dès que le joueur est porté ». C'est faux :
+/// l'unique appel passe `WORLD_FRAME` en dur et compare les positions brutes rapportées par le
+/// client (vérifié le 2026-07-28). Ce n'est pas un bug aujourd'hui — le modèle de repère est
+/// entièrement **côté Shard** (`server_loop`, montage/descente d'ascenseur), le fil montant ne
+/// porte aucun repère, donc le Gateway ne voit que des positions monde et sa comparaison est
+/// cohérente.
+///
+/// Ça le deviendra le jour où le client rapportera un `(repère, offset)` : `last_pos` mélangerait
+/// alors deux référentiels, et **chaque montée ou descente d'ascenseur produirait un faux positif
+/// de téléportation** (position monde → offset de quelques dixièmes d'unité en un tick). Le
+/// paramètre `frame` est là pour que ce jour-là le point de branchement soit déjà nommé.
 pub fn resolve_move_verdict(
     rank: crate::handoff::Rank,
     last: Option<([f32; 3], std::time::Duration)>,
