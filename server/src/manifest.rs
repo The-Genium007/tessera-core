@@ -122,6 +122,16 @@ pub struct Runtime {
     /// sont PAS mutuellement exclusifs avec les PNJ, contrairement à ces deux-là entre eux.
     #[serde(default)]
     pub elevator_catalog_path: Option<String>,
+    /// Chemin (même convention relative que les deux précédents) vers le catalogue JSON des
+    /// pantins proposables au sélecteur de personnage — voir `puppet_catalog.rs`.
+    ///
+    /// ABSENT ≠ « pas de contrôle ». Sans catalogue le serveur ne peut rien vérifier, alors il
+    /// n'accepte QUE la paire nulle `(0, 0)` — comportement d'avant ce champ — et refuse toute
+    /// revendication d'avatar (`appearance_unverifiable`, cf. `decide_appearance`). Autrement dit
+    /// l'absence dégrade vers « aucun avatar possible », jamais vers « tout est permis » : une
+    /// validation qu'un fichier manquant suffit à désactiver n'en est pas une.
+    #[serde(default)]
+    pub puppet_catalog_path: Option<String>,
 }
 
 /// Valeur par défaut de `Runtime::redis_url` quand absente du TOML — Redis local, cohérent avec
@@ -908,6 +918,32 @@ mod tests {
         assert_eq!(
             m.runtime.elevator_catalog_path.as_deref(),
             Some("elevator-catalog.toml")
+        );
+    }
+
+    // --- puppet_catalog_path : catalogue des avatars proposables (selecteur, palier 2) ---
+
+    #[test]
+    fn puppet_catalog_path_defaults_to_none() {
+        let m = parse_and_validate(MINIMAL_TOML).unwrap();
+        assert!(m.runtime.puppet_catalog_path.is_none());
+    }
+
+    #[test]
+    fn puppet_catalog_path_is_read_when_declared() {
+        // Meme piege TOML que les deux autres chemins de catalogue : la cle nue doit etre inseree
+        // AVANT tout sous-tableau `[runtime.xxx]`, sinon elle lui appartiendrait.
+        let toml = MINIMAL_TOML.replace(
+            "[runtime]
+        whitelist = false",
+            "[runtime]
+        puppet_catalog_path = \"puppet-catalog.json\"
+        whitelist = false",
+        );
+        let m = parse_and_validate(&toml).unwrap();
+        assert_eq!(
+            m.runtime.puppet_catalog_path.as_deref(),
+            Some("puppet-catalog.json")
         );
     }
 
