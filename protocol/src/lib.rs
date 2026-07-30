@@ -19,19 +19,33 @@ mod tests {
     use super::*;
     use flatbuffers::FlatBufferBuilder;
 
+    /// Aller-retour d'un `PositionUpdate` sur le fil.
+    ///
+    /// ⚠️ Ce test est resté PÉRIMÉ du 2026-07-23 (gel de protocole palier 2 : `Vec3`→`QVec3`,
+    /// yaw `float`→`ushort`, ajout de `frame`/`slot` pour le modèle de repère ADR 0013) au
+    /// 2026-07-30 — sept jours pendant lesquels `cargo test -p protocol` NE COMPILAIT PAS, donc
+    /// le workflow `server-image` échouait à chaque push sur `main` sans que personne ne le relie
+    /// au gel. La cause est bête : on teste d'habitude `-p server`, et le crate `protocol` n'a
+    /// que ces quelques tests, qu'on ne pense pas à lancer.
+    ///
+    /// `frame`/`slot` sont posés EXPLICITEMENT à 0 (= repère monde) plutôt que laissés au défaut :
+    /// c'est la règle du schéma pour tout champ dont le défaut est significatif — un champ omis
+    /// compile sans broncher et ment sur le fil.
     #[test]
     fn position_update_round_trip() {
-        // Build a ClientEnvelope { PositionUpdate { (1,2,3), yaw 0.5 } }
         let mut b = FlatBufferBuilder::new();
-        let pos = Vec3::new(1.0, 2.0, 3.0);
+        // Positions quantifiées : mètres × 131072 (2^17), cf. `QVec3` dans le schéma.
+        let pos = QVec3::new(1 << 17, 2 << 17, 3 << 17);
         let pu = PositionUpdate::create(
             &mut b,
             &PositionUpdateArgs {
                 position: Some(&pos),
-                yaw: 0.5,
+                yaw: 12345,
                 locomotion: 0,
                 move_dir: 0,
                 flags: 0,
+                frame: 0,
+                slot: 0,
             },
         );
         let env = ClientEnvelope::create(
@@ -48,9 +62,11 @@ mod tests {
         let env = flatbuffers::root::<ClientEnvelope>(&bytes).unwrap();
         assert_eq!(env.msg_type(), ClientMsg::PositionUpdate);
         let pu = env.msg_as_position_update().unwrap();
-        assert_eq!(pu.yaw(), 0.5);
+        assert_eq!(pu.yaw(), 12345);
+        assert_eq!(pu.frame(), 0, "repère monde posé explicitement");
+        assert_eq!(pu.slot(), 0);
         let p = pu.position().unwrap();
-        assert_eq!((p.x(), p.y(), p.z()), (1.0, 2.0, 3.0));
+        assert_eq!((p.x(), p.y(), p.z()), (1 << 17, 2 << 17, 3 << 17));
     }
 
     #[test]
