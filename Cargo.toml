@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["server", "protocol", "directory", "authority-tessellation"]
+
+[workspace.package]
+edition = "2021"
+# Placeholder le temps que la licence open source soit choisie (voir README.md,
+# "Licence : à déterminer") — server/protocol/directory héritent ce champ.
+license = "UNLICENSED"
+repository = "https://github.com/The-Genium007/tessera-core"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

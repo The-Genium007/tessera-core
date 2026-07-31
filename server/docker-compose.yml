@@ -46,8 +46,8 @@ x-logging: &default-logging
 services:
   gateway:
     build:
-      context: ../..
-      dockerfile: tessera-core/server/Dockerfile
+      context: ..
+      dockerfile: server/Dockerfile
     image: ${IMAGE_NAME:-tessera-server}:${IMAGE_TAG:-latest}
     # Si ce service utilise l'image GHCR pré-construite (plutôt que `build:` ci-dessus) : sans
     # ça, un redeploy réutilise l'image locale en cache et ne re-tire pas un `:latest` plus
