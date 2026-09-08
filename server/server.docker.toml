@@ -10,7 +10,7 @@ max_players = 16
 tags = ["dev", "test"]
 discord_url = ""
 website_url = "https://tesserasynth.net"
-required_modset = "0.1.5-dev5"
+required_modset = "0.2.0-dev.3"
 voice_required = false
 # Playtest 2 (2026-07-13+) : auth ZITADEL réelle exigée au Join (JWT vérifié), et bascule vers
 # PostgresStore (voir bin/gateway.rs) — nécessite TESSERA_POSTGRES_URL posée côté Dokploy.
@@ -19,6 +19,10 @@ public = true
 [runtime]
 whitelist = false
 store_path = "/data/players.json"
+
+# Place gardée après une déconnexion SUBIE (voir `server.example.toml` pour l'arbitrage complet).
+# Un départ volontaire la libère aussitôt. 0 = désactivé. Défaut si absent : 600.
+reservation_seconds = 600
 
 # Point de spawn par défaut pour un joueur neuf (sans position/résidence connue). X/Y/Z = repère
 # monde du jeu (GetWorldPosition brut). Coordonnée Night City réelle et testée (zone de sauvegarde
@@ -35,14 +39,19 @@ advertise_addr = "51.38.189.234:27020"
 # ce manifeste) porte la géométrie des cellules ; server_count sélectionne le groupement
 # assignment_patterns[N] de l'artefact (remplace l'ancien arbre de splits/shards).
 #
-# server_count = 10 (2026-07-14, était 2) : granularité maximale de l'artefact v3
-# (assignment_patterns["10"] = 1 cellule par groupe, aucune fusion — vérifié via
-# `python3 -c "json.load(...)"`), topologie statique/froide (§5.6/§7.5). Doit rester en phase
-# avec le nombre de services `shard-*` de docker-compose.yml (10) et leurs `--group-id` 0-9.
+# server_count = 9 (2026-08-04, était 10 depuis le 2026-07-14, 2 avant) : toujours la granularité
+# MAXIMALE de l'artefact (assignment_patterns["9"] = 1 cellule par groupe, aucune fusion),
+# topologie statique/froide (§5.6/§7.5). Le passage de 10 à 9 n'est pas un choix de capacité :
+# l'artefact lui-même est passé à 9 cellules quand le proxy de charge a reçu son plancher
+# (`weight_area_floor`, voir tools/authority-tessellation/src/params.rs) — la ville se
+# re-clusterise et `dense_seed_count` doit tomber à 6, sinon Downtown forme une cellule sous
+# `r_min`. `assignment_patterns` n'a donc plus de clé "10" : laisser 10 ici ferait échouer le
+# chargement au boot. Doit rester en phase avec le nombre de services `shard-*` de
+# docker-compose.yml (9) et leurs `--group-id` 0-8.
 [runtime.topology]
 authority_artifact = "authority.json"
-server_count = 10
-# Une adresse par groupe, DANS L'ORDRE des --group-id 0-9 de docker-compose.yml : shard_addrs[i]
+server_count = 9
+# Une adresse par groupe, DANS L'ORDRE des --group-id 0-8 de docker-compose.yml : shard_addrs[i]
 # doit être le service lancé avec `--group-id i`. Ces chaînes partent telles quelles dans
 # `TcpStream::connect` côté Gateway.
 #
@@ -64,7 +73,6 @@ shard_addrs = [
   "shard-g:27036",
   "shard-h:27037",
   "shard-i:27038",
-  "shard-j:27039",
 ]
 
 [runtime.radius]
