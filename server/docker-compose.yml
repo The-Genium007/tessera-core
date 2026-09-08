@@ -45,7 +45,7 @@ x-logging: &default-logging
 
 services:
   gateway:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     # Si ce service utilise l'image GHCR pré-construite (plutôt que `build:` ci-dessus) : sans
     # ça, un redeploy réutilise l'image locale en cache et ne re-tire pas un `:latest` plus
     # récent (même symptôme vécu sur platform-api le 2026-07-05 : redeploys sans effet).
@@ -169,7 +169,7 @@ services:
   # qu'un seul VPS est en jeu). `--group-id <n>` = index dans `assignment_patterns["10"]`,
   # traçabilité/logging uniquement (le routage reste au Gateway, `ShardTopology::locate`).
   shard-a:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--group-id", "0", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -182,7 +182,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-b:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--group-id", "1", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -195,7 +195,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-c:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27032", "--manifest", "/etc/tessera/server.toml", "--group-id", "2", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -208,7 +208,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-d:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27033", "--manifest", "/etc/tessera/server.toml", "--group-id", "3", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -221,7 +221,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-e:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27034", "--manifest", "/etc/tessera/server.toml", "--group-id", "4", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -234,7 +234,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-f:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27035", "--manifest", "/etc/tessera/server.toml", "--group-id", "5", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -247,7 +247,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-g:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27036", "--manifest", "/etc/tessera/server.toml", "--group-id", "6", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -260,7 +260,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-h:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27037", "--manifest", "/etc/tessera/server.toml", "--group-id", "7", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -273,7 +273,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-i:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27038", "--manifest", "/etc/tessera/server.toml", "--group-id", "8", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -286,7 +286,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-j:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27039", "--manifest", "/etc/tessera/server.toml", "--group-id", "9", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -299,7 +299,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   heartbeat:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.1
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
     pull_policy: always
     entrypoint: ["tessera-directory"]
     command: ["heartbeat",
