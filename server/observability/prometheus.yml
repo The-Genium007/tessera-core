@@ -4,11 +4,13 @@
 # cf. tessera-core/server/src/metrics.rs) — même port que celui laissé volontairement NON publié
 # via `ports:` sur l'hôte (accessible seulement à l'intérieur du réseau Docker interne).
 #
-# ⚠️ Cible actuelle : 'gateway:9100' uniquement. Les 10 shards exposent aussi un endpoint métriques
+# ⚠️ Cible actuelle : 'gateway:9100' uniquement. Les 9 shards exposent aussi un endpoint métriques
 # (--metrics-addr 0.0.0.0:9101, cf. docker-compose.yml) mais ne sont PAS encore scrapés ici — portée
 # volontairement limitée à la boucle Gateway pour cette tâche (buckets de tick, overruns, durée de
-# boucle Gateway). Ajouter un job 'tessera-shard' avec les 10 cibles (shard-a:9101 … shard-j:9101)
+# boucle Gateway). Ajouter un job 'tessera-shard' avec les 9 cibles (shard-a:9101 … shard-i:9101)
 # est une extension naturelle, pas incluse ici pour ne pas dépasser le périmètre de Task 6.
+# (9 et non 10 depuis le 2026-08-04 : l'artefact d'autorité est passé à 9 cellules, `shard-j`
+# a été retiré du compose. Aucune cible à corriger ici puisque aucun shard n'est scrapé.)
 global:
   scrape_interval: 15s
 
