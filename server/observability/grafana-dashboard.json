@@ -1,0 +1,145 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "p99 durée de tick (s)",
+      "description": "histogram_quantile(0.99, tessera_tick_duration_bucket) — budget de tick 50ms (20 Hz) ; seuil d'alerte TickP99High à 0.040s (alert-rules.yml).",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+          "expr": "histogram_quantile(0.99, tessera_tick_duration_bucket)",
+          "legendFormat": "p99 tick",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Joueurs / shard",
+      "description": "tessera_players — nombre de joueurs actuellement suivis par ce process (Gateway ou Shard, cf. metrics.rs).",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+          "expr": "tessera_players",
+          "legendFormat": "joueurs",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Backlog (âge du plus vieux snapshot, ticks)",
+      "description": "tessera_snapshot_age_ticks — 0 = frais ; un backlog croissant signale une diffusion en retard.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+          "expr": "tessera_snapshot_age_ticks",
+          "legendFormat": "backlog (ticks)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Rejets cumulés (flood/anti-triche/serveur plein)",
+      "description": "rate(tessera_rejected_messages_total[5m]) — dérivée du compteur cumulatif, pour voir le débit de rejets plutôt que le total brut.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+          "expr": "rate(tessera_rejected_messages_total[5m])",
+          "legendFormat": "rejets/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Overruns de tick cumulés (>50ms)",
+      "description": "rate(tessera_overruns_total[5m]) — débit de ticks dépassant le budget 20 Hz, cf. record_tick_duration_micros dans metrics.rs.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+          "expr": "rate(tessera_overruns_total[5m])",
+          "legendFormat": "overruns/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Durée de boucle Gateway (µs)",
+      "description": "tessera_gateway_loop_duration_micros — durée de la dernière itération complète de la boucle Gateway (poll + routage + merge + envois). 0 pour un process Shard.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "tessera-prometheus" },
+          "expr": "tessera_gateway_loop_duration_micros",
+          "legendFormat": "durée boucle Gateway",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "µs" },
+        "overrides": []
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["tessera", "sous-projet-c", "observabilite"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Tessera — Robustesse opérationnelle (sous-projet C)",
+  "uid": "tessera-robustesse-op-c",
+  "version": 1,
+  "weekStart": ""
+}

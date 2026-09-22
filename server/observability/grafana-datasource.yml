@@ -1,0 +1,17 @@
+# Provisioning de la source de données Prometheus pour Grafana — sous-projet C (robustesse
+# opérationnelle), Task 6 observabilité. Monté dans le conteneur `grafana` sous
+# /etc/grafana/provisioning/datasources/tessera.yml (répertoire de provisioning standard Grafana,
+# lu automatiquement au démarrage — pas de clic manuel "Add data source" requis).
+#
+# uid doit rester "tessera-prometheus" : référencé tel quel dans chaque panel de
+# grafana-dashboard.json (datasource.uid) — un uid différent casserait le lien dashboard -> source.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: tessera-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

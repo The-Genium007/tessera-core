@@ -1,0 +1,25 @@
+# Config Alertmanager (GABARIT) — sous-projet C (robustesse opérationnelle), Task 6 observabilité.
+#
+# ⚠️ Alertmanager NE SUPPORTE PAS nativement l'interpolation de variable d'environnement dans son
+# YAML (confirmé : issue ouverte prometheus/alertmanager#2818 "Support environment variable
+# substitution in alertmanager's configuration files" — jamais mergée à ce jour ; reconfirmé en
+# local le 2026-07-20 : lancé tel quel comme `--config.file`, Alertmanager crash-loop avec
+# `invalid URL: unsupported scheme "" for URL`, le placeholder `url:` ci-dessous étant lu comme une
+# URL LITTÉRALE, jamais résolue). Ce fichier reste donc un GABARIT versionné (jamais le
+# secret en clair) : monté par docker-compose.yml sous /etc/alertmanager/alertmanager.yml.tmpl
+# (PAS au chemin `--config.file` attendu), substitué via `sed` par l'entrypoint du service
+# `alertmanager` (busybox, présent nativement dans l'image `prom/alertmanager` — pas de dépendance
+# à `envsubst`/`gettext`, absent de cette image, vérifié en local) vers un fichier généré dans le
+# volume /alertmanager avant d'exec le vrai binaire — voir le service `alertmanager` du
+# docker-compose.yml voisin pour le détail exact de la commande. Écarté : un proxy webhook tiers
+# (`alertmanager-discord`) — ajoute un service et une image externe pour un problème qu'un `sed`
+# en une ligne résout ici (Discord accepte nativement le format webhook Slack-like, send_resolved
+# inclus).
+route:
+  receiver: discord
+
+receivers:
+  - name: discord
+    webhook_configs:
+      - url: '${TESSERA_ALERTMANAGER_DISCORD_WEBHOOK}'
+        send_resolved: true
