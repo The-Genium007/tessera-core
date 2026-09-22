@@ -1,10 +1,10 @@
-# docker-compose.yml — topologie réelle TesseraSynth (Gateway + 10 Shards + Postgres + Redis),
+# docker-compose.yml — topologie réelle TesseraSynth (Gateway + 9 Shards + Postgres + Redis),
 # miroir de server.docker.toml. Le manifeste est monté en volume, pas embarqué dans l'image.
 #
-# 10 shards (2026-07-14) : granularité maximale de l'artefact d'autorité Voronoï pour
-# server_count = 10 (1 cellule par groupe, cf. commentaire --group-id du service shard-a
-# ci-dessous). Topologie statique/froide — pas de re-sharding à chaud tant qu'un seul VPS est en
-# jeu (voir §5.6/§7.5 de la roadmap production).
+# 9 shards (2026-08-04, étaient 10 depuis le 2026-07-14) : granularité maximale de l'artefact
+# d'autorité Voronoï pour server_count = 9 (1 cellule par groupe, cf. commentaire --group-id du
+# service shard-a ci-dessous). Topologie statique/froide — pas de re-sharding à chaud tant qu'un
+# seul VPS est en jeu (voir §5.6/§7.5 de la roadmap production).
 #
 # ⚠️ Le jeu parle en UDP (port du Gateway), pas HTTP — pas de tunnel Cloudflare pour ce port,
 # il doit être ouvert directement sur le pare-feu du serveur (voir server/README.md).
@@ -45,7 +45,7 @@ x-logging: &default-logging
 
 services:
   gateway:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     # Si ce service utilise l'image GHCR pré-construite (plutôt que `build:` ci-dessus) : sans
     # ça, un redeploy réutilise l'image locale en cache et ne re-tire pas un `:latest` plus
     # récent (même symptôme vécu sur platform-api le 2026-07-05 : redeploys sans effet).
@@ -82,6 +82,14 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       TESSERA_GATEWAY_METRICS_ADDR: "0.0.0.0:9100"
       TESSERA_SESSION_LOG_PATH: "/data/session.jsonl"
+      # Vitesse de l'horloge du monde, en minutes de jeu par seconde réelle. Absente = 1.0 (cycle
+      # jour/nuit de 24 minutes réelles), qui est le réglage MESURÉ comme invisible : les
+      # corrections d'heure envoyées aux clients valent alors 4 minutes de jeu (F-MND-044).
+      # Au-delà de 3.0 le serveur logue un avertissement et les corrections se voient à l'écran.
+      # ⚠️ L'heure elle-même est persistée dans `/data/world_clock.json` (à côté de `players.json`,
+      # même volume `tessera-players`) : après un redéploiement, le monde REPREND à l'heure qu'il
+      # avait, il ne repart pas à midi. Effacer ce volume remet le monde à 12:00.
+      TESSERA_WORLD_TIME_SCALE: ${TESSERA_WORLD_TIME_SCALE:-1.0}
       TESSERA_GATEWAY_SESSIONLOG_ADDR: "0.0.0.0:9102"
       TESSERA_GATEWAY_SESSIONLOG_HTML_ADDR: "0.0.0.0:9103"
       # IP publique fixe du VPS dev/playtest — utilisée UNIQUEMENT pour construire le lien affiché
@@ -159,17 +167,15 @@ services:
         condition: service_started
       shard-i:
         condition: service_started
-      shard-j:
-        condition: service_started
 
-  # 10 shards = granularité maximale de l'artefact Voronoï pour `server_count = 10`
-  # (`assignment_patterns["10"]` = 1 cellule par groupe, pas de fusion — vérifié via
-  # `python3 -c "json.load(...)"` sur authority.json le 2026-07-14) : topologie **froide**,
+  # 9 shards = granularité maximale de l'artefact Voronoï pour `server_count = 9`
+  # (`assignment_patterns["9"]` = 1 cellule par groupe, pas de fusion — l'artefact ne compte plus
+  # que 9 cellules depuis le 2026-08-04, cf. server.docker.toml) : topologie **froide**,
   # figée au démarrage (§5.6/§7.5 — pas de re-sharding à chaud pour l'instant, inutile tant
-  # qu'un seul VPS est en jeu). `--group-id <n>` = index dans `assignment_patterns["10"]`,
+  # qu'un seul VPS est en jeu). `--group-id <n>` = index dans `assignment_patterns["9"]`,
   # traçabilité/logging uniquement (le routage reste au Gateway, `ShardTopology::locate`).
   shard-a:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27030", "--manifest", "/etc/tessera/server.toml", "--group-id", "0", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -182,7 +188,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-b:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27031", "--manifest", "/etc/tessera/server.toml", "--group-id", "1", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -195,7 +201,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-c:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27032", "--manifest", "/etc/tessera/server.toml", "--group-id", "2", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -208,7 +214,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-d:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27033", "--manifest", "/etc/tessera/server.toml", "--group-id", "3", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -221,7 +227,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-e:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27034", "--manifest", "/etc/tessera/server.toml", "--group-id", "4", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -234,7 +240,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-f:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27035", "--manifest", "/etc/tessera/server.toml", "--group-id", "5", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -247,7 +253,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-g:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27036", "--manifest", "/etc/tessera/server.toml", "--group-id", "6", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -260,7 +266,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-h:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27037", "--manifest", "/etc/tessera/server.toml", "--group-id", "7", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -273,7 +279,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
 
   shard-i:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     command: ["tessera-shard", "0.0.0.0:27038", "--manifest", "/etc/tessera/server.toml", "--group-id", "8", "--metrics-addr", "0.0.0.0:9101"]
     restart: unless-stopped
@@ -285,21 +291,12 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
 
-  shard-j:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
-    pull_policy: always
-    command: ["tessera-shard", "0.0.0.0:27039", "--manifest", "/etc/tessera/server.toml", "--group-id", "9", "--metrics-addr", "0.0.0.0:9101"]
-    restart: unless-stopped
-    mem_limit: ${SHARD_MEM_LIMIT:-512m}
-    cpus: ${SHARD_CPUS:-1.0}
-    logging: *default-logging
-    volumes:
-      - ${MANIFEST_PATH:-./server.docker.toml}:/etc/tessera/server.toml:ro
-    environment:
-      RUST_LOG: ${RUST_LOG:-info}
+  # shard-j (port 27039, --group-id 9) supprimé le 2026-08-04 : l'artefact d'autorité est passé
+  # de 10 à 9 cellules (plancher du proxy de charge, cf. server.docker.toml). Un dixième shard
+  # n'aurait plus de groupe à servir — `assignment_patterns` n'a plus de clé "10".
 
   heartbeat:
-    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.2
+    image: ghcr.io/the-genium007/tessera-server:0.2.0-pts.3
     pull_policy: always
     entrypoint: ["tessera-directory"]
     command: ["heartbeat",
@@ -356,6 +353,78 @@ services:
       timeout: 5s
       retries: 10
 
+  # --- Observabilité (Prometheus/Grafana/Alertmanager, sous-projet C, Task 6) ---
+  # Scrape le Gateway sur son port métriques 9100 (non publié via `ports:`, mais joignable depuis
+  # `prometheus` par nom de service DNS Compose sur le même réseau — voir observability/prometheus.yml).
+  # Pas de `ports:` publié ici non plus par défaut : ce stack est pensé pour un accès interne
+  # (port-forward SSH / VPN) plutôt qu'exposé publiquement comme le port 9103 (logs en direct) —
+  # à revisiter explicitement si un accès public est un jour souhaité (mêmes réserves que 9103,
+  # voir CLAUDE.md).
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - tessera-prometheus-data:/prometheus
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-256m}
+    cpus: ${PROMETHEUS_CPUS:-0.5}
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      - GF_SECURITY_ADMIN_USER=${TESSERA_GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${TESSERA_GRAFANA_ADMIN_PASSWORD:?variable requise}
+    volumes:
+      - ./observability/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/tessera.json:ro
+      - ./observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/tessera.yml:ro
+      - tessera-grafana-data:/var/lib/grafana
+    mem_limit: ${GRAFANA_MEM_LIMIT:-256m}
+    cpus: ${GRAFANA_CPUS:-0.5}
+    depends_on:
+      - prometheus
+
+  # ⚠️ Alertmanager NE substitue PAS lui-même `${VAR}` dans son propre YAML (pas d'interpolation
+  # d'env var native — issue amont prometheus/alertmanager#2818, jamais mergée ; confirmé en local
+  # le 2026-07-20 : lancé tel quel, le conteneur crash-loop avec `invalid URL: unsupported scheme
+  # "" for URL`, `${TESSERA_ALERTMANAGER_DISCORD_WEBHOOK}` étant lu comme une URL littérale). Le
+  # gabarit versionné est donc monté sous `alertmanager.yml.tmpl` (jamais directement au chemin
+  # `--config.file` attendu), et l'entrypoint ci-dessous le substitue via `sed` (busybox, présent
+  # dans cette image — pas de dépendance à `envsubst`/`gettext`, absent de l'image `prom/alertmanager`
+  # de base, vérifié en local) vers un fichier généré dans le volume `/alertmanager` avant d'exec le
+  # vrai binaire. Écarté : un proxy webhook tiers (`alertmanager-discord`) — ajoute un service et une
+  # image externe pour un problème que `sed` résout en une ligne ici.
+  alertmanager:
+    image: prom/alertmanager:latest
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      - TESSERA_ALERTMANAGER_DISCORD_WEBHOOK=${TESSERA_ALERTMANAGER_DISCORD_WEBHOOK:?variable requise}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      # `$$` (pas `$`) devant CHAQUE référence à la variable : Compose interpole lui-même tout
+      # `${VAR}`/`$VAR` non échappé dans ce bloc AVANT de l'écrire dans le conteneur (piège trouvé
+      # en local le 2026-07-20 — `docker compose config` montrait le webhook déjà en clair dans le
+      # pattern sed côté hôte). `$$VAR` dans le YAML devient littéralement `$VAR` une fois passé
+      # au conteneur, où c'est alors le shell QUI L'INTERPRÈTE (comportement voulu, une seule fois,
+      # côté conteneur).
+      - |
+        set -e
+        sed "s#\$${TESSERA_ALERTMANAGER_DISCORD_WEBHOOK}#$$TESSERA_ALERTMANAGER_DISCORD_WEBHOOK#g" \
+          /etc/alertmanager/alertmanager.yml.tmpl > /alertmanager/alertmanager.yml
+        exec /bin/alertmanager --config.file=/alertmanager/alertmanager.yml --storage.path=/alertmanager
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml.tmpl:ro
+      - tessera-alertmanager-data:/alertmanager
+    mem_limit: ${ALERTMANAGER_MEM_LIMIT:-128m}
+    cpus: ${ALERTMANAGER_CPUS:-0.25}
+
 volumes:
   tessera-players:
   tessera-postgres-data:
+  tessera-prometheus-data:
+  tessera-grafana-data:
+  tessera-alertmanager-data:
