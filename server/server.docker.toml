@@ -10,13 +10,18 @@ max_players = 16
 tags = ["dev", "test"]
 discord_url = ""
 website_url = "https://tesserasynth.net"
-required_modset = "0.2.0-pts.5"
+required_modset = "0.2.0-pts.6"
 voice_required = false
 # Playtest 2 (2026-07-13+) : auth ZITADEL réelle exigée au Join (JWT vérifié), et bascule vers
 # PostgresStore (voir bin/gateway.rs) — nécessite TESSERA_POSTGRES_URL posée côté Dokploy.
 public = true
 
 [runtime]
+# Les deux catalogues sont EMBARQUÉS dans l'image (Dockerfile). Sans ces lignes, le serveur
+# n'arbitre aucun ascenseur et refuse toute création portant un avatar — en silence côté joueur
+# (playtest 0.2.0-pts.5, 2026-09-23).
+elevator_catalog_path = "/etc/tessera/elevator-catalog.toml"
+puppet_catalog_path = "/etc/tessera/puppet-catalog.json"
 whitelist = false
 store_path = "/data/players.json"
 
